@@ -34,4 +34,5 @@ Needs gcc, curl, sha256sum and python3 (the first build downloads and compiles a
 
 ## License
 
-None chosen yet. Until one is added, all rights are reserved.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.
