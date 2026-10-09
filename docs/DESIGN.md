@@ -66,4 +66,4 @@ Out:
 
 - Packaging: a loadable extension still runs inside whatever SQLite the host program links, which may lack the session extension and batch-atomic support. Does forkdb ship its own SQLite (simplest, but a second copy of SQLite in the process) or require a capable one?
 - Language for the real implementation (C for the VFS is natural; the CLI and library bindings could be Rust or Go).
-- License.
+- ~~License~~ Decided: MIT OR Apache-2.0, as in the author's other projects.
