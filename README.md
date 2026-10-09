@@ -2,7 +2,7 @@
 
 Instant-branching, copy-on-write SQLite databases for local development, testing and agent sandboxing: fork a database in microseconds, let a test or an agent do anything to the fork, then look at the diff and promote it or throw it away.
 
-**Status: just started.** The form factor is decided and a feasibility spike has validated the core mechanics. There is **no product code yet**: nothing here is installable.
+**Status: just started.** The form factor is decided, a feasibility spike has validated the core mechanics, and the durable page store underneath is built and power-loss tested on its own. It is not yet connected to SQLite: nothing here is installable.
 
 ## The idea
 
@@ -17,6 +17,7 @@ Instant-branching, copy-on-write SQLite databases for local development, testing
 | [docs/DESIGN.md](docs/DESIGN.md) | Why SQLite VFS (and not an embedded KV store or a proxy over Postgres/MySQL), the planned v0.1 scope, what is deliberately left out |
 | [docs/SPIKE-FINDINGS.md](docs/SPIKE-FINDINGS.md) | What the spike proved, measured, and what it did not show |
 | [spike/](spike/README.md) | The throwaway spike: one C file, build and run instructions, recorded results |
+| [docs/DURABLE-STORE.md](docs/DURABLE-STORE.md) | The durable, branchable page store ([store/](store)): format, recovery, the power-loss test harness and what it does not cover |
 
 ## Reproduce the spike
 
