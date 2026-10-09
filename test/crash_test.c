@@ -1,6 +1,6 @@
 /* crash_test: power-loss testing of fkstore on simdisk.
  *
- * For seeded random workloads (commits, forks, discards over up to 8 branches), the power is cut before every I/O event,
+ * For seeded random workloads (commits, forks, discards and compactions over up to 8 branches), the power is cut before every I/O event,
  * the surviving disk image is built in every pessimistic way simdisk allows, and the recovered store must equal the
  * oracle state after exactly the acknowledged operations, or after those plus the one in flight. Also checks: open always
  * succeeds, recovery is idempotent, a crash DURING recovery is survivable, the store is appendable after recovery,
@@ -18,7 +18,7 @@
 
 typedef struct { int alive; uint32_t size; uint8_t has[MAXPG]; uint8_t pg[MAXPG][FK_PAGE]; } MB;
 typedef struct { uint32_t nb; MB b[MAXBR]; } Model;
-typedef struct { int kind; /* 0 commit, 1 fork, 2 discard */ uint32_t br, np, pgno[3], new_size, expect_dst; uint64_t key; } Op;
+typedef struct { int kind; /* 0 commit, 1 fork, 2 discard, 3 compact (changes nothing the oracle can see) */ uint32_t br, np, pgno[3], new_size, expect_dst; uint64_t key; } Op;
 
 static void gen_page(uint64_t key, uint8_t *buf) {
   Rng r;
@@ -34,7 +34,8 @@ static void model_commit(Model *M, const Op *o) {
 static void model_apply(Model *M, const Op *o) {
   if (o->kind == 0) model_commit(M, o);
   else if (o->kind == 1) { M->b[M->nb] = M->b[o->br]; M->nb++; }
-  else M->b[o->br].alive = 0;
+  else if (o->kind == 2) M->b[o->br].alive = 0;
+  /* kind 3: compaction preserves every branch, page and size */
 }
 static int gen_ops(uint64_t seed, int K, Op *ops, Model *states) {
   Rng r;
@@ -50,6 +51,7 @@ static int gen_ops(uint64_t seed, int K, Op *ops, Model *states) {
     memset(&o, 0, sizeof o);
     uint32_t roll = rng_below(&r, 100);
     if (roll < 25 && M->nb < MAXBR) { o.kind = 1; o.br = alive[rng_below(&r, na)]; o.expect_dst = M->nb; }
+    else if (roll >= 88) o.kind = 3;
     else if (roll < 40) {
       uint32_t cand[MAXBR], nc = 0;
       for (uint32_t k = 0; k < na; k++) if (alive[k] != 0) cand[nc++] = alive[k];
@@ -90,6 +92,7 @@ static int run_op(fk_store *s, const Op *o) {
     if (rc == 0 && dst != o->expect_dst) return -99;
     return rc;
   }
+  if (o->kind == 3) return fk_compact(s);
   return fk_discard(s, o->br);
 }
 
@@ -115,7 +118,7 @@ static int equal_state(fk_store *s, const Model *M) {
   return 1;
 }
 
-typedef struct { long images, ok_old, ok_new, violations, open_fail, nested, cont; } Stats;
+typedef struct { long images, ok_old, ok_new, violations, open_fail, nested, cont, compactions; } Stats;
 typedef struct {
   const Model *states;
   int cand[2], ncand;
@@ -220,7 +223,9 @@ static void verify_image(void *vc, const uint8_t *img, uint64_t len) {
       return;
     }
     SimDisk d2;
-    sim_init(&d2, d.dur, d.dur_len);
+    uint64_t dl = 0;
+    const uint8_t *dimg = sim_durable(&d, &dl);
+    sim_init(&d2, dimg, dl);
     io = sim_io(&d2);
     fk_store *s2 = NULL;
     if (fk_open(&io, &s2) != 0 || !equal_state(s2, &expect)) {
@@ -249,12 +254,30 @@ static long run_case(uint64_t seed, int K, long N, int mode, Stats *st, long *ev
   fk_io io = sim_io(&d);
   fk_store *s = NULL;
   int acked = 0, inflight = 0;
+  long ev_work = 0; /* events of the workload itself, not of the checks after it */
   int rc = fk_open(&io, &s);
   if (rc == 0) {
     for (int i = 0; i < K; i++) {
       rc = run_op(s, &ops[i]);
+      ev_work = d.events;
+      if (rc && ops[i].kind == 3 && mode == 1 && !fk_is_failed(s)) { rc = 0; acked++; continue; } /* a compaction that fails before the swap leaves the store untouched and usable */
       if (rc) { inflight = 1; break; }
       acked++;
+      if (ops[i].kind == 3) {
+        /* the in-memory state after a compaction must equal the oracle, and the file must now hold nothing but live data */
+        uint64_t fb = 0, lb = 0, fb2 = 0, lb2 = 0;
+        if (N < 0 && mode == 0) st->compactions++;
+        if (!equal_state(s, &states[i + 1])) {
+          printf("  VIOLATION seed=%llu compaction changed the visible state (%s)\n", (unsigned long long)seed, why);
+          st->violations++;
+        } else if (fk_stats(s, &fb, &lb) != 0 || fb != lb) {
+          printf("  VIOLATION seed=%llu after compaction the file is %llu bytes but the live data is %llu\n", (unsigned long long)seed, (unsigned long long)fb, (unsigned long long)lb);
+          st->violations++;
+        } else if (N < 0 && mode == 0 && (fk_compact(s) != 0 || fk_stats(s, &fb2, &lb2) != 0 || fb2 != fb || !equal_state(s, &states[i + 1]))) {
+          printf("  VIOLATION seed=%llu a second compaction changed the file (%llu -> %llu bytes) or the state\n", (unsigned long long)seed, (unsigned long long)fb, (unsigned long long)fb2);
+          st->violations++;
+        }
+      }
     }
     if (rc && mode == 1) {
       /* fail-stop: after an I/O error nothing may be accepted, reads included */
@@ -268,7 +291,7 @@ static long run_case(uint64_t seed, int K, long N, int mode, Stats *st, long *ev
     }
     fk_close(s);
   }
-  if (events_out) *events_out = d.events;
+  if (events_out) *events_out = ev_work;
   if (rc != 0 && mode == 0 && !d.dead) {
     printf("  VIOLATION seed=%llu unexpected error rc=%d without a power cut\n", (unsigned long long)seed, rc);
     st->violations++;
@@ -288,12 +311,52 @@ static long run_case(uint64_t seed, int K, long N, int mode, Stats *st, long *ev
   return 0;
 }
 
+/* No power cut: long workloads with several compactions in them, checked against the oracle after every operation and again
+ * after a close and reopen. Cheap, so it can run thousands of seeds; it is what exercises layer folding. */
+static long logic_case(uint64_t seed, int K, long *compactions) {
+  Op ops[MAXOPS];
+  Model *states = malloc((size_t)(MAXOPS + 1) * sizeof *states);
+  gen_ops(seed * 977 + 5, K, ops, states);
+  SimDisk d;
+  sim_init(&d, NULL, 0);
+  fk_io io = sim_io(&d);
+  fk_store *s = NULL;
+  long bad = 0;
+  if (fk_open(&io, &s) != 0) { free(states); sim_free(&d); return 1; }
+  for (int i = 0; i < K && !bad; i++) {
+    int rc = run_op(s, &ops[i]);
+    if (rc) { printf("  VIOLATION logic seed=%llu op %d (kind %d) failed rc=%d\n", (unsigned long long)seed, i, ops[i].kind, rc); bad = 1; break; }
+    if (!equal_state(s, &states[i + 1])) { printf("  VIOLATION logic seed=%llu after op %d (kind %d): %s\n", (unsigned long long)seed, i, ops[i].kind, why); bad = 1; break; }
+    if (ops[i].kind == 3) {
+      uint64_t fb = 0, lb = 0;
+      (*compactions)++;
+      if (fk_stats(s, &fb, &lb) != 0 || fb != lb) { printf("  VIOLATION logic seed=%llu after compaction the file is %llu bytes, live data %llu\n", (unsigned long long)seed, (unsigned long long)fb, (unsigned long long)lb); bad = 1; }
+    }
+  }
+  fk_close(s);
+  if (!bad) {
+    uint64_t dl = 0;
+    const uint8_t *dimg = sim_durable(&d, &dl);
+    SimDisk d2;
+    sim_init(&d2, dimg, dl);
+    io = sim_io(&d2);
+    fk_store *s2 = NULL;
+    if (fk_open(&io, &s2) != 0 || !equal_state(s2, &states[K])) { printf("  VIOLATION logic seed=%llu reopen: %s\n", (unsigned long long)seed, s2 ? why : "open failed"); bad = 1; }
+    if (s2) fk_close(s2);
+    sim_free(&d2);
+  }
+  sim_free(&d);
+  free(states);
+  return bad;
+}
+
 int main(int argc, char **argv) {
   int seeds = argc > 1 ? atoi(argv[1]) : 10, K = argc > 2 ? atoi(argv[2]) : 7;
   if (K > MAXOPS) K = MAXOPS;
   Stats st;
   memset(&st, 0, sizeof st);
   long cases = 0, total_events = 0;
+  int logic_seeds = argc > 3 ? atoi(argv[3]) : 3000;
 #ifdef FK_BUG_SKIP_FSYNC
   printf("MUTANT: commits are acknowledged without fsync\n");
 #endif
@@ -303,9 +366,26 @@ int main(int argc, char **argv) {
 #ifdef FK_BUG_NO_TRUNC
   printf("MUTANT: recovery does not truncate the torn tail\n");
 #endif
+#ifdef FK_BUG_COMPACT_NO_TMP_SYNC
+  printf("MUTANT: compaction swaps in the new file without syncing it\n");
+#endif
+#ifdef FK_BUG_COMPACT_NO_DIRSYNC
+  printf("MUTANT: compaction does not sync the directory after the rename\n");
+#endif
+#ifdef FK_BUG_COMPACT_LOSE_PARENT
+  printf("MUTANT: compaction loses the pages of a folded layer\n");
+#endif
+#ifdef FK_BUG_COMPACT_DROP_TOMB
+  printf("MUTANT: compaction drops tombstones that hide a lower layer\n");
+#endif
 #ifdef FK_BUG_EARLY_MARKER
   printf("MUTANT: the durable-end marker is written before the data it covers is synced\n");
 #endif
+  {
+    long lc = 0;
+    for (int sd = 1; sd <= logic_seeds; sd++) st.violations += logic_case((uint64_t)sd, MAXOPS, &lc);
+    printf("logic pass: %d workloads of %d operations with %ld compactions, no power cut: violations so far %ld\n", logic_seeds, MAXOPS, lc, st.violations);
+  }
   for (int sd = 1; sd <= seeds; sd++) {
     long events = 0;
     run_case((uint64_t)sd, K, -1, 0, &st, &events); /* no crash: also measures the number of events */
@@ -318,7 +398,7 @@ int main(int argc, char **argv) {
   }
   printf("\nworkloads x cut points: %ld (incl. fsync-failure cases), I/O events cut: %ld\n", cases, total_events);
   printf("post-crash images checked: %ld (recovered to acknowledged state: %ld, to acknowledged+in-flight: %ld)\n", st.images, st.ok_old, st.ok_new);
-  printf("append-after-recovery checks: %ld, crash-during-recovery cut points: %ld\n", st.cont, st.nested);
+  printf("append-after-recovery checks: %ld, crash-during-recovery cut points: %ld, compactions in the workloads: %ld\n", st.cont, st.nested, st.compactions);
   printf("TOTAL VIOLATIONS=%ld\n", st.violations);
   return st.violations ? 1 : 0;
 }

@@ -1,18 +1,22 @@
-/* fkstore.c: see docs/DURABLE-STORE.md for the format and the recovery argument. */
+/* fkstore.c: see docs/DURABLE-STORE.md for the format, the recovery argument and compaction. */
 #include "fkstore.h"
 
 #include <stdlib.h>
 #include <string.h>
 
 #define MAGIC 0x31524b46u /* "FKR1" little-endian */
+#define FK_VERSION 2u     /* 2 added snapshots (compaction); version 1 files are still read */
 #define HDR_SZ 4096u
 #define REC_HDR 32u
 #define PAGE_PAYLOAD (8u + FK_PAGE)
+#define REC_PAGE_SZ (REC_HDR + PAGE_PAYLOAD)
 #define COMMIT_PAYLOAD 20u
 #define TOMB UINT64_MAX
+#define NONE UINT32_MAX
 #define FK_MARK_EVERY 32u /* durable-end marker: refresh after this many committed units (and on close) */
+#define FK_MAX_SNAP (1u << 30)
 
-enum { T_PAGE = 1, T_COMMIT = 2, T_FORK = 3, T_DISCARD = 4 };
+enum { T_PAGE = 1, T_COMMIT = 2, T_FORK = 3, T_DISCARD = 4, T_CPAGE = 5, T_SNAP = 6, T_SNAPEND = 7 };
 
 /* ---------- checksums and encoding ---------- */
 static uint32_t crc_tab[256];
@@ -37,13 +41,15 @@ static void put32(uint8_t *p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = (
 static void put64(uint8_t *p, uint64_t v) { for (int i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i)); }
 static uint16_t get16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static uint32_t get32(const uint8_t *p) { uint32_t v = 0; for (int i = 3; i >= 0; i--) v = (v << 8) | p[i]; return v; }
-__attribute__((unused)) static uint64_t get64(const uint8_t *p) { uint64_t v = 0; for (int i = 7; i >= 0; i--) v = (v << 8) | p[i]; return v; }
+static uint64_t get64(const uint8_t *p) { uint64_t v = 0; for (int i = 7; i >= 0; i--) v = (v << 8) | p[i]; return v; }
 
 /* ---------- in-memory layers (rebuilt from the log on open) ---------- */
 typedef struct Layer {
   struct Layer *parent;
   uint64_t *off; /* page number -> offset of its PAGE record; 0 = not in this layer; TOMB = zero page */
   uint32_t cap, size, touched;
+  uint32_t kids, heads, idx; /* scratch for compaction planning */
+  uint8_t seen;
 } Layer;
 
 typedef struct { Layer *head; int alive; } Branch;
@@ -82,6 +88,7 @@ static Layer *layer_new(fk_store *s, Layer *parent) {
   return l;
 }
 static int layer_set(Layer *l, uint32_t pgno, uint64_t v) {
+  if (pgno >= FK_MAX_PAGES) return FK_EINVAL;
   if (pgno >= l->cap) {
     uint32_t nc = l->cap ? l->cap : 16;
     while (nc <= pgno) nc *= 2;
@@ -129,8 +136,8 @@ static int apply_fork(fk_store *s, uint32_t src, uint32_t dst) {
 }
 
 /* ---------- log records ---------- */
-static int put_rec(fk_store *s, uint16_t type, const uint8_t *pay, uint32_t len, uint64_t *w_end, uint64_t *w_seq, uint32_t *w_last,
-                   uint64_t *rec_off) {
+static int put_rec_io(const fk_io *io, uint16_t type, const uint8_t *pay, uint32_t len, uint64_t *w_end, uint64_t *w_seq, uint32_t *w_last,
+                      uint64_t *rec_off) {
   uint8_t *buf = calloc(1, REC_HDR + (size_t)len);
   if (!buf) return FK_ENOMEM;
   put32(buf, MAGIC);
@@ -142,9 +149,8 @@ static int put_rec(fk_store *s, uint16_t type, const uint8_t *pay, uint32_t len,
   uint32_t c = fk_crc32c(0, buf, REC_HDR); /* the crc field is still zero here */
   c = fk_crc32c(c, buf + REC_HDR, len);
   put32(buf + 24, c);
-  if (s->io.pwrite(s->io.ctx, *w_end, buf, REC_HDR + (size_t)len) != 0) {
+  if (io->pwrite(io->ctx, *w_end, buf, REC_HDR + (size_t)len) != 0) {
     free(buf);
-    s->failed = 1;
     return FK_EIO;
   }
   if (rec_off) *rec_off = *w_end;
@@ -153,6 +159,12 @@ static int put_rec(fk_store *s, uint16_t type, const uint8_t *pay, uint32_t len,
   *w_last = c;
   free(buf);
   return FK_OK;
+}
+static int put_rec(fk_store *s, uint16_t type, const uint8_t *pay, uint32_t len, uint64_t *w_end, uint64_t *w_seq, uint32_t *w_last,
+                   uint64_t *rec_off) {
+  int rc = put_rec_io(&s->io, type, pay, len, w_end, w_seq, w_last, rec_off);
+  if (rc == FK_EIO) s->failed = 1;
+  return rc;
 }
 static int do_sync(fk_store *s) {
 #ifdef FK_BUG_SKIP_FSYNC
@@ -184,14 +196,17 @@ static void read_marker(fk_store *s) {
   s->mark_gen = best_gen;
   s->mark_end = best_end;
 }
-static int write_marker(fk_store *s, uint64_t end, int sync) {
+static int marker_put(const fk_io *io, uint64_t gen, uint64_t end) {
   uint8_t m[32];
   memset(m, 0, sizeof m);
   memcpy(m, "FKMK", 4);
-  put64(m + 8, s->mark_gen + 1);
+  put64(m + 8, gen);
   put64(m + 16, end);
   put32(m + 4, fk_crc32c(0, m + 8, 16));
-  if (s->io.pwrite(s->io.ctx, 512u * (1 + (unsigned)((s->mark_gen + 1) & 1)), m, 32) != 0) return FK_EIO;
+  return io->pwrite(io->ctx, 512u * (1 + (unsigned)(gen & 1)), m, 32) == 0 ? FK_OK : FK_EIO;
+}
+static int write_marker(fk_store *s, uint64_t end, int sync) {
+  if (marker_put(&s->io, s->mark_gen + 1, end) != FK_OK) return FK_EIO;
   if (sync && s->io.fsync(s->io.ctx) != 0) return FK_EIO;
   s->mark_gen++;
   s->mark_end = end;
@@ -203,25 +218,121 @@ static void maybe_mark(fk_store *s) {
   else s->failed = 1; /* the commit itself is durable and acknowledged; further use needs a reopen */
 }
 
+/* ---------- snapshots (written by compaction) ----------
+ * A snapshot is the first unit of a compacted file: CPAGE* SNAP* SNAPEND. CPAGE records are the live pages, each once.
+ * SNAP records carry, in chunks, a byte stream that describes the layer graph:
+ *   u32 branches, u32 layers; per layer: u32 parent (or NONE), u32 size, u32 n, n x (u32 page, u64 offset of its CPAGE or TOMB);
+ *   per branch: u8 alive, u32 head layer.
+ * SNAPEND carries the stream length and its checksum. */
+typedef struct { uint8_t *p; size_t n, cap; int err; } Buf;
+static void b_put(Buf *b, const void *d, size_t n) {
+  if (b->err) return;
+  if (b->n + n > b->cap) {
+    size_t nc = b->cap ? b->cap * 2 : 4096;
+    while (nc < b->n + n) nc *= 2;
+    uint8_t *q = realloc(b->p, nc);
+    if (!q) { b->err = 1; return; }
+    b->p = q;
+    b->cap = nc;
+  }
+  memcpy(b->p + b->n, d, n);
+  b->n += n;
+}
+static void b_u32(Buf *b, uint32_t v) { uint8_t t[4]; put32(t, v); b_put(b, t, 4); }
+static void b_u64(Buf *b, uint64_t v) { uint8_t t[8]; put64(t, v); b_put(b, t, 8); }
+typedef struct { const uint8_t *p; size_t n, i; int bad; } Rd;
+static uint32_t r_u32(Rd *r) { if (r->bad || r->n - r->i < 4) { r->bad = 1; return 0; } uint32_t v = get32(r->p + r->i); r->i += 4; return v; }
+static uint64_t r_u64(Rd *r) { if (r->bad || r->n - r->i < 8) { r->bad = 1; return 0; } uint64_t v = get64(r->p + r->i); r->i += 8; return v; }
+static uint8_t r_u8(Rd *r) { if (r->bad || r->n - r->i < 1) { r->bad = 1; return 0; } return r->p[r->i++]; }
+
+static const PendPage *cp_find(const PendPage *cp, uint32_t ncp, uint64_t off) {
+  uint32_t lo = 0, hi = ncp;
+  while (lo < hi) {
+    uint32_t mid = lo + (hi - lo) / 2;
+    if (cp[mid].off < off) lo = mid + 1; else hi = mid;
+  }
+  return lo < ncp && cp[lo].off == off ? &cp[lo] : NULL;
+}
+
+/* Replace the whole in-memory state with the snapshot. Builds the new layers on the side: on failure nothing has changed. */
+static int snap_load(fk_store *s, const uint8_t *st, size_t n, const PendPage *cp, uint32_t ncp) {
+  Rd r = { st, n, 0, 0 };
+  uint32_t nb = r_u32(&r), nl = r_u32(&r);
+  if (r.bad || nb == 0 || nb > FK_MAX_BRANCHES || nl == 0 || nl > n / 12) return FK_ECORRUPT;
+  Layer **L = calloc(nl, sizeof *L);
+  if (!L) return FK_ENOMEM;
+  int rc = FK_OK;
+  for (uint32_t i = 0; i < nl && rc == FK_OK; i++) {
+    uint32_t par = r_u32(&r), size = r_u32(&r), cnt = r_u32(&r);
+    if (r.bad || (par != NONE && par >= i) || size > FK_MAX_PAGES || (uint64_t)cnt * 12 > n - r.i) { rc = FK_ECORRUPT; break; }
+    Layer *l = calloc(1, sizeof *l);
+    if (!l) { rc = FK_ENOMEM; break; }
+    L[i] = l;
+    l->parent = par == NONE ? NULL : L[par];
+    l->size = size;
+    int64_t prev = -1;
+    for (uint32_t c = 0; c < cnt && rc == FK_OK; c++) {
+      uint32_t pg = r_u32(&r);
+      uint64_t off = r_u64(&r);
+      if (r.bad || (int64_t)pg <= prev || pg >= FK_MAX_PAGES) { rc = FK_ECORRUPT; break; }
+      prev = pg;
+      if (off != TOMB) { /* it must be one of this snapshot's page copies, and a copy of this page */
+        const PendPage *q = cp_find(cp, ncp, off);
+        if (!q || q->pgno != pg) { rc = FK_ECORRUPT; break; }
+      }
+      rc = layer_set(l, pg, off);
+    }
+  }
+  Branch br[FK_MAX_BRANCHES];
+  memset(br, 0, sizeof br);
+  for (uint32_t b = 0; b < nb && rc == FK_OK; b++) {
+    uint8_t alive = r_u8(&r);
+    uint32_t head = r_u32(&r);
+    if (r.bad || alive > 1 || (alive && head >= nl) || (b == 0 && !alive)) { rc = FK_ECORRUPT; break; }
+    br[b].alive = alive;
+    br[b].head = alive ? L[head] : NULL;
+  }
+  if (rc == FK_OK && r.i != n) rc = FK_ECORRUPT;
+  if (rc != FK_OK) {
+    for (uint32_t i = 0; i < nl; i++) if (L[i]) { free(L[i]->off); free(L[i]); }
+    free(L);
+    return rc;
+  }
+  for (size_t i = 0; i < s->nlayers; i++) { free(s->layers[i]->off); free(s->layers[i]); }
+  free(s->layers);
+  s->layers = L;
+  s->nlayers = s->caplayers = nl;
+  memcpy(s->br, br, sizeof br);
+  s->nb = nb;
+  return FK_OK;
+}
+
 /* ---------- open and recovery ---------- */
-static int write_header(fk_store *s) {
+static int write_header(const fk_io *io, int sync) {
   uint8_t h[HDR_SZ];
   memset(h, 0, sizeof h);
   memcpy(h, "FORKDBST", 8);
-  put32(h + 8, 1);
+  put32(h + 8, FK_VERSION);
   put32(h + 12, FK_PAGE);
   put32(h + 16, fk_crc32c(0, h, 16));
-  if (s->io.truncate(s->io.ctx, 0) != 0) return FK_EIO;
-  if (s->io.pwrite(s->io.ctx, 0, h, sizeof h) != 0) return FK_EIO;
-  if (s->io.fsync(s->io.ctx) != 0) return FK_EIO;
+  if (io->truncate(io->ctx, 0) != 0) return FK_EIO;
+  if (io->pwrite(io->ctx, 0, h, sizeof h) != 0) return FK_EIO;
+  if (sync && io->fsync(io->ctx) != 0) return FK_EIO;
   return FK_OK;
 }
-static int header_ok(const uint8_t *h) { return memcmp(h, "FORKDBST", 8) == 0 && get32(h + 8) == 1 && get32(h + 12) == FK_PAGE && get32(h + 16) == fk_crc32c(0, h, 16); }
+static uint32_t header_ver(const uint8_t *h) {
+  uint32_t v = get32(h + 8);
+  if (memcmp(h, "FORKDBST", 8) != 0 || (v != 1 && v != 2) || get32(h + 12) != FK_PAGE || get32(h + 16) != fk_crc32c(0, h, 16)) return 0;
+  return v;
+}
 
-static int scan(fk_store *s, int64_t fsize) {
+static int scan(fk_store *s, int64_t fsize, uint32_t version) {
   uint64_t off = HDR_SZ, c_end = HDR_SZ, seq = 1, c_seq = 1;
   uint32_t last = 0, c_last = 0, npend = 0, cpend = 0, pbranch = 0;
-  PendPage *pend = NULL;
+  PendPage *pend = NULL, *cp = NULL;
+  uint32_t ncp = 0, ccp = 0;
+  uint8_t *stream = NULL;
+  size_t slen = 0, scap = 0;
   uint8_t h[REC_HDR];
   uint8_t pay[PAGE_PAYLOAD];
   int rc = FK_OK;
@@ -239,6 +350,10 @@ static int scan(fk_store *s, int64_t fsize) {
     put32(hc + 24, 0);
     uint32_t c = fk_crc32c(fk_crc32c(0, hc, REC_HDR), pay, len);
     if (c != crc) break;
+
+    /* Snapshot records are only valid as the first unit of a version 2 file; ordinary records only outside one. */
+    int snap_type = type == T_CPAGE || type == T_SNAP || type == T_SNAPEND;
+    if (snap_type ? (version < 2 || c_end != HDR_SZ || npend) : (ncp || slen)) break;
 
     int unit = 0; /* 1 when this record completes a committed unit */
     if (type == T_PAGE) {
@@ -260,7 +375,7 @@ static int scan(fk_store *s, int64_t fsize) {
     } else if (type == T_COMMIT) {
       if (len != COMMIT_PAYLOAD) break;
       uint32_t b = get32(pay), np = get32(pay + 4), nsize = get32(pay + 8);
-      if (b >= s->nb || !s->br[b].alive || np != npend || (npend && b != pbranch)) break;
+      if (b >= s->nb || !s->br[b].alive || np != npend || (npend && b != pbranch) || nsize > FK_MAX_PAGES) break;
       int bad = 0;
       for (uint32_t i = 0; i < npend; i++) if (pend[i].pgno >= nsize) bad = 1;
       if (bad) break;
@@ -279,6 +394,39 @@ static int scan(fk_store *s, int64_t fsize) {
       if (b == 0 || b >= s->nb || !s->br[b].alive) break;
       s->br[b].alive = 0;
       unit = 1;
+    } else if (type == T_CPAGE) {
+      if (len != PAGE_PAYLOAD || slen || get32(pay) != NONE || get32(pay + 4) >= FK_MAX_PAGES) break;
+      if (ncp == ccp) {
+        uint32_t nc = ccp ? ccp * 2 : 64;
+        PendPage *n = realloc(cp, nc * sizeof *n);
+        if (!n) { rc = FK_ENOMEM; break; }
+        cp = n;
+        ccp = nc;
+      }
+      cp[ncp].pgno = get32(pay + 4);
+      cp[ncp].off = off;
+      cp[ncp].data = NULL;
+      ncp++;
+    } else if (type == T_SNAP) {
+      if (len == 0 || slen + len > FK_MAX_SNAP) break;
+      if (slen + len > scap) {
+        size_t nc = scap ? scap * 2 : 8192;
+        while (nc < slen + len) nc *= 2;
+        uint8_t *n = realloc(stream, nc);
+        if (!n) { rc = FK_ENOMEM; break; }
+        stream = n;
+        scap = nc;
+      }
+      memcpy(stream + slen, pay, len);
+      slen += len;
+    } else if (type == T_SNAPEND) {
+      if (len != 12 || !slen || get64(pay) != slen || get32(pay + 8) != fk_crc32c(0, stream, slen)) break;
+      int r2 = snap_load(s, stream, slen, cp, ncp);
+      if (r2 == FK_ECORRUPT) break;
+      if (r2 != FK_OK) { rc = r2; break; }
+      ncp = 0;
+      slen = 0;
+      unit = 1;
     } else {
       break;
     }
@@ -288,6 +436,8 @@ static int scan(fk_store *s, int64_t fsize) {
     if (unit) { c_end = off; c_seq = seq; c_last = last; }
   }
   free(pend);
+  free(cp);
+  free(stream);
   if (rc != FK_OK) return rc;
   if (c_end < s->mark_end) return FK_ECORRUPT; /* data that was durably committed is gone or damaged: do not cut anything off */
   s->end = c_end;
@@ -308,21 +458,28 @@ int fk_open(const fk_io *io, fk_store **out) {
   if (!s) return FK_ENOMEM;
   s->io = *io;
   int rc;
+#ifndef FK_BUG_COMPACT_NO_CLEANUP
+  /* A temporary file left by a compaction that did not finish is never trusted: delete it. */
+  if (io->sibling_remove) io->sibling_remove(io->ctx, NULL);
+#endif
   int64_t size = io->size(io->ctx);
   if (size < 0) { free(s); return FK_EIO; }
   uint8_t h[HDR_SZ];
   int fresh = 0;
+  uint32_t version = FK_VERSION;
   if (size < (int64_t)HDR_SZ) {
     fresh = 1; /* new file, or a creation that was cut short (records are only written after the header is durable) */
   } else {
     if (io->pread(io->ctx, 0, h, HDR_SZ) != (int)HDR_SZ) { free(s); return FK_EIO; }
-    if (!header_ok(h)) {
+    version = header_ver(h);
+    if (!version) {
       if (size == (int64_t)HDR_SZ) fresh = 1; /* header sector never landed: still a creation in progress */
       else { free(s); return FK_ECORRUPT; }
     }
   }
   if (fresh) {
-    if ((rc = write_header(s)) != FK_OK) { free(s); return rc; }
+    version = FK_VERSION;
+    if ((rc = write_header(&s->io, 1)) != FK_OK) { free(s); return rc; }
     size = HDR_SZ;
   }
   if (fresh) { s->mark_end = HDR_SZ; s->mark_gen = 0; } else read_marker(s);
@@ -331,7 +488,7 @@ int fk_open(const fk_io *io, fk_store **out) {
   s->br[0].head = main_layer;
   s->br[0].alive = 1;
   s->nb = 1;
-  if ((rc = scan(s, size)) != FK_OK) { fk_close(s); return rc; }
+  if ((rc = scan(s, size, version)) != FK_OK) { fk_close(s); return rc; }
   *out = s;
   return FK_OK;
 }
@@ -349,9 +506,23 @@ void fk_close(fk_store *s) {
 /* ---------- queries ---------- */
 uint32_t fk_branch_count(const fk_store *s) { return s->nb; }
 int fk_branch_alive(const fk_store *s, uint32_t b) { return b < s->nb && s->br[b].alive; }
+int fk_is_failed(const fk_store *s) { return s->failed; }
 int fk_size(const fk_store *s, uint32_t b, uint32_t *pages) {
   if (!fk_branch_alive(s, b)) return FK_ENOENT;
   *pages = s->br[b].head->size;
+  return FK_OK;
+}
+/* Read and check one page record (PAGE or compaction's CPAGE) into rec (REC_PAGE_SZ bytes). */
+static int read_pagerec(const fk_io *io, uint64_t off, uint32_t pgno, uint8_t *rec) {
+  if (io->pread(io->ctx, off, rec, REC_PAGE_SZ) != (int)REC_PAGE_SZ) return FK_ECORRUPT;
+  uint16_t type = get16(rec + 4);
+  uint8_t hc[REC_HDR];
+  memcpy(hc, rec, REC_HDR);
+  put32(hc + 24, 0);
+  uint32_t c = fk_crc32c(fk_crc32c(0, hc, REC_HDR), rec + REC_HDR, PAGE_PAYLOAD);
+  if (get32(rec) != MAGIC || (type != T_PAGE && type != T_CPAGE) || get32(rec + 16) != PAGE_PAYLOAD || c != get32(rec + 24) ||
+      get32(rec + REC_HDR + 4) != pgno)
+    return FK_ECORRUPT;
   return FK_OK;
 }
 int fk_read(fk_store *s, uint32_t b, uint32_t pgno, void *buf) {
@@ -360,13 +531,9 @@ int fk_read(fk_store *s, uint32_t b, uint32_t pgno, void *buf) {
   if (pgno >= s->br[b].head->size) return FK_ENOENT;
   uint64_t off = layer_lookup(s->br[b].head, pgno);
   if (off == 0 || off == TOMB) { memset(buf, 0, FK_PAGE); return FK_OK; }
-  uint8_t rec[REC_HDR + PAGE_PAYLOAD];
-  if (s->io.pread(s->io.ctx, off, rec, sizeof rec) != (int)sizeof rec) return FK_ECORRUPT;
-  uint8_t hc[REC_HDR];
-  memcpy(hc, rec, REC_HDR);
-  put32(hc + 24, 0);
-  uint32_t c = fk_crc32c(fk_crc32c(0, hc, REC_HDR), rec + REC_HDR, PAGE_PAYLOAD);
-  if (get32(rec) != MAGIC || get16(rec + 4) != T_PAGE || c != get32(rec + 24) || get32(rec + REC_HDR + 4) != pgno) return FK_ECORRUPT;
+  uint8_t rec[REC_PAGE_SZ];
+  int rc = read_pagerec(&s->io, off, pgno, rec);
+  if (rc != FK_OK) return rc;
   memcpy(buf, rec + REC_HDR + 8, FK_PAGE);
   return FK_OK;
 }
@@ -445,6 +612,7 @@ void fk_txn_abort(fk_store *s) {
 int fk_txn_commit(fk_store *s, uint32_t new_size) {
   if (s->failed) return FK_EFAILED;
   if (!s->txn_open) return FK_EINVAL;
+  if (new_size > FK_MAX_PAGES) return FK_EINVAL;
   for (uint32_t i = 0; i < s->npp; i++)
     if (s->pp[i].pgno >= new_size) return FK_EINVAL; /* the transaction stays open; the caller may abort */
   uint64_t e = s->end, q = s->seq;
@@ -475,5 +643,246 @@ int fk_txn_commit(fk_store *s, uint32_t new_size) {
   if (rc != FK_OK) s->failed = 1;
   fk_txn_abort(s);
   if (rc == FK_OK) maybe_mark(s);
+  return rc;
+}
+
+/* ---------- compaction ---------- */
+typedef struct { uint32_t parent, size, n; uint32_t *pg; uint64_t *off; } PL; /* a planned layer; off = offsets in the OLD file */
+typedef struct { uint64_t off; uint32_t pg; } UP;                            /* a live page: its record in the old file */
+typedef struct {
+  PL *l;
+  uint32_t nl;
+  uint32_t head[FK_MAX_BRANCHES];
+  UP *u; /* live pages, ascending by old offset; the i-th goes to offset HDR_SZ + i * REC_PAGE_SZ of the new file */
+  size_t nu;
+} Plan;
+
+static void plan_free(Plan *P) {
+  for (uint32_t i = 0; i < P->nl; i++) { free(P->l[i].pg); free(P->l[i].off); }
+  free(P->l);
+  free(P->u);
+  memset(P, 0, sizeof *P);
+}
+static int up_cmp(const void *a, const void *b) {
+  const UP *x = a, *y = b;
+  return x->off < y->off ? -1 : x->off > y->off;
+}
+
+/* What is live: for every live branch walk its layer chain. A frozen layer with exactly one child and no branch of its own is
+ * folded into that child (this is the flattening); other layers are kept. Tombstones only matter if there is a layer below to
+ * hide, so a layer without a parent drops them. */
+static int plan_build(fk_store *s, Plan *P) {
+  memset(P, 0, sizeof *P);
+  for (size_t i = 0; i < s->nlayers; i++) { Layer *l = s->layers[i]; l->seen = 0; l->kids = l->heads = 0; l->idx = NONE; }
+  for (uint32_t b = 0; b < s->nb; b++) {
+    if (!s->br[b].alive) continue;
+    Layer *h = s->br[b].head;
+    h->heads++;
+    for (Layer *l = h; l && !l->seen; l = l->parent) l->seen = 1;
+  }
+  for (size_t i = 0; i < s->nlayers; i++) if (s->layers[i]->seen && s->layers[i]->parent) s->layers[i]->parent->kids++;
+#define KEPT(l) ((l)->heads > 0 || (l)->kids != 1)
+  uint32_t nk = 0;
+  for (size_t i = 0; i < s->nlayers; i++) if (s->layers[i]->seen && KEPT(s->layers[i])) s->layers[i]->idx = nk++;
+  P->l = calloc(nk ? nk : 1, sizeof *P->l);
+  if (!P->l) return FK_ENOMEM;
+  P->nl = nk;
+  size_t total = 0;
+  for (size_t i = 0; i < s->nlayers; i++) {
+    Layer *K = s->layers[i];
+    if (!K->seen || !KEPT(K)) continue;
+    uint32_t maxcap = K->cap;
+    Layer *EP = K->parent; /* the nearest kept ancestor */
+    while (EP && !KEPT(EP)) { if (EP->cap > maxcap) maxcap = EP->cap; EP = EP->parent; }
+    uint64_t *tmp = calloc(maxcap ? maxcap : 1, sizeof *tmp);
+    if (!tmp) return FK_ENOMEM;
+    for (Layer *l = K; l != EP; l = l->parent) { /* K, then the folded ancestors: the nearest layer wins */
+#ifdef FK_BUG_COMPACT_LOSE_PARENT
+      if (l != K) continue; /* mutant: pages held by a folded layer are lost */
+#endif
+      for (uint32_t pg = 0; pg < l->cap; pg++) if (l->off[pg] && !tmp[pg]) tmp[pg] = l->off[pg];
+    }
+    uint32_t n = 0;
+    for (uint32_t pg = 0; pg < maxcap; pg++)
+#ifdef FK_BUG_COMPACT_DROP_TOMB
+      if (tmp[pg] && tmp[pg] != TOMB) n++; /* mutant: tombstones are dropped even where they hide a lower layer */
+#else
+      if (tmp[pg] && (EP || tmp[pg] != TOMB)) n++;
+#endif
+    PL *pl = &P->l[K->idx];
+    pl->parent = EP ? EP->idx : NONE;
+    pl->size = K->size;
+    pl->n = n;
+    pl->pg = calloc(n ? n : 1, sizeof *pl->pg);
+    pl->off = calloc(n ? n : 1, sizeof *pl->off);
+    if (!pl->pg || !pl->off) { free(tmp); return FK_ENOMEM; }
+    uint32_t k = 0;
+    for (uint32_t pg = 0; pg < maxcap; pg++) {
+#ifdef FK_BUG_COMPACT_DROP_TOMB
+      if (!(tmp[pg] && tmp[pg] != TOMB)) continue;
+#else
+      if (!(tmp[pg] && (EP || tmp[pg] != TOMB))) continue;
+#endif
+      pl->pg[k] = pg;
+      pl->off[k++] = tmp[pg];
+      if (tmp[pg] != TOMB) total++;
+    }
+    free(tmp);
+  }
+  for (uint32_t b = 0; b < s->nb; b++) P->head[b] = s->br[b].alive ? s->br[b].head->idx : NONE;
+  P->u = malloc((total ? total : 1) * sizeof *P->u);
+  if (!P->u) return FK_ENOMEM;
+  size_t m = 0;
+  for (uint32_t i = 0; i < P->nl; i++)
+    for (uint32_t k = 0; k < P->l[i].n; k++)
+      if (P->l[i].off[k] != TOMB) { P->u[m].off = P->l[i].off[k]; P->u[m].pg = P->l[i].pg[k]; m++; }
+  qsort(P->u, m, sizeof *P->u, up_cmp);
+  size_t w = 0;
+  for (size_t i = 0; i < m; i++) {
+    if (w && P->u[w - 1].off == P->u[i].off) {
+      if (P->u[w - 1].pg != P->u[i].pg) return FK_ECORRUPT;
+      continue;
+    }
+    P->u[w++] = P->u[i];
+  }
+  P->nu = w;
+  return FK_OK;
+}
+static int new_off(const Plan *P, uint64_t old, uint64_t *out) {
+  size_t lo = 0, hi = P->nu;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    if (P->u[mid].off < old) lo = mid + 1; else hi = mid;
+  }
+  if (lo >= P->nu || P->u[lo].off != old) return FK_ECORRUPT;
+  *out = HDR_SZ + (uint64_t)lo * REC_PAGE_SZ;
+  return FK_OK;
+}
+static size_t plan_stream_len(const Plan *P, uint32_t nb) {
+  size_t n = 8 + 5 * (size_t)nb;
+  for (uint32_t i = 0; i < P->nl; i++) n += 12 + 12 * (size_t)P->l[i].n;
+  return n;
+}
+static uint64_t plan_live_bytes(const Plan *P, uint32_t nb) {
+  size_t sl = plan_stream_len(P, nb);
+  size_t chunks = (sl + PAGE_PAYLOAD - 1) / PAGE_PAYLOAD;
+  return HDR_SZ + (uint64_t)P->nu * REC_PAGE_SZ + sl + chunks * REC_HDR + REC_HDR + 12;
+}
+static int plan_stream(const fk_store *s, const Plan *P, Buf *b) {
+  b_u32(b, s->nb);
+  b_u32(b, P->nl);
+  for (uint32_t i = 0; i < P->nl; i++) {
+    const PL *l = &P->l[i];
+    b_u32(b, l->parent);
+    b_u32(b, l->size);
+    b_u32(b, l->n);
+    for (uint32_t k = 0; k < l->n; k++) {
+      uint64_t o = TOMB;
+      if (l->off[k] != TOMB) { int rc = new_off(P, l->off[k], &o); if (rc) return rc; }
+      b_u32(b, l->pg[k]);
+      b_u64(b, o);
+    }
+  }
+  for (uint32_t i = 0; i < s->nb; i++) {
+    uint8_t a = P->head[i] != NONE;
+    b_put(b, &a, 1);
+    b_u32(b, a ? P->head[i] : 0);
+  }
+  return b->err ? FK_ENOMEM : FK_OK;
+}
+
+/* Write the compacted file next to the store's file and swap it in. */
+static int compact_exec(fk_store *s, const Plan *P) {
+  fk_io tmp;
+  memset(&tmp, 0, sizeof tmp);
+  Buf sb;
+  memset(&sb, 0, sizeof sb);
+  PendPage *cp = NULL;
+  int rc, have_tmp = 0;
+  uint64_t e = HDR_SZ, q = 1;
+  uint32_t l = 0;
+  if ((rc = plan_stream(s, P, &sb)) != FK_OK) goto fail;
+  if (s->io.sibling_create(s->io.ctx, &tmp) != 0) { rc = FK_EIO; goto fail; }
+  have_tmp = 1;
+  /* The new file is invisible until the rename, so none of this needs to be durable yet: one fsync below covers it all. */
+  if ((rc = write_header(&tmp, 0)) != FK_OK) goto fail;
+  uint8_t pay[PAGE_PAYLOAD], old[REC_PAGE_SZ];
+  for (size_t i = 0; i < P->nu; i++) {
+#ifdef FK_BUG_COMPACT_NO_VERIFY
+    rc = s->io.pread(s->io.ctx, P->u[i].off, old, REC_PAGE_SZ) == (int)REC_PAGE_SZ ? FK_OK : FK_ECORRUPT; /* mutant: copies damaged pages */
+#else
+    rc = read_pagerec(&s->io, P->u[i].off, P->u[i].pg, old);
+#endif
+    if (rc != FK_OK) goto fail; /* a damaged page aborts the compaction: it never launders damage */
+    put32(pay, NONE);
+    put32(pay + 4, P->u[i].pg);
+    memcpy(pay + 8, old + REC_HDR + 8, FK_PAGE);
+    if (e != HDR_SZ + (uint64_t)i * REC_PAGE_SZ) { rc = FK_EINVAL; goto fail; }
+    if ((rc = put_rec_io(&tmp, T_CPAGE, pay, PAGE_PAYLOAD, &e, &q, &l, NULL)) != FK_OK) goto fail;
+  }
+  for (size_t o = 0; o < sb.n; o += PAGE_PAYLOAD) {
+    size_t n = sb.n - o < PAGE_PAYLOAD ? sb.n - o : PAGE_PAYLOAD;
+    if ((rc = put_rec_io(&tmp, T_SNAP, sb.p + o, (uint32_t)n, &e, &q, &l, NULL)) != FK_OK) goto fail;
+  }
+  uint8_t se[12];
+  put64(se, sb.n);
+  put32(se + 8, fk_crc32c(0, sb.p, sb.n));
+  if ((rc = put_rec_io(&tmp, T_SNAPEND, se, 12, &e, &q, &l, NULL)) != FK_OK) goto fail;
+  if ((rc = marker_put(&tmp, 1, e)) != FK_OK) goto fail;
+#ifndef FK_BUG_COMPACT_NO_TMP_SYNC
+  if (tmp.fsync(tmp.ctx) != 0) { rc = FK_EIO; goto fail; }
+#endif
+  /* The point of no return. A failed rename changes nothing; after it succeeds the store's file IS the new one, whether or
+   * not the directory entry is durable yet. */
+  if (s->io.sibling_rename(s->io.ctx, &tmp) != 0) { rc = FK_EIO; goto fail; }
+  have_tmp = 0;
+#ifndef FK_BUG_COMPACT_NO_DIRSYNC
+  if (s->io.sync_dir(s->io.ctx) != 0) { s->failed = 1; free(sb.p); return FK_EIO; }
+#endif
+  /* Switch the in-memory state to the snapshot we just wrote, through the same loader recovery uses. */
+  cp = malloc((P->nu ? P->nu : 1) * sizeof *cp);
+  if (!cp) { s->failed = 1; free(sb.p); return FK_ENOMEM; }
+  for (size_t i = 0; i < P->nu; i++) { cp[i].pgno = P->u[i].pg; cp[i].off = HDR_SZ + (uint64_t)i * REC_PAGE_SZ; cp[i].data = NULL; }
+  rc = snap_load(s, sb.p, sb.n, cp, (uint32_t)P->nu);
+  free(cp);
+  free(sb.p);
+  if (rc != FK_OK) { s->failed = 1; return rc; }
+  s->end = e;
+  s->seq = q;
+  s->last_crc = l;
+  s->mark_gen = 1;
+  s->mark_end = e;
+  s->since_mark = 0;
+  return FK_OK;
+fail:
+  if (have_tmp) s->io.sibling_remove(s->io.ctx, &tmp);
+  free(sb.p);
+  return rc; /* the store's file was not touched: still usable */
+}
+
+static int compact_core(fk_store *s, int force, uint64_t min_bytes, int *did) {
+  if (did) *did = 0;
+  if (s->failed) return FK_EFAILED;
+  if (s->txn_open) return FK_EBUSY;
+  if (!s->io.sibling_create || !s->io.sibling_rename || !s->io.sync_dir || !s->io.sibling_remove) return FK_EINVAL;
+  Plan P;
+  int rc = plan_build(s, &P);
+  if (rc == FK_OK && !force && (s->end < min_bytes || plan_live_bytes(&P, s->nb) * 2 >= s->end)) { plan_free(&P); return FK_OK; }
+  if (rc == FK_OK) rc = compact_exec(s, &P);
+  plan_free(&P);
+  if (rc == FK_OK && did) *did = 1;
+  return rc;
+}
+int fk_compact(fk_store *s) { return compact_core(s, 1, 0, NULL); }
+int fk_compact_if_needed(fk_store *s, uint64_t min_bytes, int *did) { return compact_core(s, 0, min_bytes, did); }
+int fk_stats(fk_store *s, uint64_t *file_bytes, uint64_t *live_bytes) {
+  if (s->failed) return FK_EFAILED;
+  Plan P;
+  int rc = plan_build(s, &P);
+  if (rc == FK_OK) {
+    if (file_bytes) *file_bytes = s->end;
+    if (live_bytes) *live_bytes = plan_live_bytes(&P, s->nb);
+  }
+  plan_free(&P);
   return rc;
 }
