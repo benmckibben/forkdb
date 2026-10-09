@@ -1,0 +1,58 @@
+SQLite 3.50.0  session-ext=on
+== T1 rollback-journal modes on the layered VFS
+  PASS journal_mode=DELETE   (reported delete): rows=1000 integrity=ok, rollback restored 1000 rows
+  PASS journal_mode=TRUNCATE (reported truncate): rows=1000 integrity=ok, rollback restored 1000 rows
+  PASS journal_mode=PERSIST  (reported persist): rows=1000 integrity=ok, rollback restored 1000 rows
+  PASS journal_mode=MEMORY   (reported memory): rows=1000 integrity=ok, rollback restored 1000 rows
+  PASS journal_mode=OFF      (reported off): rows=1000 integrity=ok
+== T2 SQLITE_IOCAP_BATCH_ATOMIC on the layered VFS
+  small txn (10 rows): begin=0 commit=0 rollback=0 journal-opens=1
+  FAIL small txn commits through one atomic batch, no journal file
+  5000-row txn, cache_size=2000KB: begin=0 commit=0 rollback=0 journal-opens=1 max-batch-pages=0 (rows now 5010)
+  5000-row txn, cache_size=256KB: begin=0 commit=0 rollback=0 journal-opens=1 max-batch-pages=0 (rows now 10010)
+  5000-row txn, cache_size=64KB: begin=0 commit=0 rollback=0 journal-opens=1 max-batch-pages=0 (rows now 15010)
+  5000-row txn, cache_size=16KB: begin=0 commit=0 rollback=0 journal-opens=1 max-batch-pages=0 (rows now 20010)
+  failing COMMIT_ATOMIC_WRITE: begin=0 commit=0 rollback=0 journal-opens=1 rows 20010 -> 20020 integrity=ok
+  PASS failed atomic commit leaves old or fully-new state, never partial
+== T3 WAL mode on the layered VFS (xShm* in memory)
+  PASS journal_mode=WAL accepted
+  PASS second connection reads a consistent snapshot while a write txn is open
+  PASS second connection sees the commit
+  state before fork: db file=4096 bytes, -wal=2488512 bytes
+  fork of the db file only (WAL ignored): rows seen=-1 (source has 301)
+  PASS forking only the main file loses un-checkpointed commits (the fork MUST include the WAL or checkpoint first)
+  PASS fork that carries a copy of the WAL recovers all 301 rows (wal-index rebuilt on open)
+  after wal_checkpoint(TRUNCATE): -wal=0 bytes
+  PASS checkpoint-then-fork needs no WAL copy (O(1) fork)
+== T4 copy-on-write layers: fork cost, isolation, chain depth
+  db=1MB (252 pages): 1000 forks in 7150 us -> 7150 ns/fork, extra memory per fork ~48 bytes (one empty Layer)
+  db=16MB (4011 pages): 1000 forks in 12122 us -> 12122 ns/fork, extra memory per fork ~48 bytes (one empty Layer)
+  db=64MB (16041 pages): 1000 forks in 17526 us -> 17526 ns/fork, extra memory per fork ~48 bytes (one empty Layer)
+  PASS fork reads all base rows through the overlay (empty overlay -> base pages)
+  one-row UPDATE on a fork: overlay pages 0 -> 2 of 4011 total pages
+  PASS fork write visible in fork, invisible in base
+  PASS write to base AFTER the fork does not leak into the fork (snapshot semantics)
+  chain depth   1: full scan of 16MB through 2 layers = 1.4 ms (sum=16000000)
+  chain depth 100: full scan of 16MB through 101 layers = 2.4 ms (sum=16000000)
+  chain depth 400: full scan of 16MB through 401 layers = 10.6 ms (sum=16000000)
+== T5 session extension: logical diff, promote, conflicts, undo
+  fork made 18 row changes in table a (10 insert, 5 update, 3 delete), 1 insert into pk-less table b, a CREATE TABLE c + 1 insert
+  changeset: 364 bytes, 19 operations
+  page-level delta of the same fork: 4 dirty pages (16384 bytes) vs changeset 364 bytes
+  apply to parent: rc=0 conflicts=0; table a identical to fork=yes; pk-less table b rows parent=5 fork=6; table c exists in parent=0
+  PASS fast-forward promote: applying the fork's changeset to the parent reproduces table a exactly
+  PASS changeset holds only the PK-table row changes (pk-less table b is NOT tracked; CREATE TABLE is NOT captured)
+  PASS sharp edge confirmed: tables without a PRIMARY KEY and DDL do not travel in changesets
+  diverged merge (f1 changed ids 1-5, f2 changed ids 3-8): rc=0 conflicts=3; id1=f1 id3=f1(REPLACE) id7=f2
+  PASS three-way style merge: overlapping rows reported as conflicts (3), non-overlapping rows merged
+  PASS inverted changeset undoes the fork's changes exactly (reset/undo primitive)
+== T6 crash/fault injection (torn write at step N, then all I/O fails, then reopen)
+  rollback-DELETE: 15 I/O steps; torn-write+crash injected at every step -> old=14 new=1 violations=0
+  PASS rollback-DELETE: every crash point recovers to old-or-new state with integrity ok
+  WAL           : 14 I/O steps; torn-write+crash injected at every step -> old=4 new=10 violations=0
+  PASS WAL: every crash point recovers to old-or-new state with integrity ok
+  batch-atomic  : 15 I/O steps; torn-write+crash injected at every step -> old=14 new=1 violations=0
+  PASS batch-atomic: every crash point recovers to old-or-new state with integrity ok
+
+TOTAL FAILS=1
+exit=1
