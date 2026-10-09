@@ -1,0 +1,18 @@
+# Fetched or built, never committed
+spike/vendor/
+spike/build/
+*.o
+*.a
+*.so
+*.dylib
+
+# Local data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
