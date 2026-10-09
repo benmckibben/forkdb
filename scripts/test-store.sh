@@ -24,7 +24,7 @@ $cc $warn "$here/test/file_test.c" "$here/store/fkstore.c" "$here/store/io_file.
 echo "== power-loss tests (${seeds} seeds x ${ops} operations, address and undefined-behaviour sanitizers on)"
 # shellcheck disable=SC2086
 $cc $warn -fsanitize=address,undefined -fno-sanitize-recover=undefined $crash_src -o "$out/crash_test"
-"$out/crash_test" "$seeds" "$ops" | tail -6
+"$out/crash_test" "$seeds" "$ops" | grep -E "^(logic pass|workloads|post-crash|append-after|TOTAL)"
 
 echo "== do the tests catch broken stores? (each mutant must be caught by at least one test)"
 mutant() { # name, flags
@@ -43,4 +43,10 @@ mutant "durable-end marker written before its data is synced" "-DFK_BUG_EARLY_MA
 mutant "recovery does not truncate the torn tail" "-DFK_BUG_NO_TRUNC"
 mutant "recovery does not check the record chain" "-DFK_BUG_NO_PREVCHAIN"
 mutant "neither of the previous two" "-DFK_BUG_NO_TRUNC -DFK_BUG_NO_PREVCHAIN"
+mutant "compaction: new file swapped in without being synced" "-DFK_BUG_COMPACT_NO_TMP_SYNC"
+mutant "compaction: directory not synced after the rename" "-DFK_BUG_COMPACT_NO_DIRSYNC"
+mutant "compaction: pages of a folded layer are lost" "-DFK_BUG_COMPACT_LOSE_PARENT"
+mutant "compaction: tombstones dropped too early" "-DFK_BUG_COMPACT_DROP_TOMB"
+mutant "compaction: copies a damaged page without checking" "-DFK_BUG_COMPACT_NO_VERIFY"
+mutant "open: leftover compaction file is not deleted" "-DFK_BUG_COMPACT_NO_CLEANUP"
 echo "all store tests passed"

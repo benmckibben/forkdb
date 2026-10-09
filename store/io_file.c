@@ -1,21 +1,27 @@
-/* io_file.c: fk_io on a real file (pread/pwrite/fsync). */
+/* io_file.c: fk_io on a real file (pread/pwrite/fsync), with the sibling operations used by compaction. */
+#define _GNU_SOURCE
 #include "fkstore.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+typedef struct { int fd; char *path; } FC;
+#define FD(ctx) (((FC *)(ctx))->fd)
+
 static int64_t f_size(void *ctx) {
   struct stat st;
-  if (fstat(*(int *)ctx, &st) != 0) return -1;
+  if (fstat(FD(ctx), &st) != 0) return -1;
   return (int64_t)st.st_size;
 }
 static int f_pread(void *ctx, uint64_t off, void *buf, size_t n) {
   size_t done = 0;
   while (done < n) {
-    ssize_t r = pread(*(int *)ctx, (char *)buf + done, n - done, (off_t)(off + done));
+    ssize_t r = pread(FD(ctx), (char *)buf + done, n - done, (off_t)(off + done));
     if (r < 0) {
       if (errno == EINTR) continue;
       return -1;
@@ -28,7 +34,7 @@ static int f_pread(void *ctx, uint64_t off, void *buf, size_t n) {
 static int f_pwrite(void *ctx, uint64_t off, const void *buf, size_t n) {
   size_t done = 0;
   while (done < n) {
-    ssize_t r = pwrite(*(int *)ctx, (const char *)buf + done, n - done, (off_t)(off + done));
+    ssize_t r = pwrite(FD(ctx), (const char *)buf + done, n - done, (off_t)(off + done));
     if (r < 0) {
       if (errno == EINTR) continue;
       return -1;
@@ -37,35 +43,113 @@ static int f_pwrite(void *ctx, uint64_t off, const void *buf, size_t n) {
   }
   return 0;
 }
-static int f_truncate(void *ctx, uint64_t size) { return ftruncate(*(int *)ctx, (off_t)size); }
-static int f_fsync(void *ctx) { return fdatasync(*(int *)ctx); }
+static int f_truncate(void *ctx, uint64_t size) { return ftruncate(FD(ctx), (off_t)size); }
+static int f_fsync(void *ctx) { return fdatasync(FD(ctx)); }
 
-int fk_file_open(const char *path, fk_io *io) {
-  int existed = access(path, F_OK) == 0;
-  int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-  if (fd < 0) return -1;
-  int *p = malloc(sizeof *p);
-  if (!p) { close(fd); return -1; }
-  *p = fd;
-  io->ctx = p;
+static int sync_dir_of(const char *path) {
+  char dir[4096];
+  size_t n = 0;
+  while (path[n] && n < sizeof dir - 1) { dir[n] = path[n]; n++; }
+  dir[n] = 0;
+  while (n > 0 && dir[n - 1] != '/') n--;
+  if (n == 0) { dir[0] = '.'; dir[1] = 0; } else if (n > 1) dir[n - 1] = 0; else dir[1] = 0;
+  int dfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dfd < 0) return -1;
+  int rc = fsync(dfd);
+  close(dfd);
+  return rc;
+}
+static char *tmp_path(const char *p) {
+  size_t n = strlen(p);
+  char *t = malloc(n + 9);
+  if (!t) return NULL;
+  memcpy(t, p, n);
+  memcpy(t + n, ".compact", 9);
+  return t;
+}
+
+static int f_sibling_create(void *ctx, fk_io *tmp);
+static int f_sibling_rename(void *ctx, fk_io *tmp);
+static int f_sync_dir(void *ctx) { return sync_dir_of(((FC *)ctx)->path); }
+static void f_sibling_remove(void *ctx, fk_io *tmp);
+
+static void fill(fk_io *io, FC *c, int main_file) {
+  memset(io, 0, sizeof *io);
+  io->ctx = c;
   io->size = f_size;
   io->pread = f_pread;
   io->pwrite = f_pwrite;
   io->truncate = f_truncate;
   io->fsync = f_fsync;
-  if (!existed) {
-    /* Make the new directory entry durable too; a power cut must not forget the file itself. */
-    char dir[4096];
-    size_t n = 0;
-    while (path[n] && n < sizeof dir - 1) { dir[n] = path[n]; n++; }
-    dir[n] = 0;
-    while (n > 0 && dir[n - 1] != '/') n--;
-    if (n == 0) { dir[0] = '.'; dir[1] = 0; } else if (n > 1) dir[n - 1] = 0; else dir[1] = 0;
-    int dfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (dfd >= 0) { (void)fsync(dfd); close(dfd); }
+  if (main_file) {
+    io->sibling_create = f_sibling_create;
+    io->sibling_rename = f_sibling_rename;
+    io->sync_dir = f_sync_dir;
+    io->sibling_remove = f_sibling_remove;
   }
+}
+
+static int f_sibling_create(void *ctx, fk_io *tmp) {
+  FC *m = ctx;
+  char *tp = tmp_path(m->path);
+  if (!tp) return -1;
+  int fd = open(tp, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+  FC *t = fd >= 0 ? malloc(sizeof *t) : NULL;
+  if (!t) {
+    if (fd >= 0) { close(fd); unlink(tp); }
+    free(tp);
+    return -1;
+  }
+  t->fd = fd;
+  t->path = tp;
+  fill(tmp, t, 0);
+  return 0;
+}
+static int f_sibling_rename(void *ctx, fk_io *tmp) {
+  FC *m = ctx, *t = tmp->ctx;
+  if (rename(t->path, m->path) != 0) return -1; /* nothing changed */
+  close(m->fd);
+  m->fd = t->fd;
+  free(t->path);
+  free(t);
+  tmp->ctx = NULL;
+  return 0;
+}
+static void f_sibling_remove(void *ctx, fk_io *tmp) {
+  FC *m = ctx;
+  if (tmp && tmp->ctx) {
+    FC *t = tmp->ctx;
+    close(t->fd);
+    unlink(t->path);
+    free(t->path);
+    free(t);
+    tmp->ctx = NULL;
+    return;
+  }
+  char *tp = tmp_path(m->path);
+  if (tp) { unlink(tp); free(tp); }
+}
+
+int fk_file_open(const char *path, fk_io *io) {
+  int existed = access(path, F_OK) == 0;
+  int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+  if (fd < 0) return -1;
+  FC *c = malloc(sizeof *c);
+  char *p = strdup(path);
+  if (!c || !p) { free(c); free(p); close(fd); return -1; }
+  c->fd = fd;
+  c->path = p;
+  fill(io, c, 1);
+  /* Make a new directory entry durable too; a power cut must not forget the file itself. */
+  if (!existed) (void)sync_dir_of(path);
   return 0;
 }
 void fk_file_close(fk_io *io) {
-  if (io->ctx) { close(*(int *)io->ctx); free(io->ctx); io->ctx = NULL; }
+  if (io->ctx) {
+    FC *c = io->ctx;
+    close(c->fd);
+    free(c->path);
+    free(c);
+    io->ctx = NULL;
+  }
 }
