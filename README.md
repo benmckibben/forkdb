@@ -1,12 +1,12 @@
 # forkdb
 
-Instant-branching, copy-on-write SQLite databases for local development, testing and agent sandboxing: fork a database in microseconds, let a test or an agent do anything to the fork, then look at the diff and promote it or throw it away.
+Instant-branching, copy-on-write SQLite databases for local development, testing and agent sandboxing: fork a database without copying it, let a test or an agent do anything to the fork, then look at the diff and promote it or throw it away.
 
 **Status: just started.** The form factor is decided, a feasibility spike has validated the core mechanics, and the durable page store underneath is built and power-loss tested on its own. It is not yet connected to SQLite: nothing here is installable.
 
 ## The idea
 
-- A **branch** is an immutable base plus a small overlay of changed pages, exposed to SQLite through a custom VFS. Forking is O(1) and costs a few dozen bytes however large the database is.
+- A **branch** is an immutable base plus a small overlay of changed pages, exposed to SQLite through a custom VFS. Forking does not copy any pages: it costs one small log record and one small in-memory layer however large the database is (the spike measured about 48 bytes and 14-18 ns for the in-memory prototype; the durable store adds an fsync per fork).
 - A **logical layer** (SQLite's session extension) records what a branch changed as a changeset, which gives diff, promote ("fast-forward or replay with conflict report") and undo.
 - Target uses: an agent that gets a throwaway copy to try a risky migration or destructive task in; one database per test in milliseconds; "what would this change do?" with a reviewable diff.
 
