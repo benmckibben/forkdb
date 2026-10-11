@@ -12,12 +12,15 @@
 
 #include "simdisk.h"
 
-#define MAXBR 8
-#define MAXPG 6
+#ifndef FK_MAX_BRANCHES
+#error "build with -DFK_MAX_BRANCHES=8: the store and this model must agree on the number of branch ids"
+#endif
+#define MAXBR FK_MAX_BRANCHES /* 8: small, so that ids are reused all the time */
+#define MAXPG 20 /* enough distinct pages for a layer's index table to grow several times */
 #define MAXOPS 16
 
 typedef struct { int alive; uint32_t size; uint8_t has[MAXPG]; uint8_t pg[MAXPG][FK_PAGE]; } MB;
-typedef struct { uint32_t nb; MB b[MAXBR]; } Model;
+typedef struct { uint32_t nb, last; MB b[MAXBR]; } Model; /* nb: one more than the highest id used; last: id of the latest fork */
 typedef struct { int kind; /* 0 commit, 1 fork, 2 discard, 3 compact (changes nothing the oracle can see) */ uint32_t br, np, pgno[3], new_size, expect_dst; uint64_t key; } Op;
 
 static void gen_page(uint64_t key, uint8_t *buf) {
@@ -33,9 +36,20 @@ static void model_commit(Model *M, const Op *o) {
 }
 static void model_apply(Model *M, const Op *o) {
   if (o->kind == 0) model_commit(M, o);
-  else if (o->kind == 1) { M->b[M->nb] = M->b[o->br]; M->nb++; }
+  else if (o->kind == 1) { M->b[o->expect_dst] = M->b[o->br]; M->last = o->expect_dst; if (o->expect_dst >= M->nb) M->nb = o->expect_dst + 1; }
   else if (o->kind == 2) M->b[o->br].alive = 0;
   /* kind 3: compaction preserves every branch, page and size */
+}
+/* The id the next fork must get, written out independently of the store: ids 1..MAXBR-1 form a ring; start just after the id of
+ * the latest fork; take the first one that is not alive. */
+static int model_next_id(const Model *M, uint32_t *id) {
+  int ring = (int)MAXBR - 1;
+  for (int k = 1; k <= ring; k++) {
+    int pos = (((int)M->last - 1 + k) % ring + ring) % ring; /* position of the candidate in the ring; last = 0 counts as position -1 */
+    uint32_t cand = (uint32_t)pos + 1;
+    if (cand >= M->nb || !M->b[cand].alive) { *id = cand; return 1; }
+  }
+  return 0;
 }
 static int gen_ops(uint64_t seed, int K, Op *ops, Model *states) {
   Rng r;
@@ -50,7 +64,8 @@ static int gen_ops(uint64_t seed, int K, Op *ops, Model *states) {
     Op o;
     memset(&o, 0, sizeof o);
     uint32_t roll = rng_below(&r, 100);
-    if (roll < 25 && M->nb < MAXBR) { o.kind = 1; o.br = alive[rng_below(&r, na)]; o.expect_dst = M->nb; }
+    uint32_t next_id = 0;
+    if (roll < 25 && model_next_id(M, &next_id)) { o.kind = 1; o.br = alive[rng_below(&r, na)]; o.expect_dst = next_id; }
     else if (roll >= 88) o.kind = 3;
     else if (roll < 40) {
       uint32_t cand[MAXBR], nc = 0;
@@ -377,6 +392,18 @@ int main(int argc, char **argv) {
 #endif
 #ifdef FK_BUG_COMPACT_DROP_TOMB
   printf("MUTANT: compaction drops tombstones that hide a lower layer\n");
+#endif
+#ifdef FK_BUG_ID_STALE_HEAD
+  printf("MUTANT: a reused branch id builds on the discarded branch's layers\n");
+#endif
+#ifdef FK_BUG_ID_REUSE_ALIVE
+  printf("MUTANT: fork can hand out the id of a live branch\n");
+#endif
+#ifdef FK_BUG_ID_REPLAY_STRICT
+  printf("MUTANT: recovery rejects a fork that reuses an id\n");
+#endif
+#ifdef FK_BUG_ID_NO_CURSOR
+  printf("MUTANT: the allocation cursor is not restored from a snapshot\n");
 #endif
 #ifdef FK_BUG_EARLY_MARKER
   printf("MUTANT: the durable-end marker is written before the data it covers is synced\n");

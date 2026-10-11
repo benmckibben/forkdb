@@ -11,6 +11,10 @@
 
 #include "../store/fkstore.h"
 
+#ifndef FK_TEST_DATA
+#define FK_TEST_DATA "test/data" /* where v2-compacted.fk is; scripts/test-store.sh passes an absolute path */
+#endif
+
 static int fails;
 #define CHECK(c, msg) do { int ok_ = !!(c); printf("  %s %s\n", ok_ ? "PASS" : "FAIL", msg); if (!ok_) fails++; } while (0)
 
@@ -62,6 +66,24 @@ static int commit_many(fk_store *s, uint32_t b, const uint32_t *pages, const int
   if (fk_txn_begin(s, b)) return -1;
   for (uint32_t i = 0; i < n; i++) { page(p, vers[i]); if (fk_txn_write(s, pages[i], p)) { fk_txn_abort(s); return -1; } }
   return fk_txn_commit(s, size);
+}
+
+static int copy_file(const char *from, const char *to) {
+  FILE *a = fopen(from, "rb"), *b = a ? fopen(to, "wb") : NULL;
+  int ok = a && b;
+  unsigned char buf[8192];
+  size_t n;
+  while (ok && (n = fread(buf, 1, sizeof buf, a)) > 0) ok = fwrite(buf, 1, n, b) == n;
+  if (a) fclose(a);
+  if (b && fclose(b) != 0) ok = 0;
+  return ok;
+}
+static uint32_t file_version(const char *path) {
+  unsigned char h[12];
+  FILE *f = fopen(path, "rb");
+  if (!f || fread(h, 1, sizeof h, f) != sizeof h) { if (f) fclose(f); return 0; }
+  fclose(f);
+  return (uint32_t)h[8] | (uint32_t)h[9] << 8 | (uint32_t)h[10] << 16 | (uint32_t)h[11] << 24;
 }
 
 /* CRC-32C reference: one bit at a time, no tables, nothing shared with the implementation under test. */
@@ -277,7 +299,7 @@ int main(void) {
     fk_close(s); fk_file_close(&io);
     CHECK(open_path(cpth, &io, &s) && has(s, 0, 0, 2000) && has(s, 0, 1, 4000) && has(s, 1, 0, 3000) && has(s, 1, 1, 8) && !fk_branch_alive(s, 2), "reopen: compacted data and the later writes are all there");
     uint32_t nf = 0;
-    CHECK(fk_fork(s, 1, &nf) == 0 && nf == 3 && has(s, 3, 0, 3000), "branch ids are not reused after compaction; forking works");
+    CHECK(fk_fork(s, 1, &nf) == 0 && nf == 3 && has(s, 3, 0, 3000), "after compaction forking works, and the new branch gets the next never-used id (3)");
     fk_close(s); fk_file_close(&io);
 
     printf("== compaction: a shrink hides the parent's page, and compaction keeps it hidden\n");
@@ -463,6 +485,90 @@ int main(void) {
     for (uint32_t i = 0; i < n && ok; i++) ok = has(s3, 0, pages[i], vers[i]);
     CHECK(ok, "all 3,000 read back");
     fk_close(s3); fk_file_close(&i3);
+  }
+
+  printf("== branch ids: next-fit reuse, persistence, the limit\n");
+  {
+    char p[300];
+    snprintf(p, sizeof p, "%s/ids.fk", dir);
+    fk_io i4; fk_store *s4 = NULL;
+    uint32_t a = 0, b = 0, c3 = 0, d = 0, e = 0, sz = 0;
+    CHECK(open_path(p, &i4, &s4) && fk_fork(s4, 0, &a) == 0 && a == 1 && fk_fork(s4, 0, &b) == 0 && b == 2, "fork gives ids 1 and 2");
+    CHECK(fk_discard(s4, 1) == 0 && !fk_branch_alive(s4, 1) && fk_size(s4, 1, &sz) == FK_ENOENT, "discard 1: the id is dead and reads return FK_ENOENT");
+    CHECK(fk_fork(s4, 0, &c3) == 0 && c3 == 3, "the next fork gets 3, not the id just discarded (next fit)");
+    fk_close(s4); fk_file_close(&i4);
+    s4 = NULL;
+    CHECK(open_path(p, &i4, &s4) && fk_branch_count(s4) == 4 && !fk_branch_alive(s4, 1) && fk_branch_alive(s4, 2) && fk_branch_alive(s4, 3), "reopen: the same branches are alive");
+    CHECK(fk_fork(s4, 0, &d) == 0 && d == 4, "after a reopen the cursor is where it was (replayed from the log): the next fork gets 4");
+    CHECK(fk_discard(s4, 2) == 0 && fk_discard(s4, 3) == 0 && fk_discard(s4, 4) == 0 && fk_compact(s4) == 0, "discard 2, 3, 4 and compact");
+    fk_close(s4); fk_file_close(&i4);
+    s4 = NULL;
+    CHECK(open_path(p, &i4, &s4) && fk_fork(s4, 0, &e) == 0 && e == 5, "after compaction and a reopen the cursor is where it was (kept in the snapshot): the next fork gets 5, not the lowest free id 1");
+    fk_close(s4); fk_file_close(&i4);
+
+    /* all 1,024 ids in use, then reuse */
+    snprintf(p, sizeof p, "%s/limit.fk", dir);
+    s4 = NULL;
+    CHECK(open_path(p, &i4, &s4) && commit1(s4, 0, 0, 1, 2) == 0 && commit1(s4, 0, 1, 42, 2) == 0, "a store whose main has p0 = 1, p1 = 42");
+    int ok = 1;
+    for (uint32_t i = 1; i < FK_MAX_BRANCHES && ok; i++) { uint32_t f = 0; ok = fk_fork(s4, 0, &f) == 0 && f == i; }
+    CHECK(ok && fk_branch_count(s4) == FK_MAX_BRANCHES, "1,023 forks give ids 1..1023 in order");
+    uint32_t extra = 0;
+    CHECK(fk_fork(s4, 0, &extra) == FK_ELIMIT, "the 1,024th branch: FK_ELIMIT (the store is unchanged)");
+    CHECK(commit1(s4, 500, 1, 7777, 2) == 0 && commit1(s4, 10, 1, 7778, 2) == 0 && commit1(s4, 20, 1, 7779, 2) == 0, "write p1 on branches 500, 10 and 20");
+    CHECK(fk_discard(s4, 500) == 0 && !fk_branch_alive(s4, 500), "discard 500");
+    uint32_t n500 = 0;
+    CHECK(fk_fork(s4, 0, &n500) == 0 && n500 == 500, "the only free id is reused");
+    CHECK(has(s4, 500, 0, 1) && has(s4, 500, 1, 42), "and the new branch reads main's p1 = 42, not 7777 from the branch that had the id");
+    CHECK(fk_fork(s4, 0, &extra) == FK_ELIMIT, "full again");
+    CHECK(fk_discard(s4, 20) == 0 && fk_discard(s4, 10) == 0, "discard 20, then 10");
+    uint32_t n1 = 0, n2 = 0;
+    CHECK(fk_fork(s4, 0, &n1) == 0 && n1 == 10 && fk_fork(s4, 0, &n2) == 0 && n2 == 20, "next fit from 500: wraps round, finds 10 first, then 20 (not 20 first, although it was discarded first)");
+    CHECK(has(s4, 10, 1, 42) && has(s4, 20, 1, 42) && has(s4, 20, 0, 1), "both read main's pages, not the old 7778 and 7779");
+    fk_close(s4); fk_file_close(&i4);
+    s4 = NULL;
+    CHECK(open_path(p, &i4, &s4) && fk_branch_count(s4) == FK_MAX_BRANCHES && fk_branch_alive(s4, 10) && fk_branch_alive(s4, 20) && fk_branch_alive(s4, 500), "reopen: replaying the log reproduces the reuse");
+    CHECK(has(s4, 10, 1, 42) && has(s4, 20, 1, 42) && has(s4, 500, 1, 42) && fk_fork(s4, 0, &extra) == FK_ELIMIT, "same contents, still full");
+    CHECK(fk_compact(s4) == 0 && has(s4, 500, 1, 42) && fk_discard(s4, 777) == 0 && fk_fork(s4, 0, &extra) == 0 && extra == 777, "after compaction (1,024 branches in the snapshot) the same");
+    fk_close(s4); fk_file_close(&i4);
+  }
+
+  printf("== format versions: a version 2 file from the previous release, and a version from the future\n");
+  {
+    char src[400], p[300];
+    snprintf(src, sizeof src, "%s/v2-compacted.fk", FK_TEST_DATA);
+    snprintf(p, sizeof p, "%s/v2copy.fk", dir);
+    fk_io i5; fk_store *s5 = NULL;
+    CHECK(copy_file(src, p) && file_version(p) == 2, "a version 2 store with a snapshot, written by the store as of commit 7008c1c (test/data)");
+    CHECK(open_path(p, &i5, &s5), "it opens");
+    CHECK(s5 && fk_branch_count(s5) == 4 && fk_branch_alive(s5, 0) && !fk_branch_alive(s5, 1) && fk_branch_alive(s5, 2) && fk_branch_alive(s5, 3), "branches 0, 2, 3 are alive, 1 is not");
+    CHECK(s5 && has(s5, 0, 0, 5) && has(s5, 0, 1, 2) && has(s5, 2, 0, 1) && has(s5, 2, 1, 33) && has(s5, 3, 0, 77) && has(s5, 3, 1, 33), "every branch reads back what it held");
+    uint32_t n = 0;
+    CHECK(s5 && fk_fork(s5, 0, &n) == 0 && n == 4 && commit1(s5, n, 1, 60, 2) == 0 && has(s5, n, 1, 60), "a fork works and gets the next new id (4)");
+    CHECK(s5 && fk_discard(s5, 4) == 0 && fk_fork(s5, 0, &n) == 0 && n == 5, "version 2 files never reuse ids: after discarding 4 the next fork gets 5");
+    if (s5) fk_close(s5);
+    fk_file_close(&i5);
+    CHECK(file_version(p) == 2, "the file is still version 2 (an older program can still read it)");
+    s5 = NULL;
+    CHECK(open_path(p, &i5, &s5) && fk_branch_count(s5) == 6 && fk_branch_alive(s5, 5) && !fk_branch_alive(s5, 4) && has(s5, 3, 0, 77), "reopen with the version 2 rules");
+    CHECK(s5 && fk_compact(s5) == 0, "compact it");
+    if (s5) fk_close(s5);
+    fk_file_close(&i5);
+    CHECK(file_version(p) == 3, "the compacted file is version 3");
+    s5 = NULL;
+    CHECK(open_path(p, &i5, &s5) && has(s5, 0, 0, 5) && has(s5, 2, 1, 33) && has(s5, 3, 0, 77) && fk_branch_alive(s5, 5) && !fk_branch_alive(s5, 4), "reopen: nothing lost");
+    n = 0;
+    CHECK(s5 && fk_fork(s5, 0, &n) == 0 && n == 6, "the cursor carried over from the version 2 history (latest fork was 5): the next fork gets 6");
+    if (s5) fk_close(s5);
+    fk_file_close(&i5);
+    /* a version this program does not know is refused, and nothing is cut off */
+    snprintf(p, sizeof p, "%s/future.fk", dir);
+    CHECK(copy_file(src, p), "copy the fixture again");
+    patch_header_version(p, 4);
+    long before = fsz(p);
+    s5 = NULL;
+    CHECK(fk_file_open(p, &i5) == 0 && fk_open(&i5, &s5) == FK_ECORRUPT && fsz(p) == before, "relabelled as version 4: refused with FK_ECORRUPT, the file is untouched");
+    fk_file_close(&i5);
   }
 
   printf("\nTOTAL FAILS=%d\n", fails);

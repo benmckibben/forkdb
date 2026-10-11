@@ -15,10 +15,12 @@ seeds=${SEEDS:-60}
 ops=${OPS:-8}
 [ "${1:-}" = quick ] && seeds=10
 
-crash_src="$here/test/crash_test.c $here/test/simdisk.c $here/store/fkstore.c"
+# The power-loss model has 8 branch ids so that ids are reused all the time; the file tests use the default (1024).
+crash_src="-DFK_MAX_BRANCHES=8 $here/test/crash_test.c $here/test/simdisk.c $here/store/fkstore.c"
+fdata=("-DFK_TEST_DATA=\"$here/test/data\"") # the path of the version 2 fixture, as a C string
 
 echo "== real-file tests"
-$cc $warn "$here/test/file_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" -o "$out/file_test"
+$cc $warn "${fdata[@]}" "$here/test/file_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" -o "$out/file_test"
 "$out/file_test"
 
 echo "== power-loss tests (${seeds} seeds x ${ops} operations, address and undefined-behaviour sanitizers on)"
@@ -32,7 +34,7 @@ mutant() { # name, flags
   # shellcheck disable=SC2086
   $cc $warn $flags $crash_src -o "$out/m_crash"
   # shellcheck disable=SC2086
-  $cc $warn $flags "$here/test/file_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" -o "$out/m_file"
+  $cc $warn $flags "${fdata[@]}" "$here/test/file_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" -o "$out/m_file"
   "$out/m_crash" 25 8 >/dev/null 2>&1 || c=YES
   "$out/m_file" >/dev/null 2>&1 || f=YES
   printf "  %-52s power-loss harness: %-3s  file tests: %s\n" "$name" "$c" "$f"
@@ -53,4 +55,8 @@ mutant "hardware CRC32C leaves out the last bytes of a buffer" "-DFK_BUG_CRC_HW_
 mutant "index: a rehash loses one entry" "-DFK_BUG_INDEX_GROW_DROP"
 mutant "index: a collision is treated as a miss" "-DFK_BUG_INDEX_NO_PROBE"
 mutant "index: overwriting a page adds a second entry" "-DFK_BUG_INDEX_DUP_ON_OVERWRITE"
+mutant "ids: a reused id builds on the discarded branch's layers" "-DFK_BUG_ID_STALE_HEAD"
+mutant "ids: fork can hand out the id of a live branch" "-DFK_BUG_ID_REUSE_ALIVE"
+mutant "ids: recovery rejects a fork that reuses an id" "-DFK_BUG_ID_REPLAY_STRICT"
+mutant "ids: the allocation cursor is not restored from a snapshot" "-DFK_BUG_ID_NO_CURSOR"
 echo "all store tests passed"

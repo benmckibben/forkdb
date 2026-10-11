@@ -3,6 +3,7 @@
  *   fkbench shrink <dir> <live_mib> <rounds> <overwrite_pct>
  *   fkbench forks  <dir> <live_mib> <branches> <write_pct> <random|clustered> <discard_pct>
  *   fkbench depth  <dir> <live_mib> <max_depth>
+ *   fkbench churn  <dir> <live_mib> <iterations>
  *
  * Output is "key=value" lines. Build and run with scripts/bench-compact.sh (optimised build, no sanitizers).
  * "cold" means: the file's pages were dropped from the page cache with posix_fadvise(DONTNEED) just before. That drops this
@@ -48,7 +49,13 @@ static void reset_peak(void) {
   FILE *f = fopen("/proc/self/clear_refs", "w");
   if (f) { fputs("5", f); fclose(f); }
 }
-static void mem(const char *tag) { printf("mem_%s_rss_mib=%.1f mem_%s_peak_mib=%.1f\n", tag, status_kb("VmRSS:") / 1024.0, tag, status_kb("VmHWM:") / 1024.0); fflush(stdout); }
+static fk_store *g_s;
+static void mem(const char *tag) {
+  printf("mem_%s_rss_mib=%.1f mem_%s_peak_mib=%.1f", tag, status_kb("VmRSS:") / 1024.0, tag, status_kb("VmHWM:") / 1024.0);
+  if (g_s) printf(" mem_%s_index_mib=%.1f", tag, fk_index_bytes(g_s) / 1048576.0); /* what the store itself says its layer tables use */
+  printf("\n");
+  fflush(stdout);
+}
 
 /* ---- files ---- */
 static char g_path[1024];
@@ -98,7 +105,6 @@ static void page_fill(uint8_t *buf, uint32_t pg, uint32_t ver) {
 }
 
 static fk_io g_io;
-static fk_store *g_s;
 static double open_store(void) {
   double t = now();
   CK(fk_file_open(g_path, &g_io));
@@ -342,8 +348,8 @@ static int sc_depth(double live_mib, int maxd) {
     printf("read_ns_depth%d_warm=%.0f\n", d, read_avg_ns(0, 4096, L, 200000));
   }
   printf("one_page_commit_avg_ms=%.2f fork_avg_us=%.1f branch_ids_used=%u\n", tcommit / (d ? d : 1), tfork * 1000 / (d ? d : 1), fk_branch_count(g_s));
-  /* the branch id limit: keep forking until it says no */
-  while (!rc) {
+  /* the old limit was 1,023 forks per store: go on past it (ids of discarded branches are reused), but stop after a bound */
+  for (int extra = 0; extra < 2500 && !rc; extra++) {
     pgs[0] = 1; vs[0] = 3;
     commit_pages(0, pgs, vs, 1, L);
     rc = fk_fork(g_s, 0, &dst);
@@ -351,7 +357,9 @@ static int sc_depth(double live_mib, int maxd) {
     CK(fk_discard(g_s, dst));
     d++;
   }
-  printf("fork_fails_after=%d rc=%d branch_ids_used=%u\n", d, rc, fk_branch_count(g_s));
+  printf("forks_done=%d first_failure_rc=%d branch_ids_used=%u\n", d, rc, fk_branch_count(g_s));
+  mem("depth_deep");
+  printf("read_ns_deep_warm=%.0f\n", read_avg_ns(0, 4096, L, 200000));
   double c = timed_compact("depth");
   printf("read_ns_after_compact_warm=%.0f\n", read_avg_ns(0, 4096, L, 200000));
   stats("after");
@@ -363,6 +371,53 @@ static int sc_depth(double live_mib, int maxd) {
   return 0;
 }
 
+/* ================= churn ================= */
+/* The workflow ids are reused for: per iteration, write a page on main, fork it, write two pages on the fork, discard the fork. */
+static uint32_t churn_ver(uint32_t pg, void *ctx) { return ((uint32_t *)ctx)[pg]; }
+static int sc_churn(double live_mib, int iters) {
+  uint32_t L = (uint32_t)(live_mib * 1048576.0 / FK_PAGE);
+  uint32_t *ver = calloc(L, sizeof *ver);
+  printf("scenario=churn live_mib=%.0f pages=%u iterations=%d\n", live_mib, L, iters);
+  open_store();
+  uint32_t pgs[BATCH], vs[BATCH];
+  for (uint32_t pg = 0; pg < L;) {
+    uint32_t n = 0;
+    while (n < BATCH && pg < L) { pgs[n] = pg; vs[n] = 1; ver[pg] = 1; n++; pg++; }
+    commit_pages(0, pgs, vs, n, L);
+  }
+  mem("base");
+  uint32_t dst = 0, maxid = 0;
+  int rc = 0, report = iters >= 10 ? iters / 10 : 1;
+  double t0 = now();
+  for (int it = 1; it <= iters && !rc; it++) {
+    uint32_t pg = 1 + (uint32_t)it % (L - 100);
+    pgs[0] = pg; vs[0] = 100u + (uint32_t)it; ver[pg] = vs[0];
+    commit_pages(0, pgs, vs, 1, L);
+    rc = fk_fork(g_s, 0, &dst);
+    if (rc) break;
+    if (dst > maxid) maxid = dst;
+    pgs[0] = L - 1; pgs[1] = L - 2; vs[0] = 5000000u + (uint32_t)it; vs[1] = vs[0] + 1;
+    commit_pages(dst, pgs, vs, 2, L);
+    CK(fk_discard(g_s, dst));
+    if (it % report == 0) {
+      uint64_t f, l;
+      CK(fk_stats(g_s, &f, &l));
+      printf("iter=%d highest_id=%u file_mib=%.1f live_mib=%.1f index_mib=%.2f read_ns_main=%.0f elapsed_s=%.0f\n", it, maxid, f / 1048576.0, l / 1048576.0, fk_index_bytes(g_s) / 1048576.0, read_avg_ns(0, 4096, L - 100, 100000), (now() - t0) / 1000);
+    }
+  }
+  printf("forks_done_rc=%d highest_id_used=%u\n", rc, maxid);
+  double c = timed_compact("churn");
+  stats("after");
+  printf("after_compact_index_mib=%.2f read_ns_main_after=%.0f\n", fk_index_bytes(g_s) / 1048576.0, read_avg_ns(0, 4096, L - 100, 100000));
+  double vms;
+  long bad = verify_all(0, L, churn_ver, ver, &vms);
+  printf("verify_main_ms=%.0f verify_mismatches=%ld\n", vms, bad);
+  close_store();
+  free(ver);
+  printf("RESULT churn ok=%d compact_ms=%.0f\n", bad == 0 && rc == 0, c);
+  return bad != 0 || rc != 0;
+}
+
 int main(int argc, char **argv) {
   if (argc < 3) { fprintf(stderr, "usage: see the top of fkbench.c\n"); return 1; }
   snprintf(g_path, sizeof g_path, "%s/store.fk", argv[2]);
@@ -371,6 +426,7 @@ int main(int argc, char **argv) {
   int rc = 1;
   if (!strcmp(argv[1], "shrink") && argc == 6) rc = sc_shrink(atof(argv[3]), atoi(argv[4]), atof(argv[5]));
   else if (!strcmp(argv[1], "forks") && argc == 8) rc = sc_forks(atof(argv[3]), (uint32_t)atoi(argv[4]), atof(argv[5]), !strcmp(argv[6], "random"), atof(argv[7]));
+  else if (!strcmp(argv[1], "churn") && argc == 5) rc = sc_churn(atof(argv[3]), atoi(argv[4]));
   else if (!strcmp(argv[1], "depth") && argc == 5) rc = sc_depth(atof(argv[3]), atoi(argv[4]));
   else fprintf(stderr, "bad arguments\n");
   unlink(g_path);

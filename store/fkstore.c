@@ -5,7 +5,7 @@
 #include <string.h>
 
 #define MAGIC 0x31524b46u /* "FKR1" little-endian */
-#define FK_VERSION 2u     /* 2 added snapshots (compaction); version 1 files are still read */
+#define FK_VERSION 3u     /* 2 added snapshots (compaction); 3 lets fork reuse the ids of discarded branches and adds the allocation cursor to snapshots. Versions 1 and 2 are still read. */
 #define HDR_SZ 4096u
 #define REC_HDR 32u
 #define PAGE_PAYLOAD (8u + FK_PAGE)
@@ -131,7 +131,9 @@ struct fk_store {
   uint64_t mark_end, mark_gen; /* the durable-end marker: log bytes known to have been durably committed */
   uint32_t since_mark;
   Branch br[FK_MAX_BRANCHES];
-  uint32_t nb;
+  uint32_t nb;        /* one more than the highest branch id ever in use */
+  uint32_t last_id;   /* the id the latest fork was given: the allocation cursor (see alloc_id) */
+  uint32_t version;   /* of the file: reuse of ids is only allowed from version 3 */
   Layer **layers;
   size_t nlayers, caplayers;
   int txn_open;
@@ -256,11 +258,15 @@ static int apply_fork(fk_store *s, uint32_t src, uint32_t dst) {
     if (!nh) return FK_ENOMEM;
     s->br[src].head = nh;
   }
+#ifdef FK_BUG_ID_STALE_HEAD
+  if (dst < s->nb && s->br[dst].head) f = s->br[dst].head; /* mutant: a reused id builds on the discarded branch's layers */
+#endif
   Layer *d = layer_new(s, f);
   if (!d) return FK_ENOMEM;
   s->br[dst].head = d;
   s->br[dst].alive = 1;
-  s->nb = dst + 1;
+  if (dst >= s->nb) s->nb = dst + 1;
+  s->last_id = dst;
   return FK_OK;
 }
 
@@ -384,7 +390,7 @@ static const PendPage *cp_find(const PendPage *cp, uint32_t ncp, uint64_t off) {
 }
 
 /* Replace the whole in-memory state with the snapshot. Builds the new layers on the side: on failure nothing has changed. */
-static int snap_load(fk_store *s, const uint8_t *st, size_t n, const PendPage *cp, uint32_t ncp) {
+static int snap_load(fk_store *s, const uint8_t *st, size_t n, const PendPage *cp, uint32_t ncp, uint32_t version) {
   Rd r = { st, n, 0, 0 };
   uint32_t nb = r_u32(&r), nl = r_u32(&r);
   if (r.bad || nb == 0 || nb > FK_MAX_BRANCHES || nl == 0 || nl > n / 12) return FK_ECORRUPT;
@@ -422,6 +428,11 @@ static int snap_load(fk_store *s, const uint8_t *st, size_t n, const PendPage *c
     br[b].alive = alive;
     br[b].head = alive ? L[head] : NULL;
   }
+  uint32_t last = nb > 1 ? nb - 1 : 0; /* version 2 snapshots have no cursor; there the latest fork always had the highest id */
+  if (rc == FK_OK && version >= 3) {
+    last = r_u32(&r);
+    if (r.bad || last >= nb) rc = FK_ECORRUPT;
+  }
   if (rc == FK_OK && r.i != n) rc = FK_ECORRUPT;
   if (rc != FK_OK) {
     for (uint32_t i = 0; i < nl; i++) layer_free(L[i]);
@@ -434,6 +445,11 @@ static int snap_load(fk_store *s, const uint8_t *st, size_t n, const PendPage *c
   s->nlayers = s->caplayers = nl;
   memcpy(s->br, br, sizeof br);
   s->nb = nb;
+#ifdef FK_BUG_ID_NO_CURSOR
+  s->last_id = 0; /* mutant: the allocation cursor is not restored from a snapshot */
+#else
+  s->last_id = last;
+#endif
   return FK_OK;
 }
 
@@ -452,7 +468,7 @@ static int write_header(const fk_io *io, int sync) {
 }
 static uint32_t header_ver(const uint8_t *h) {
   uint32_t v = get32(h + 8);
-  if (memcmp(h, "FORKDBST", 8) != 0 || (v != 1 && v != 2) || get32(h + 12) != FK_PAGE || get32(h + 16) != fk_crc32c(0, h, 16)) return 0;
+  if (memcmp(h, "FORKDBST", 8) != 0 || (v < 1 || v > FK_VERSION) || get32(h + 12) != FK_PAGE || get32(h + 16) != fk_crc32c(0, h, 16)) return 0;
   return v;
 }
 
@@ -515,7 +531,12 @@ static int scan(fk_store *s, int64_t fsize, uint32_t version) {
     } else if (type == T_FORK) {
       if (len != 8 || npend) break;
       uint32_t src = get32(pay), dst = get32(pay + 4);
-      if (src >= s->nb || !s->br[src].alive || dst != s->nb || dst >= FK_MAX_BRANCHES) break;
+      if (src >= s->nb || !s->br[src].alive || dst >= FK_MAX_BRANCHES) break;
+#ifdef FK_BUG_ID_REPLAY_STRICT
+      if (dst != s->nb) break; /* mutant: recovery only knows the old rule (a new id, never a reused one) */
+#else
+      if (s->version >= 3 ? !(dst != 0 && (dst == s->nb || (dst < s->nb && !s->br[dst].alive))) : dst != s->nb) break;
+#endif
       if ((rc = apply_fork(s, src, dst)) != FK_OK) break;
       unit = 1;
     } else if (type == T_DISCARD) {
@@ -551,7 +572,7 @@ static int scan(fk_store *s, int64_t fsize, uint32_t version) {
       slen += len;
     } else if (type == T_SNAPEND) {
       if (len != 12 || !slen || get64(pay) != slen || get32(pay + 8) != fk_crc32c(0, stream, slen)) break;
-      int r2 = snap_load(s, stream, slen, cp, ncp);
+      int r2 = snap_load(s, stream, slen, cp, ncp, version);
       if (r2 == FK_ECORRUPT) break;
       if (r2 != FK_OK) { rc = r2; break; }
       ncp = 0;
@@ -613,6 +634,7 @@ int fk_open(const fk_io *io, fk_store **out) {
     size = HDR_SZ;
   }
   if (fresh) { s->mark_end = HDR_SZ; s->mark_gen = 0; } else read_marker(s);
+  s->version = version;
   Layer *main_layer = layer_new(s, NULL);
   if (!main_layer) { fk_close(s); return FK_ENOMEM; }
   s->br[0].head = main_layer;
@@ -676,11 +698,37 @@ int fk_read(fk_store *s, uint32_t b, uint32_t pgno, void *buf) {
 /* ---------- writes ---------- */
 static void commit_tail(fk_store *s, uint64_t end, uint64_t seq, uint32_t last) { s->end = end; s->seq = seq; s->last_crc = last; }
 
+/* Which id a fork gets. Ids of discarded branches are reused, **next fit**: the search starts just after the id the latest fork was
+ * given and wraps around (skipping 0), so a just-discarded id is the last one to come back, not the first. A caller that keeps a
+ * stale id therefore has to survive a whole round of the id space before it can be fooled. Version 1 and 2 files never reuse ids
+ * (an older program would not understand the log). The rule depends only on the alive flags and the cursor, both of which a
+ * snapshot keeps, so replaying the log or loading a snapshot reproduces it. */
+static int alloc_id(const fk_store *s, uint32_t *id) {
+  if (s->version < 3) {
+    if (s->nb >= FK_MAX_BRANCHES) return FK_ELIMIT;
+    *id = s->nb;
+    return FK_OK;
+  }
+  uint32_t last = s->last_id;
+  for (uint32_t k = 1; k < FK_MAX_BRANCHES; k++) {
+    uint32_t cand = last + k;
+    if (cand >= FK_MAX_BRANCHES) cand -= FK_MAX_BRANCHES - 1; /* wrap, skipping id 0 */
+    int free_ = cand >= s->nb || !s->br[cand].alive;
+#ifdef FK_BUG_ID_REUSE_ALIVE
+    if (k == 1) free_ = 1; /* mutant: the first candidate is taken even if its branch is alive */
+#endif
+    if (free_) { *id = cand; return FK_OK; }
+  }
+  return FK_ELIMIT;
+}
+
 int fk_fork(fk_store *s, uint32_t src, uint32_t *dst) {
   if (s->failed) return FK_EFAILED;
   if (s->txn_open) return FK_EBUSY;
-  if (!fk_branch_alive(s, src) || s->nb >= FK_MAX_BRANCHES) return FK_EINVAL;
-  uint32_t id = s->nb;
+  if (!fk_branch_alive(s, src)) return FK_EINVAL;
+  uint32_t id = 0;
+  int arc = alloc_id(s, &id);
+  if (arc != FK_OK) return arc;
   uint8_t pay[8];
   put32(pay, src);
   put32(pay + 4, id);
@@ -906,7 +954,7 @@ static int new_off(const Plan *P, uint64_t old, uint64_t *out) {
   return FK_OK;
 }
 static size_t plan_stream_len(const Plan *P, uint32_t nb) {
-  size_t n = 8 + 5 * (size_t)nb;
+  size_t n = 8 + 5 * (size_t)nb + 4; /* header counts, one entry per branch id, the allocation cursor */
   for (uint32_t i = 0; i < P->nl; i++) n += 12 + 12 * (size_t)P->l[i].n;
   return n;
 }
@@ -935,6 +983,7 @@ static int plan_stream(const fk_store *s, const Plan *P, Buf *b) {
     b_put(b, &a, 1);
     b_u32(b, a ? P->head[i] : 0);
   }
+  b_u32(b, s->last_id); /* version 3: the allocation cursor */
   return b->err ? FK_ENOMEM : FK_OK;
 }
 
@@ -990,10 +1039,11 @@ static int compact_exec(fk_store *s, const Plan *P) {
   cp = malloc((P->nu ? P->nu : 1) * sizeof *cp);
   if (!cp) { s->failed = 1; free(sb.p); return FK_ENOMEM; }
   for (size_t i = 0; i < P->nu; i++) { cp[i].pgno = P->u[i].pg; cp[i].off = HDR_SZ + (uint64_t)i * REC_PAGE_SZ; cp[i].data = NULL; }
-  rc = snap_load(s, sb.p, sb.n, cp, (uint32_t)P->nu);
+  rc = snap_load(s, sb.p, sb.n, cp, (uint32_t)P->nu, FK_VERSION);
   free(cp);
   free(sb.p);
   if (rc != FK_OK) { s->failed = 1; return rc; }
+  s->version = FK_VERSION; /* the new file has a current header */
   s->end = e;
   s->seq = q;
   s->last_crc = l;

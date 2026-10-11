@@ -7,7 +7,9 @@
 #include <stdint.h>
 
 #define FK_PAGE 4096u
-#define FK_MAX_BRANCHES 1024u
+#ifndef FK_MAX_BRANCHES
+#define FK_MAX_BRANCHES 1024u /* branch ids are below this: at most this many branches alive at once (tests build with a smaller value) */
+#endif
 #define FK_MAX_PAGES (1u << 28) /* page numbers and sizes are below this (1 TiB at 4 KiB pages) */
 
 enum {
@@ -18,7 +20,8 @@ enum {
   FK_ENOENT = -4,   /* no such branch, or page beyond the branch size */
   FK_EFAILED = -5,  /* an earlier I/O error: close and reopen (recovery) before using the store again */
   FK_ENOMEM = -6,
-  FK_EBUSY = -7     /* a transaction is open */
+  FK_EBUSY = -7,    /* a transaction is open */
+  FK_ELIMIT = -8    /* fork: FK_MAX_BRANCHES branches are alive; discard one first */
 };
 
 /* The only way the store touches storage. Offsets are absolute file offsets. */
@@ -44,8 +47,11 @@ typedef struct fk_store fk_store;
 int fk_open(const fk_io *io, fk_store **out);
 void fk_close(fk_store *s);
 
-/* Branches. Branch 0 always exists. Ids are never reused. */
-uint32_t fk_branch_count(const fk_store *s);          /* ids handed out so far, dead ones included */
+/* Branches. Branch 0 always exists. A fork is given an id below FK_MAX_BRANCHES: a never-used one, or the id of a discarded branch,
+ * searched next-fit (starting just after the id the latest fork got and wrapping round), so a discarded id comes back as late as
+ * possible. The caller must drop its handle when it discards a branch: a later fork may be given the same number, and a stale
+ * handle would then read the new branch. (Files written before format version 3 never reuse ids, until they are compacted.) */
+uint32_t fk_branch_count(const fk_store *s);          /* one more than the highest id ever in use; dead ids below it are not alive */
 int fk_branch_alive(const fk_store *s, uint32_t b);
 int fk_size(const fk_store *s, uint32_t b, uint32_t *pages);
 /* Page content (FK_PAGE bytes). Pages inside the size that were never written read as zeros. */
