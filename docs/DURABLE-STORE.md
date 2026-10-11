@@ -59,6 +59,23 @@ The limit of this: damage in the part of the log after the last marker is still 
 
 Rebuilt by the same scan. Each branch has a head layer; a layer maps page number to the offset of its PAGE record (or a tombstone, for pages removed by shrinking). A layer is an **open-addressing hash table** (linear probing, never more than half full, keyed by page number), so its memory is proportional to the number of pages it holds, not to the highest page number it touched: a fork that writes one page near the end of a 1 GiB database costs a few hundred bytes instead of 2 MiB (500 branches that each wrote 1 MiB of random pages of a 1 GiB database: 1,007 MiB of process memory before, 15 MiB now). Entries cost 12 bytes in a table that is a quarter to half full, so 24 to 48 bytes per page held; a layer that holds every page of a database costs about three times what a dense array would (6 MiB instead of 2 MiB per GiB), which I accepted for a layer holding all pages of a database. A shrink adds a tombstone only for pages that exist below the layer. Compaction sorts a layer's entries by page to plan the new file; the snapshot format already listed pages sparsely, so it did not change. Forking freezes the source's head and gives both sides an empty one on top (O(1); an unchanged head is shared instead of stacked). A read walks the layer chain, then reads and checks one record. Chains only get shorter at compaction (below); between compactions a long fork history makes reads walk more layers.
 
+## Keeping the layer tree small
+
+Layers form a tree: a fork freezes the source's head layer, and the source and the new branch each get an empty layer on top of it. Two rules keep the tree as small as it can be, and are applied whenever a branch is discarded (live, and when the log is replayed):
+
+1. **A layer with no live branch on it and no child is dead and is freed**, and so on up its parents.
+2. **A layer with no live branch on it and exactly one child is folded into that child**: the two become one layer. The smaller layer's entries move into the larger one (the child's entry for a page wins, the parent's is used where the child has none, tombstones are carried like any other entry; the size is the child's). Reads give the same result before and after.
+
+So with n live branches there are at most 2n - 1 layers, however many forks and discards there have been, and a read looks through at most that many. The power-loss and logic tests check that bound after every operation. A branch's head layer can change (when the parent side is the larger, it is the parent layer that survives and takes over the branch), which is invisible outside the store.
+
+A fold that runs out of memory leaves a valid tree, because every entry copied so far is one the reader would have found anyway; the layers just stay unfolded until a later discard reaches them or a compaction folds them, so the bound above holds only while allocations succeed. The log is not affected: it still holds the pages of discarded branches until compaction.
+
+**Compaction still folds chains of frozen layers** (it keeps one layer per branch head and merges the layers in between), but since discards now fold eagerly it no longer meets any such chain, and **no test exercises that path**: instrumenting the logic pass showed 0 of 3,869 compactions met one, and the mutant that used to guard it ("pages of a folded layer are lost") became equivalent and was retired. The code is kept because a snapshot or log from before this change can still describe such a chain.
+
+**Cost.** A fold copies the smaller layer's entries, so a loop of "write on main, fork, write on the fork, discard" costs time proportional to what main wrote in that round, not to everything in main. Measured on the benchmark machine (one run each, WSL2): on a 256 MiB database, 3,000 such rounds leave 1 layer and a cached read of main at 1.5 to 1.8 microseconds throughout and the index at 1.50 MiB, where before this change the same loop grew a layer per round, a read from 1.6 to 16.4 microseconds and the index to 2.4 MiB until a compaction. The log still grows (259 to 295 MiB for 259 MiB of live data) until compaction.
+
+**Snapshots.** Compaction numbers its layers parent-before-child by walking the tree, because the array of layers is not in creation order once layers are dropped (a bug the first version of this change had, found by the logic pass: compaction failed with `FK_ECORRUPT` after discards).
+
 ## Branch ids
 
 Branch 0 always exists. A fork is given an id below `FK_MAX_BRANCHES` (1,024): an id that was never used, or, from format version 3, **the id of a discarded branch**, so a workflow that forks and discards for every test run does not run out. The search is **next fit**: it starts just after the id the latest fork was given and wraps round (skipping 0), so a discarded id is the last one to come back, not the first. A caller holding a stale id (one it discarded) therefore has to survive a whole round of the id space before it is fooled. That is a mitigation, not a guarantee: **the caller must drop its handle when it discards a branch**, because a later fork may be given the same number, and a stale handle would then read the new branch. With every id alive, `fk_fork` returns `FK_ELIMIT`.
@@ -124,17 +141,23 @@ A test that has never failed proves little, so the store has compile-time bugs (
 | both of the previous two | no | no | **catches** |
 | compaction: new file swapped in without being synced | **catches** (cut between the rename and the directory sync) | no | no |
 | compaction: directory not synced after the rename | **catches** (commits acknowledged after the compaction are lost) | no | no |
-| compaction: pages of a folded layer are lost | no | **catches** | **catches** |
 | compaction: tombstones dropped where they hide a lower layer | no | **catches** | **catches** |
 | compaction: copies a damaged page without checking | no | no | **catches** |
 | open: a leftover compaction file is not deleted | no | no | **catches** |
 | index: a rehash loses one entry (off-by-one in the loop) | **catches** | **catches** | **catches** (the first version of the harness used 6 distinct pages and **missed it**; with 20 pages the harness catches it, and the file tests with 3,000 pages do as well) |
 | index: a collision is treated as a miss | **catches** | **catches** | **catches** |
 | index: overwriting a page adds a second entry instead | **catches** | **catches** | **catches** |
-| ids: a reused id builds on the discarded branch's layers | **catches** | **catches** | **catches** |
 | ids: fork can hand out the id of a live branch | **catches** | **catches** | **catches** |
 | ids: recovery rejects a fork that reuses an id (still has the old rule) | **catches** | **catches** | **catches** |
 | ids: the allocation cursor is not restored from a snapshot | **catches** | **catches** | **catches** |
+| layers: a fold lets the parent's entry win over the child's | **catches** (together with the logic pass) | | **catches** |
+| layers: a fold leaves the surviving layer with the wrong size | **catches** (together with the logic pass) | | **catches** |
+| layers: a fold leaves a branch pointing at the freed layer | **catches** (together with the logic pass) | | **catches** |
+| layers: a fold does not carry tombstones over | **catches** (with the logic pass; my quick 4-seed check missed it, the full run does not) | | **catches** |
+| layers: a layer with two children is folded as well | **catches** (together with the logic pass) | | **catches** |
+| layers: a layer other layers build on is freed on discard | **catches** (together with the logic pass) | | **catches** |
+| layers: discard never frees layers | **catches** (the layer-count check, with the logic pass) | | **catches** |
+| layers: discard never folds single-child layers | **catches** (the layer-count check, with the logic pass) | | **catches** |
 | hardware CRC32C leaves out the last bytes of a buffer | no | no | **catches** (the CRC test; the store still works with itself, so nothing else notices) |
 
 Which test catches which is not what I expected in two places, and I would rather say so than let the table suggest more than it shows:
@@ -148,11 +171,10 @@ Which test catches which is not what I expected in two places, and I would rathe
 - **One process, one writer transaction at a time**; no locking between processes.
 - **Compaction blocks the writer** and rewrites all live data; it is not incremental and not online. A segmented log that reclaims cold segments one at a time would avoid both, at the price of a manifest for atomicity (roughly doubling the work); I would only move to it if whole-file rewrites turn out to hurt on real databases. I have not measured compaction time on a large database.
 - **Nothing calls compaction automatically.** `fk_compact_if_needed` is there for the layer above to call (after a discard, say); the store itself never decides to.
-- **Between compactions the log grows**, and reads walk the layer chain; compaction is what flattens it.
+- **Between compactions the log grows** (overwritten pages and the pages of discarded branches stay in it until `fk_compact`). The in-memory layer tree does not: see "Keeping the layer tree small".
 - **The simulator models one outstanding rename**, and a rename that is atomic (as POSIX requires) but is lost or kept as a whole at a power cut. A file system that can leave a zero-length file after a rename without a prior fsync is covered (the mutant that skips the fsync shows it); one that breaks rename atomicity is not.
 - **A tombstone-heavy shrink** is tested for correctness but not for cost.
 - **Limits are small:** 1,024 branches alive at once (`FK_ELIMIT` when full), 2^28 pages per database, whole transactions held in memory until commit.
-- **Dead layers stay in memory until the next compaction.** Discarding a branch does not free its layers (or those of a long-gone fork), so a workflow that forks and discards thousands of times grows the index and lengthens the chain a read walks until `fk_compact` runs. Measured: 3,000 iterations of “write a page on main, fork, write two pages on the fork, discard” on a 256 MiB database took a cached read of main from 1.6 µs to 16.4 µs (about 5 ns for every layer in the chain, so it grows with the number of iterations since the last compaction) and the index from 1.5 to 2.4 MiB; one compaction (0.7 s) brought them back to 1.7 µs and 1.5 MiB. Nothing calls compaction automatically, and `fk_compact_if_needed` goes by garbage in the file (7% there), not by chain length. Freeing layers as they die, or compacting on chain length, is the next small change; I have not made it.
 - **A shrink walks every page number it removes** (one table lookup each, so time is proportional to the size removed, though memory is not).
 - **It is not yet the SQLite VFS.** Connecting them (journal and WAL files, the checkpoint-then-fork rule, locking) is separate work.
 - Tests ran on one machine, on a real file only for a normal close, a process killed without closing (also in the middle of a compaction, before and after the rename), an appended torn tail, a spliced record, a damaged record, a damaged page met during compaction, a full disk (writes to the temporary file failing), and relabelled format versions. A real power cut was not performed.

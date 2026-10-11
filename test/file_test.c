@@ -571,6 +571,128 @@ int main(void) {
     fk_file_close(&i5);
   }
 
+  printf("== layers: dead layers are freed and single-child layers are folded\n");
+  {
+    char p[300];
+    snprintf(p, sizeof p, "%s/layers.fk", dir);
+    fk_io i6; fk_store *s6 = NULL;
+    uint8_t z[FK_PAGE], pg[FK_PAGE];
+    memset(z, 0, sizeof z);
+    int ok = 1;
+    uint32_t depth = 0;
+
+    /* 1. a fork-write-discard loop does not grow the tree */
+    CHECK(open_path(p, &i6, &s6), "a new store");
+    for (uint32_t i = 0; i < 40; i++) ok = ok && commit1(s6, 0, i, 1, 40) == 0;
+    CHECK(ok && fk_layer_count(s6) == 1, "40 pages on main: one layer");
+    uint32_t maxl = 0, maxd = 0;
+    for (int it = 1; it <= 300 && ok; it++) {
+      uint32_t f = 0;
+      ok = commit1(s6, 0, (uint32_t)it % 40, 100 + it, 40) == 0 && fk_fork(s6, 0, &f) == 0 && commit1(s6, f, 39, 5000 + it, 40) == 0 && commit1(s6, f, 38, 6000 + it, 40) == 0 &&
+           fk_discard(s6, f) == 0 && fk_branch_depth(s6, 0, &depth) == 0;
+      if (fk_layer_count(s6) > maxl) maxl = fk_layer_count(s6);
+      if (depth > maxd) maxd = depth;
+    }
+    printf("    (300 iterations: at most %u layers, main at most %u deep)\n", maxl, maxd);
+    CHECK(ok && maxl <= 3 && maxd <= 2, "300 rounds of write, fork, write on the fork, discard it: at most 3 layers exist and main is at most 2 deep, at every step");
+    ok = 1;
+    for (uint32_t i = 1; i < 40 && ok; i++) {
+      int v = 1;
+      for (int it = 1; it <= 300; it++) if ((uint32_t)it % 40 == i) v = 100 + it;
+      ok = has(s6, 0, i, v);
+    }
+    CHECK(ok && has(s6, 0, 39, 1) == 0 && fk_read(s6, 0, 0, pg) == 0, "main reads back what it wrote (and not what the discarded forks wrote)");
+    fk_close(s6); fk_file_close(&i6);
+    s6 = NULL;
+    CHECK(open_path(p, &i6, &s6) && fk_layer_count(s6) <= 3, "reopen: the same few layers (the log is replayed through the same rules)");
+    CHECK(fk_compact(s6) == 0 && fk_layer_count(s6) <= 3, "compact");
+    ok = 1;
+    for (uint32_t i = 1; i < 40 && ok; i++) {
+      int v = 1;
+      for (int it = 1; it <= 300; it++) if ((uint32_t)it % 40 == i) v = 100 + it;
+      ok = has(s6, 0, i, v);
+    }
+    CHECK(ok, "main still reads back the same");
+    fk_close(s6); fk_file_close(&i6);
+
+    /* 2. discard in every kind of order; the layer array is no longer in creation order, compaction must not care */
+    snprintf(p, sizeof p, "%s/layers2.fk", dir);
+    s6 = NULL;
+    CHECK(open_path(p, &i6, &s6) && commit1(s6, 0, 0, 1, 4) == 0 && commit1(s6, 0, 1, 2, 4) == 0, "a new store");
+    uint32_t f[8] = {0};
+    ok = 1;
+    for (int i = 1; i <= 6 && ok; i++) { /* a tree of forks, some of forks, each with its own page */
+      uint32_t src = i <= 3 ? 0 : f[i - 3];
+      ok = fk_fork(s6, src, &f[i]) == 0 && commit1(s6, f[i], 2, 10 * i, 4) == 0 && commit1(s6, src, 3, 70 + i, 4) == 0;
+    }
+    CHECK(ok, "six forks (three of main, three of those), each writing page 2, with writes in between on the branch they came from");
+    CHECK(fk_discard(s6, f[2]) == 0 && fk_discard(s6, f[4]) == 0, "discard the second and fourth forks (the middle of the tree)");
+    CHECK(has(s6, f[1], 2, 10) && has(s6, f[3], 2, 30) && has(s6, f[5], 2, 50) && has(s6, f[6], 2, 60) && has(s6, 0, 0, 1) && has(s6, f[1], 0, 1), "the others read back their pages");
+    CHECK(fk_compact(s6) == 0, "compact");
+    CHECK(has(s6, f[1], 2, 10) && has(s6, f[3], 2, 30) && has(s6, f[5], 2, 50) && has(s6, f[6], 2, 60) && has(s6, 0, 1, 2), "the same");
+    fk_close(s6); fk_file_close(&i6);
+    s6 = NULL;
+    CHECK(open_path(p, &i6, &s6) && has(s6, f[1], 2, 10) && has(s6, f[3], 2, 30) && has(s6, f[5], 2, 50) && has(s6, f[6], 2, 60), "reopen the compacted file: the same");
+    CHECK(fk_discard(s6, f[6]) == 0 && fk_discard(s6, f[1]) == 0 && fk_discard(s6, f[5]) == 0 && fk_discard(s6, f[3]) == 0, "discard the rest");
+    CHECK(fk_layer_count(s6) == 1 && fk_branch_depth(s6, 0, &depth) == 0 && depth == 1, "one layer is left, main's");
+    CHECK(has(s6, 0, 0, 1) && has(s6, 0, 1, 2) && has(s6, 0, 3, 73), "main reads back all it has (page 3 as its last write, 73; the later writes were made on forks that are gone)");
+    fk_close(s6); fk_file_close(&i6);
+
+    /* 3. a fold with the parent the larger layer: the child's pages go into the parent, which takes over the branch */
+    snprintf(p, sizeof p, "%s/layers3.fk", dir);
+    s6 = NULL;
+    uint32_t g = 0;
+    CHECK(open_path(p, &i6, &s6), "a new store");
+    ok = 1;
+    for (uint32_t i = 0; i < 30 && ok; i++) ok = commit1(s6, 0, i, 1, 30) == 0;
+    ok = ok && fk_fork(s6, 0, &g) == 0 && commit1(s6, 0, 5, 9, 30) == 0 && fk_discard(s6, g) == 0;
+    CHECK(ok && fk_layer_count(s6) == 1 && has(s6, 0, 5, 9) && has(s6, 0, 6, 1), "30 pages, fork, one write on main, discard the fork: one layer, the write wins over the page below it");
+    CHECK(commit1(s6, 0, 7, 11, 30) == 0 && has(s6, 0, 7, 11) && has(s6, 0, 5, 9), "main keeps working after its layer was replaced");
+    fk_close(s6); fk_file_close(&i6);
+
+    /* 4. a fold with the child the larger layer: the parent's pages go into the child */
+    snprintf(p, sizeof p, "%s/layers4.fk", dir);
+    s6 = NULL;
+    CHECK(open_path(p, &i6, &s6) && commit1(s6, 0, 0, 1, 2) == 0 && commit1(s6, 0, 1, 2, 2) == 0 && fk_fork(s6, 0, &g) == 0, "a store with two pages and a fork");
+    ok = 1;
+    for (uint32_t i = 0; i < 60 && ok; i++) ok = commit1(s6, 0, i == 0 ? 0 : i + 1, 50 + (int)i, 62) == 0; /* page 0 again, then pages 2..60 */
+    CHECK(ok && fk_discard(s6, g) == 0 && fk_layer_count(s6) == 1, "main writes 60 more pages, the fork is discarded: one layer");
+    CHECK(has(s6, 0, 0, 50) && has(s6, 0, 1, 2) && has(s6, 0, 2, 51), "page 0 is main's newer write, page 1 comes from the layer that was folded in");
+    fk_close(s6); fk_file_close(&i6);
+
+    /* 5. tombstones and sizes survive a fold, in both directions */
+    for (int dir_a = 0; dir_a < 2; dir_a++) {
+      snprintf(p, sizeof p, "%s/layers5%d.fk", dir, dir_a);
+      s6 = NULL;
+      uint32_t a = 0, b = 0;
+      CHECK(open_path(p, &i6, &s6), "a new store");
+      ok = 1;
+      for (uint32_t i = 0; i < 10 && ok; i++) ok = commit1(s6, 0, i, 1, 10) == 0; /* the root layer */
+      ok = ok && fk_fork(s6, 0, &a) == 0;
+      uint32_t tombs = dir_a ? 6 : 2; /* a shrinks by 6 pages (more tombstones than the later layer has entries: it is the bigger) or by 2 */
+      ok = ok && commit1(s6, a, 0, 2, 10 - tombs) == 0;
+      ok = ok && fk_fork(s6, a, &b) == 0; /* freezes a's layer */
+      uint32_t nw = dir_a ? 1 : 5; /* then a grows back and writes 1 page (smaller layer) or 5 */
+      for (uint32_t i = 0; i < nw && ok; i++) ok = commit1(s6, a, i, 20 + (int)i, 10) == 0;
+      ok = ok && fk_discard(s6, b) == 0;
+      CHECK(ok && fk_layer_count(s6) == 3, dir_a ? "shrink by 6, fork, grow back writing 1 page, discard the fork (the tombstone layer is the bigger): 3 layers left (the root, main's head, and the fork's two merged)" : "shrink by 2, fork, grow back writing 5 pages, discard the fork (the later layer is the bigger): 3 layers left");
+      int good = 1;
+      for (uint32_t q = 10 - tombs; q < 10; q++) { /* pages removed by the shrink and not rewritten: zeros, not the root's data */
+        int written = 0;
+        for (uint32_t i = 0; i < nw; i++) if (q == i) written = 1;
+        if (written) continue;
+        good = good && fk_read(s6, a, q, pg) == 0 && !memcmp(pg, z, FK_PAGE);
+      }
+      CHECK(good, "pages removed by the shrink and not written since read as zeros");
+      CHECK(has(s6, a, 0, 20) && has(s6, a, 9, 1) == 0 && fk_size(s6, a, &depth) == 0 && depth == 10, "the later write wins, and the size is the later layer's (10)");
+      CHECK(has(s6, 0, 9, 1) && has(s6, 0, 0, 1), "main is unaffected");
+      fk_close(s6); fk_file_close(&i6);
+      s6 = NULL;
+      CHECK(open_path(p, &i6, &s6) && fk_read(s6, a, 9, pg) == 0 && !memcmp(pg, z, FK_PAGE) && has(s6, a, 0, 20), "reopen: the same");
+      fk_close(s6); fk_file_close(&i6);
+    }
+  }
+
   printf("\nTOTAL FAILS=%d\n", fails);
   char cmd[400]; snprintf(cmd, sizeof cmd, "rm -rf %s", dir); (void)!system(cmd);
   return fails ? 1 : 0;

@@ -402,7 +402,9 @@ static int sc_churn(double live_mib, int iters) {
     if (it % report == 0) {
       uint64_t f, l;
       CK(fk_stats(g_s, &f, &l));
-      printf("iter=%d highest_id=%u file_mib=%.1f live_mib=%.1f index_mib=%.2f read_ns_main=%.0f elapsed_s=%.0f\n", it, maxid, f / 1048576.0, l / 1048576.0, fk_index_bytes(g_s) / 1048576.0, read_avg_ns(0, 4096, L - 100, 100000), (now() - t0) / 1000);
+      uint32_t depth = 0;
+      CK(fk_branch_depth(g_s, 0, &depth));
+      printf("iter=%d highest_id=%u layers=%u main_depth=%u file_mib=%.1f live_mib=%.1f index_mib=%.2f read_ns_main=%.0f elapsed_s=%.0f\n", it, maxid, fk_layer_count(g_s), depth, f / 1048576.0, l / 1048576.0, fk_index_bytes(g_s) / 1048576.0, read_avg_ns(0, 4096, L - 100, 100000), (now() - t0) / 1000);
     }
   }
   printf("forks_done_rc=%d highest_id_used=%u\n", rc, maxid);

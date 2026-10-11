@@ -130,6 +130,12 @@ static int equal_state(fk_store *s, const Model *M) {
     }
     if (fk_read(s, b, sz, buf) != FK_ENOENT) { snprintf(why, sizeof why, "branch %u: page at size is readable", b); return 0; }
   }
+  /* The layer tree is as small as it can be: every layer has a live branch on it or at least two children (a leaf needs a branch,
+   * and a layer without a branch that has one child would have been folded into it), so with n live branches there are at most
+   * n layers with a branch and at most n - 1 with two or more children. */
+  uint32_t nalive = 0;
+  for (uint32_t b = 0; b < MAXBR; b++) nalive += (uint32_t)fk_branch_alive(s, b);
+  if (fk_layer_count(s) > 2 * nalive - 1) { snprintf(why, sizeof why, "%u layers for %u live branches (at most %u are needed)", fk_layer_count(s), nalive, 2 * nalive - 1); return 0; }
   return 1;
 }
 
@@ -387,17 +393,17 @@ int main(int argc, char **argv) {
 #ifdef FK_BUG_COMPACT_NO_DIRSYNC
   printf("MUTANT: compaction does not sync the directory after the rename\n");
 #endif
-#ifdef FK_BUG_COMPACT_LOSE_PARENT
-  printf("MUTANT: compaction loses the pages of a folded layer\n");
-#endif
 #ifdef FK_BUG_COMPACT_DROP_TOMB
   printf("MUTANT: compaction drops tombstones that hide a lower layer\n");
 #endif
-#ifdef FK_BUG_ID_STALE_HEAD
-  printf("MUTANT: a reused branch id builds on the discarded branch's layers\n");
-#endif
 #ifdef FK_BUG_ID_REUSE_ALIVE
   printf("MUTANT: fork can hand out the id of a live branch\n");
+#endif
+#ifdef FK_BUG_LAYER_NO_FREE
+  printf("MUTANT: a discarded branch's layers are never freed\n");
+#endif
+#ifdef FK_BUG_LAYER_NO_FOLD
+  printf("MUTANT: dead layers are freed but single-child layers are never folded\n");
 #endif
 #ifdef FK_BUG_ID_REPLAY_STRICT
   printf("MUTANT: recovery rejects a fork that reuses an id\n");
