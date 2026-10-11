@@ -19,6 +19,9 @@
 enum { T_PAGE = 1, T_COMMIT = 2, T_FORK = 3, T_DISCARD = 4, T_CPAGE = 5, T_SNAP = 6, T_SNAPEND = 7 };
 
 /* ---------- checksums and encoding ---------- */
+/* CRC-32C (Castagnoli). Two implementations of the same function: a portable table loop, and the CPU's CRC32 instruction where the
+ * build and the CPU have it (x86-64 with SSE4.2, selected at run time; AArch64 when compiled with the CRC extension). The results are
+ * identical, so files written with one are read with the other. */
 static uint32_t crc_tab[256];
 static int crc_ready;
 static void crc_init(void) {
@@ -29,12 +32,71 @@ static void crc_init(void) {
   }
   crc_ready = 1;
 }
-uint32_t fk_crc32c(uint32_t crc, const void *p, size_t n) {
+static uint32_t crc_sw(uint32_t crc, const void *p, size_t n) {
   if (!crc_ready) crc_init();
   const uint8_t *b = p;
   uint32_t c = ~crc;
   while (n--) c = crc_tab[(c ^ *b++) & 0xff] ^ (c >> 8);
   return ~c;
+}
+
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#include <nmmintrin.h>
+#define FK_HAVE_HWCRC 1
+__attribute__((target("sse4.2"))) static uint32_t crc_hw(uint32_t crc, const void *p, size_t n) {
+  const uint8_t *b = p;
+  uint64_t c = (uint32_t)~crc;
+  while (n >= 8) {
+    uint64_t v;
+    memcpy(&v, b, 8); /* the buffer need not be aligned */
+    c = _mm_crc32_u64(c, v);
+    b += 8;
+    n -= 8;
+  }
+  uint32_t c32 = (uint32_t)c;
+#ifndef FK_BUG_CRC_HW_TAIL
+  while (n--) c32 = _mm_crc32_u8(c32, *b++);
+#endif /* mutant: the last n % 8 bytes are left out of the checksum */
+  return ~c32;
+}
+static int crc_hw_usable(void) {
+  __builtin_cpu_init();
+  return __builtin_cpu_supports("sse4.2") != 0;
+}
+#elif defined(__aarch64__) && defined(__ARM_FEATURE_CRC32)
+#include <arm_acle.h>
+#define FK_HAVE_HWCRC 1
+static uint32_t crc_hw(uint32_t crc, const void *p, size_t n) {
+  const uint8_t *b = p;
+  uint32_t c = ~crc;
+  while (n >= 8) {
+    uint64_t v;
+    memcpy(&v, b, 8);
+    c = __crc32cd(c, v);
+    b += 8;
+    n -= 8;
+  }
+  while (n--) c = __crc32cb(c, *b++);
+  return ~c;
+}
+static int crc_hw_usable(void) { return 1; }
+#endif
+
+typedef uint32_t (*crc_fn)(uint32_t, const void *, size_t);
+static crc_fn crc_impl; /* chosen on first use */
+int fk_crc32c_select(int want_hw) {
+  crc_impl = crc_sw;
+  int hw = 0;
+#ifdef FK_HAVE_HWCRC
+  if (want_hw && crc_hw_usable()) { crc_impl = crc_hw; hw = 1; }
+#else
+  (void)want_hw;
+#endif
+  return hw;
+}
+uint32_t fk_crc32c(uint32_t crc, const void *p, size_t n) {
+  if (!crc_impl) fk_crc32c_select(1);
+  return crc_impl(crc, p, n);
 }
 static void put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 static void put32(uint8_t *p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (8 * i)); }

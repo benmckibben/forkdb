@@ -56,12 +56,103 @@ static int garbage_state_ok(fk_store *s) {
   return has(s, 0, 0, 2000) && has(s, 0, 1, 9) && has(s, 1, 0, 1199) && has(s, 1, 1, 8) && !fk_branch_alive(s, 2) && fk_branch_count(s) == 3;
 }
 
+/* CRC-32C reference: one bit at a time, no tables, nothing shared with the implementation under test. */
+static uint32_t crc_ref(uint32_t crc, const uint8_t *b, size_t n) {
+  uint32_t c = ~crc;
+  while (n--) {
+    c ^= *b++;
+    for (int k = 0; k < 8; k++) c = (c & 1) ? (c >> 1) ^ 0x82F63B78u : c >> 1;
+  }
+  return ~c;
+}
+static uint64_t xs_state = 88172645463325252ull;
+static uint64_t xs(void) { xs_state ^= xs_state << 13; xs_state ^= xs_state >> 7; xs_state ^= xs_state << 17; return xs_state; }
+
+/* Returns the number of failures for the implementation currently selected. */
+static int crc_checks(const char *name) {
+  int bad = 0;
+  uint8_t v[32];
+  struct { const char *what; const uint8_t *p; size_t n; uint32_t want; } vec[5];
+  uint8_t zeros[32] = {0}, ones[32], asc[32], desc[32];
+  memset(ones, 0xff, sizeof ones);
+  for (int i = 0; i < 32; i++) { asc[i] = (uint8_t)i; desc[i] = (uint8_t)(31 - i); }
+  vec[0] = (typeof(vec[0])){"32 zero bytes", zeros, 32, 0x8a9136aau};
+  vec[1] = (typeof(vec[0])){"32 bytes of 0xff", ones, 32, 0x62a8ab43u};
+  vec[2] = (typeof(vec[0])){"bytes 0..31", asc, 32, 0x46dd794eu};
+  vec[3] = (typeof(vec[0])){"bytes 31..0", desc, 32, 0x113fdb5cu};
+  vec[4] = (typeof(vec[0])){"\"123456789\"", (const uint8_t *)"123456789", 9, 0xe3069283u};
+  (void)v;
+  for (int i = 0; i < 5; i++) if (fk_crc32c(0, vec[i].p, vec[i].n) != vec[i].want) { printf("    %s: %s is %08x, expected %08x\n", name, vec[i].what, fk_crc32c(0, vec[i].p, vec[i].n), vec[i].want); bad++; }
+  /* random lengths (0..9000, so every n % 8) at every alignment, random starting value; chaining must equal one call */
+  static uint8_t buf[9100];
+  long mism = 0, chain = 0;
+  for (int i = 0; i < 20000; i++) {
+    size_t n = (size_t)(xs() % 9000), off = (size_t)(xs() % 8);
+    for (size_t j = 0; j < n; j++) buf[off + j] = (uint8_t)xs();
+    uint32_t seed = (uint32_t)xs();
+    if (fk_crc32c(seed, buf + off, n) != crc_ref(seed, buf + off, n)) mism++;
+    size_t cut = n ? (size_t)(xs() % (n + 1)) : 0;
+    if (fk_crc32c(fk_crc32c(seed, buf + off, cut), buf + off + cut, n - cut) != crc_ref(seed, buf + off, n)) chain++;
+  }
+  if (mism || chain) { printf("    %s: %ld of 20000 random buffers differ from the reference, %ld chained calls differ\n", name, mism, chain); bad++; }
+  return bad;
+}
+/* the same operations, so two runs must write the same bytes */
+static int small_history(const char *path) {
+  fk_io io; fk_store *s = NULL; uint32_t f = 0;
+  if (!open_path(path, &io, &s)) return 0;
+  int ok = commit1(s, 0, 0, 1, 3) == 0 && commit1(s, 0, 2, 2, 3) == 0 && fk_fork(s, 0, &f) == 0 && commit1(s, 1, 1, 9, 3) == 0 && commit1(s, 0, 0, 5, 3) == 0;
+  fk_close(s); fk_file_close(&io);
+  return ok;
+}
+static int same_file(const char *a, const char *b) {
+  FILE *fa = fopen(a, "rb"), *fb = fopen(b, "rb");
+  int same = fa && fb;
+  while (same) {
+    unsigned char x[4096], y[4096];
+    size_t nx = fread(x, 1, sizeof x, fa), ny = fread(y, 1, sizeof y, fb);
+    if (nx != ny || memcmp(x, y, nx)) same = 0;
+    if (nx == 0) break;
+  }
+  if (fa) fclose(fa);
+  if (fb) fclose(fb);
+  return same;
+}
+
 int main(void) {
   char dir[] = "/tmp/fkfileXXXXXX";
   if (!mkdtemp(dir)) return 2;
   char path[300];
   snprintf(path, sizeof path, "%s/store.fk", dir);
   fk_io io; fk_store *s = NULL;
+
+  printf("== CRC-32C: portable and hardware implementations agree with a bit-by-bit reference and with each other\n");
+  {
+    xs_state = 88172645463325252ull;
+    CHECK(fk_crc32c_select(0) == 0 && crc_checks("portable") == 0, "portable implementation: standard test vectors, 20,000 random buffers at every alignment, chained calls");
+    xs_state = 88172645463325252ull;
+    int hw = fk_crc32c_select(1);
+    if (hw) CHECK(crc_checks("hardware") == 0, "hardware implementation: the same checks");
+    else printf("  SKIP hardware CRC32C is not available on this CPU or build: only the portable implementation was tested\n");
+    char pa[300], pb[300], pc[300];
+    snprintf(pa, sizeof pa, "%s/crc_sw.fk", dir); snprintf(pb, sizeof pb, "%s/crc_hw.fk", dir); snprintf(pc, sizeof pc, "%s/crc_sw2.fk", dir);
+    fk_crc32c_select(0);
+    CHECK(small_history(pa), "write a store with the portable implementation");
+    fk_crc32c_select(1);
+    CHECK(small_history(pb), "write the same history with the hardware implementation (if any)");
+    CHECK(same_file(pa, pb), "the two files are byte for byte identical: no format difference");
+    fk_io i2; fk_store *s2 = NULL;
+    CHECK(open_path(pa, &i2, &s2) && has(s2, 0, 0, 5) && has(s2, 1, 1, 9) && has(s2, 0, 2, 2), "the portable file is read correctly with the hardware implementation");
+    if (s2) fk_close(s2);
+    fk_file_close(&i2);
+    fk_crc32c_select(0);
+    s2 = NULL;
+    CHECK(open_path(pb, &i2, &s2) && has(s2, 0, 0, 5) && has(s2, 1, 1, 9) && has(s2, 0, 2, 2), "and the other way round");
+    if (s2) fk_close(s2);
+    fk_file_close(&i2);
+    fk_crc32c_select(1);
+    (void)pc;
+  }
 
   printf("== create, commit, fork, close, reopen\n");
   CHECK(open_path(path, &io, &s), "create");

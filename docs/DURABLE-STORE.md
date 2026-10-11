@@ -22,6 +22,8 @@ The store holds the pages of many database branches in **one append-only log fil
 
 Record = 32-byte header + payload. Header: magic `FKR1`, type, **sequence number**, payload length, **crc of the previous record**, and a CRC-32C over the header (with its own crc field zeroed) and the payload.
 
+**Checksum implementation.** CRC-32C is computed with the CPU's CRC32 instruction where there is one (x86-64 with SSE4.2, checked at run time, so one binary runs everywhere; AArch64 when built with the CRC extension) and with a portable table loop otherwise. It is the same function, so the format does not depend on which one a machine has: the tests check both against the standard test vectors and a bit-by-bit reference on 20,000 random buffers at every alignment, and write a log with each and read it with the other (the two files are byte-for-byte identical). On the benchmark machine the hardware version made compaction of a 2 GiB database 2.7 times faster and opening a 4 GiB log 2.2 times faster (see the benchmark PR for the method and caveats).
+
 | Type | Payload |
 |---|---|
 | PAGE | branch, page number, 4096 bytes |
@@ -118,6 +120,7 @@ A test that has never failed proves little, so the store has compile-time bugs (
 | compaction: tombstones dropped where they hide a lower layer | no | **catches** | **catches** |
 | compaction: copies a damaged page without checking | no | no | **catches** |
 | open: a leftover compaction file is not deleted | no | no | **catches** |
+| hardware CRC32C leaves out the last bytes of a buffer | no | no | **catches** (the CRC test; the store still works with itself, so nothing else notices) |
 
 Which test catches which is not what I expected in two places, and I would rather say so than let the table suggest more than it shows:
 - I expected the power-loss harness to catch the torn-tail and record-chain mutants too (stale records resurfacing after a torn tail); it did not, including a run of about 330 workloads of 12 operations (about 273,000 crash images). A stale record has to line up exactly with the new tail, which random workloads almost never produce. The two mechanisms also protect the same property, so either alone is enough in practice. The deterministic file tests are what show each one is needed.

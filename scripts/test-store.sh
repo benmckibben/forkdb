@@ -49,4 +49,5 @@ mutant "compaction: pages of a folded layer are lost" "-DFK_BUG_COMPACT_LOSE_PAR
 mutant "compaction: tombstones dropped too early" "-DFK_BUG_COMPACT_DROP_TOMB"
 mutant "compaction: copies a damaged page without checking" "-DFK_BUG_COMPACT_NO_VERIFY"
 mutant "open: leftover compaction file is not deleted" "-DFK_BUG_COMPACT_NO_CLEANUP"
+mutant "hardware CRC32C leaves out the last bytes of a buffer" "-DFK_BUG_CRC_HW_TAIL"
 echo "all store tests passed"

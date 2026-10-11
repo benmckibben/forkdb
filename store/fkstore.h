@@ -71,8 +71,12 @@ int fk_compact_if_needed(fk_store *s, uint64_t min_bytes, int *did);
 int fk_stats(fk_store *s, uint64_t *file_bytes, uint64_t *live_bytes);
 int fk_is_failed(const fk_store *s); /* after an I/O error that needs a reopen */
 
-/* CRC-32C, exposed for tests. crc is the finalised value of the previous call (0 to start). */
+/* CRC-32C, exposed for tests. crc is the finalised value of the previous call (0 to start). Uses the CPU's CRC32 instruction when
+ * there is one (x86-64: SSE4.2, checked at run time) and a portable loop otherwise; both give the same result. */
 uint32_t fk_crc32c(uint32_t crc, const void *p, size_t n);
+/* For tests: choose the implementation (0 = portable, 1 = hardware if available). Returns 1 if the hardware one is now in use.
+ * Not thread-safe; call it before any store is open. */
+int fk_crc32c_select(int want_hw);
 
 /* Real-file backend (io_file.c). */
 int fk_file_open(const char *path, fk_io *io);
