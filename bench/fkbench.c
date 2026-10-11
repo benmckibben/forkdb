@@ -272,9 +272,16 @@ static int sc_forks(double live_mib, uint32_t nb, double pct, int rnd, double dp
     if (!fk_branch_alive(g_s, k)) continue;
     uint8_t *w = calloc(c.L, 1);
     for (uint32_t i = 0; i < c.nw; i++) w[fork_pg(&c, k, i)] = 1;
-    for (uint32_t pg = 0; pg < c.L; pg += (w[pg] ? 1 : 97)) {
+    /* a stride of 97 from an unwritten page would skip writes that land in that gap */
+    for (uint32_t pg = 0; pg < c.L; pg++) if (w[pg]) {
       CK(fk_read(g_s, k, pg, got));
-      page_fill(want, pg, w[pg] ? 100 + k : 1);
+      page_fill(want, pg, 100 + k);
+      bad += memcmp(got, want, FK_PAGE) != 0;
+      checked++;
+    }
+    for (uint32_t pg = 0; pg < c.L; pg += 97) if (!w[pg]) {
+      CK(fk_read(g_s, k, pg, got));
+      page_fill(want, pg, 1);
       bad += memcmp(got, want, FK_PAGE) != 0;
       checked++;
     }
