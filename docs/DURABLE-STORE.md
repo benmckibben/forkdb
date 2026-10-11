@@ -16,23 +16,25 @@ The store holds the pages of many database branches in **one append-only log fil
 ## File format
 
 ```
-[ 0 .. 4096)   file header: "FORKDBST", version (2), page size, crc;  two 32-byte marker slots at 512 and 1024
+[ 0 .. 4096)   file header: "FORKDBST", version (3), page size, crc;  two 32-byte marker slots at 512 and 1024
 [ 4096 .. )    records, back to back
 ```
 
 Record = 32-byte header + payload. Header: magic `FKR1`, type, **sequence number**, payload length, **crc of the previous record**, and a CRC-32C over the header (with its own crc field zeroed) and the payload.
 
+**Checksum implementation.** CRC-32C is computed with the CPU's CRC32 instruction where there is one (x86-64 with SSE4.2, checked at run time, so one binary runs everywhere; AArch64 when built with the CRC extension) and with a portable table loop otherwise. It is the same function, so the format does not depend on which one a machine has: the tests check both against the standard test vectors and a bit-by-bit reference on 20,000 random buffers at every alignment, and write a log with each and read it with the other (the two files are byte-for-byte identical). On the benchmark machine (one run each, WSL2, see the pull request for the method and caveats) the hardware version took compaction of a 2 GiB database from 12.9 s to 4.7 s, opening a 4 GiB log from 11.4 s to 5.0 s, and a cached 4 KiB read from 8.9 µs to 1.6 µs.
+
 | Type | Payload |
 |---|---|
 | PAGE | branch, page number, 4096 bytes |
 | COMMIT | branch, number of PAGE records in this transaction, new size in pages |
-| FORK | source branch, new branch id |
+| FORK | source branch, new branch id (a never-used id, or from version 3 the id of a discarded branch) |
 | DISCARD | branch |
 | CPAGE | a page copied by compaction: same layout as PAGE, branch field unused |
 | SNAP | one chunk (up to 4 KiB) of the snapshot byte stream |
 | SNAPEND | length and checksum of the snapshot byte stream |
 
-A transaction is `PAGE* COMMIT`. A fork or discard is a single record. All of them end with **one fsync**. A compacted file starts with one `CPAGE* SNAP* SNAPEND` unit (see Compaction). Version 1 files (before compaction existed) still open; a snapshot inside one is refused.
+A transaction is `PAGE* COMMIT`. A fork or discard is a single record. All of them end with **one fsync**. A compacted file starts with one `CPAGE* SNAP* SNAPEND` unit (see Compaction). Version 1 files (before compaction existed) still open; a snapshot inside one is refused. Version 2 files (before ids could be reused) still open and keep their rules until they are compacted; a file with a version this program does not know is refused with `FK_ECORRUPT` and nothing in it is touched.
 
 ## Recovery
 
@@ -55,7 +57,15 @@ The limit of this: damage in the part of the log after the last marker is still 
 
 ## In-memory index
 
-Rebuilt by the same scan. Each branch has a head layer; a layer maps page number to the offset of its PAGE record (or a tombstone, for pages removed by shrinking). Forking freezes the source's head and gives both sides an empty one on top (O(1); an unchanged head is shared instead of stacked). A read walks the layer chain, then reads and checks one record. Chains only get shorter at compaction (below); between compactions a long fork history makes reads walk more layers.
+Rebuilt by the same scan. Each branch has a head layer; a layer maps page number to the offset of its PAGE record (or a tombstone, for pages removed by shrinking). A layer is an **open-addressing hash table** (linear probing, never more than half full, keyed by page number), so its memory is proportional to the number of pages it holds, not to the highest page number it touched: a fork that writes one page near the end of a 1 GiB database costs a few hundred bytes instead of 2 MiB (500 branches that each wrote 1 MiB of random pages of a 1 GiB database: 1,007 MiB of process memory before, 15 MiB now). Entries cost 12 bytes in a table that is a quarter to half full, so 24 to 48 bytes per page held; a layer that holds every page of a database costs about three times what a dense array would (6 MiB instead of 2 MiB per GiB), which I accepted for a layer holding all pages of a database. A shrink adds a tombstone only for pages that exist below the layer. Compaction sorts a layer's entries by page to plan the new file; the snapshot format already listed pages sparsely, so it did not change. Forking freezes the source's head and gives both sides an empty one on top (O(1); an unchanged head is shared instead of stacked). A read walks the layer chain, then reads and checks one record. Chains only get shorter at compaction (below); between compactions a long fork history makes reads walk more layers.
+
+## Branch ids
+
+Branch 0 always exists. A fork is given an id below `FK_MAX_BRANCHES` (1,024): an id that was never used, or, from format version 3, **the id of a discarded branch**, so a workflow that forks and discards for every test run does not run out. The search is **next fit**: it starts just after the id the latest fork was given and wraps round (skipping 0), so a discarded id is the last one to come back, not the first. A caller holding a stale id (one it discarded) therefore has to survive a whole round of the id space before it is fooled. That is a mitigation, not a guarantee: **the caller must drop its handle when it discards a branch**, because a later fork may be given the same number, and a stale handle would then read the new branch. With every id alive, `fk_fork` returns `FK_ELIMIT`.
+
+The rule depends only on the alive flags and a cursor (the id of the latest fork), so recovery reproduces it: replaying a FORK record sets the cursor to its id, and a version 3 snapshot ends with the cursor. A FORK record in a version 3 file is valid if its id is the next unused one or belongs to a discarded branch; in a version 1 or 2 file only the next unused one (those files never reuse ids). A version 2 file is only upgraded to version 3 by compaction, which writes a new file with a current header, so an older program is never given a log it would misread: it refuses the new version instead.
+
+I considered the alternative of never reusing ids and lifting the limit instead (ids up to 2^32, 16 bytes in memory and 5 bytes in every snapshot for each id ever used). It has no stale-handle problem at all, but a store that has seen a million forks carries a million dead entries forever. Reuse with next fit keeps the table at its fixed size; if the stale-handle risk turns out to matter in practice (the layer above will keep names, not ids), the generation-number version of this is the next step.
 
 ## Compaction
 
@@ -73,7 +83,7 @@ Rebuilt by the same scan. Each branch has a head layer; a layer maps page number
 - Before it, the old file is untouched. A leftover temporary file is deleted at the next open.
 - After it, the new file is complete (it was synced before the rename).
 - The directory fsync makes the rename durable. Until it returns, a power cut may bring back either file, and both hold the same data; the compaction is not acknowledged before then, and nothing is written to the new file before then.
-- Recovery treats a snapshot as "replace the index with this". A snapshot is only accepted as the first unit of a version 2 file, every offset in it must point at a CPAGE of that unit for the right page, and its checksum must match. The new file's record chain starts again at sequence 1.
+- Recovery treats a snapshot as "replace the index with this". A snapshot is only accepted as the first unit of a version 2 or 3 file (a version 3 snapshot ends with the allocation cursor, see Branch ids), every offset in it must point at a CPAGE of that unit for the right page, and its checksum must match. The new file's record chain starts again at sequence 1.
 
 **Errors.** Before the rename, any error (cannot create the temporary file, a write fails because the disk is full, an fsync fails) deletes the temporary file and returns the error; the store's file is untouched and the store stays usable. After the rename, an error is fail-stop like everywhere else: close and reopen.
 
@@ -87,7 +97,7 @@ The point of this work was to test the claim "nothing partial after a power cut"
 - an fsync can also fail, leaving everything pending;
 - there are **two files**, the store's and the temporary one compaction writes, and **directory state**: a rename is visible at once but durable only after the directory sync. At a power cut a pending rename may or may not have happened, and the surviving file is resolved like any other (durable data plus any subset of its pending writes). The simulator allows one outstanding rename.
 
-[test/crash_test.c](../test/crash_test.c) runs seeded random workloads (commits of 1-3 pages that can grow or shrink the database, forks, discards, **compactions**, up to 8 branches) against an oracle model. For **every I/O event** of every workload it cuts the power just before the event, builds the post-crash images (all subsets when at most 8 operations are pending, a random sample of 130 otherwise, each both clean and torn), and checks that:
+[test/crash_test.c](../test/crash_test.c) runs seeded random workloads (commits of 1-3 pages that can grow or shrink the database, forks, discards, **compactions**, up to 8 branches with **only 8 branch ids**, so ids are reused all the time, and up to 20 distinct pages, so that a layer's index table grows several times) against an oracle model that predicts which id every fork must get. For **every I/O event** of every workload it cuts the power just before the event, builds the post-crash images (all subsets when at most 8 operations are pending, a random sample of 130 otherwise, each both clean and torn), and checks that:
 1. the store **opens**;
 2. the recovered state equals the oracle after exactly the acknowledged operations, or those plus the one in flight (every branch, every page, every size);
 3. the store is **usable afterwards**: the rest of the workload is replayed on it, then it is closed, reopened and compared with the oracle's final state;
@@ -118,6 +128,14 @@ A test that has never failed proves little, so the store has compile-time bugs (
 | compaction: tombstones dropped where they hide a lower layer | no | **catches** | **catches** |
 | compaction: copies a damaged page without checking | no | no | **catches** |
 | open: a leftover compaction file is not deleted | no | no | **catches** |
+| index: a rehash loses one entry (off-by-one in the loop) | **catches** | **catches** | **catches** (the first version of the harness used 6 distinct pages and **missed it**; with 20 pages the harness catches it, and the file tests with 3,000 pages do as well) |
+| index: a collision is treated as a miss | **catches** | **catches** | **catches** |
+| index: overwriting a page adds a second entry instead | **catches** | **catches** | **catches** |
+| ids: a reused id builds on the discarded branch's layers | **catches** | **catches** | **catches** |
+| ids: fork can hand out the id of a live branch | **catches** | **catches** | **catches** |
+| ids: recovery rejects a fork that reuses an id (still has the old rule) | **catches** | **catches** | **catches** |
+| ids: the allocation cursor is not restored from a snapshot | **catches** | **catches** | **catches** |
+| hardware CRC32C leaves out the last bytes of a buffer | no | no | **catches** (the CRC test; the store still works with itself, so nothing else notices) |
 
 Which test catches which is not what I expected in two places, and I would rather say so than let the table suggest more than it shows:
 - I expected the power-loss harness to catch the torn-tail and record-chain mutants too (stale records resurfacing after a torn tail); it did not, including a run of about 330 workloads of 12 operations (about 273,000 crash images). A stale record has to line up exactly with the new tail, which random workloads almost never produce. The two mechanisms also protect the same property, so either alone is enough in practice. The deterministic file tests are what show each one is needed.
@@ -133,7 +151,9 @@ Which test catches which is not what I expected in two places, and I would rathe
 - **Between compactions the log grows**, and reads walk the layer chain; compaction is what flattens it.
 - **The simulator models one outstanding rename**, and a rename that is atomic (as POSIX requires) but is lost or kept as a whole at a power cut. A file system that can leave a zero-length file after a rename without a prior fsync is covered (the mutant that skips the fsync shows it); one that breaks rename atomicity is not.
 - **A tombstone-heavy shrink** is tested for correctness but not for cost.
-- **Limits are small:** 1024 branches, 32-bit page numbers, whole transactions held in memory until commit.
+- **Limits are small:** 1,024 branches alive at once (`FK_ELIMIT` when full), 2^28 pages per database, whole transactions held in memory until commit.
+- **Dead layers stay in memory until the next compaction.** Discarding a branch does not free its layers (or those of a long-gone fork), so a workflow that forks and discards thousands of times grows the index and lengthens the chain a read walks until `fk_compact` runs. Measured: 3,000 iterations of “write a page on main, fork, write two pages on the fork, discard” on a 256 MiB database took a cached read of main from 1.6 µs to 16.4 µs (about 5 ns for every layer in the chain, so it grows with the number of iterations since the last compaction) and the index from 1.5 to 2.4 MiB; one compaction (0.7 s) brought them back to 1.7 µs and 1.5 MiB. Nothing calls compaction automatically, and `fk_compact_if_needed` goes by garbage in the file (7% there), not by chain length. Freeing layers as they die, or compacting on chain length, is the next small change; I have not made it.
+- **A shrink walks every page number it removes** (one table lookup each, so time is proportional to the size removed, though memory is not).
 - **It is not yet the SQLite VFS.** Connecting them (journal and WAL files, the checkpoint-then-fork rule, locking) is separate work.
 - Tests ran on one machine, on a real file only for a normal close, a process killed without closing (also in the middle of a compaction, before and after the rename), an appended torn tail, a spliced record, a damaged record, a damaged page met during compaction, a full disk (writes to the temporary file failing), and relabelled format versions. A real power cut was not performed.
 
