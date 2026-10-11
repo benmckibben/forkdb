@@ -116,7 +116,12 @@ typedef struct Layer {
   uint64_t *val;
   uint32_t cap, count, size; /* cap is 0 or a power of two; count entries; size = database size in pages */
   uint8_t bits;              /* log2(cap) */
-  uint32_t kids, heads, idx; /* scratch for compaction planning */
+  /* The layer tree, kept up to date as branches are forked and discarded (see layer_settle): */
+  struct Layer *kid, *sib, *sibp; /* first child; next and previous sibling in the parent's list of children */
+  uint32_t nkids;                  /* number of children */
+  uint32_t nheads;                 /* number of live branches whose head this layer is */
+  uint32_t slot;                   /* index in the store's array of layers */
+  uint32_t kids, heads, idx;       /* scratch for compaction planning */
   uint8_t seen;
 } Layer;
 
@@ -142,6 +147,24 @@ struct fk_store {
   uint32_t npp, cpp;
 };
 
+static void layer_link(Layer *l, Layer *parent) { /* make l a child of parent */
+  l->parent = parent;
+  l->sib = l->sibp = NULL;
+  if (!parent) return;
+  l->sib = parent->kid;
+  if (parent->kid) parent->kid->sibp = l;
+  parent->kid = l;
+  parent->nkids++;
+}
+static void layer_unlink(Layer *l) { /* detach l from its parent (l keeps its own children) */
+  Layer *p = l->parent;
+  if (!p) return;
+  if (l->sibp) l->sibp->sib = l->sib; else p->kid = l->sib;
+  if (l->sib) l->sib->sibp = l->sibp;
+  p->nkids--;
+  l->parent = NULL;
+  l->sib = l->sibp = NULL;
+}
 static Layer *layer_new(fk_store *s, Layer *parent) {
   Layer *l = calloc(1, sizeof *l);
   if (!l) return NULL;
@@ -152,8 +175,9 @@ static Layer *layer_new(fk_store *s, Layer *parent) {
     s->layers = n;
     s->caplayers = nc;
   }
+  l->slot = (uint32_t)s->nlayers;
   s->layers[s->nlayers++] = l;
-  l->parent = parent;
+  layer_link(l, parent);
   if (parent) l->size = parent->size;
   return l;
 }
@@ -236,6 +260,111 @@ static uint64_t layer_lookup(const Layer *l, uint32_t pgno) {
   return 0;
 }
 
+/* ---------- keeping the layer tree small ----------
+ * Invariant, restored after every discard: every layer has a live branch on it (nheads > 0) or a child (nkids > 0), and no layer
+ * with nheads == 0 has exactly one child. A layer with neither head nor child is dead and is freed. A layer with one child and
+ * no head is only a stored copy of the pages that child builds on, so it is folded into the child: the two become one layer, the
+ * smaller one's entries are moved into the larger. This is what keeps a read from walking a chain of layers that no branch
+ * distinguishes any more. Reads give the same result before and after: the child's entry for a page wins, the parent's is used
+ * where the child has none, and tombstones are carried along like any other entry. */
+static void drop_layer(fk_store *s, Layer *l) { /* forget l (already unlinked from the tree) and free it */
+  Layer *last = s->layers[--s->nlayers];
+  s->layers[l->slot] = last;
+  last->slot = l->slot;
+  layer_free(l);
+}
+static void set_head(fk_store *s, uint32_t b, Layer *l) {
+  if (s->br[b].head) s->br[b].head->nheads--;
+  s->br[b].head = l;
+  if (l) l->nheads++;
+}
+/* Fold P (nheads == 0, exactly one child) into its child. Returns the layer that survives, or NULL if it ran out of memory. A
+ * failed fold leaves a valid tree: every entry copied so far is one the reader would have found anyway. */
+static Layer *fold_into_kid(fk_store *s, Layer *P) {
+  Layer *C = P->kid;
+  if (C->count < P->count) {
+    /* C's entries go into P, and P takes C's place: C's children and heads move to P. */
+    for (uint32_t i = 0; i < C->cap; i++) {
+      if (C->key[i] == KEY_EMPTY) continue;
+#ifdef FK_BUG_FOLD_PARENT_WINS
+      if (layer_get(P, C->key[i])) continue; /* mutant: the parent's entry wins over the child's */
+#endif
+      if (layer_set(P, C->key[i], C->val[i]) != FK_OK) return NULL;
+    }
+#ifndef FK_BUG_FOLD_SIZE
+    P->size = C->size; /* mutant: P keeps its own size */
+#endif
+    while (C->kid) {
+      Layer *k = C->kid;
+      layer_unlink(k);
+      layer_link(k, P);
+    }
+#ifndef FK_BUG_FOLD_NO_RETARGET
+    for (uint32_t b = 0; b < s->nb && C->nheads; b++)
+      if (s->br[b].alive && s->br[b].head == C) set_head(s, b, P); /* mutant: a branch is left pointing at the freed layer */
+#endif
+    layer_unlink(C);
+    drop_layer(s, C);
+    return P;
+  }
+  /* P's entries go into C, where C has none, and C takes P's place under P's parent. */
+  for (uint32_t i = 0; i < P->cap; i++) {
+    if (P->key[i] == KEY_EMPTY) continue;
+    uint32_t pg = P->key[i];
+    uint64_t v = P->val[i];
+#ifdef FK_BUG_FOLD_DROP_TOMB
+    if (v == TOMB) continue; /* mutant: a tombstone is not carried over, so the page below shows through */
+#else
+    if (v == TOMB && !P->parent) continue; /* nothing below to hide */
+#endif
+#ifndef FK_BUG_FOLD_PARENT_WINS
+    if (layer_get(C, pg)) continue; /* the child's entry wins */
+#endif
+    if (layer_set(C, pg, v) != FK_OK) return NULL;
+  }
+  Layer *G = P->parent;
+  layer_unlink(C);
+  layer_unlink(P);
+  layer_link(C, G);
+  drop_layer(s, P);
+  return C;
+}
+/* l has just lost a head or a child: restore the invariant from l upwards. */
+static void layer_settle(fk_store *s, Layer *l) {
+  while (l) {
+#ifdef FK_BUG_LAYER_FREE_SHARED
+    if (l->nheads == 0) { /* mutant: a layer is freed when no branch is on it, even if other layers build on it */
+#else
+    if (l->nheads == 0 && l->nkids == 0) {
+#endif
+      Layer *p = l->parent;
+      layer_unlink(l);
+      drop_layer(s, l);
+      l = p;
+#ifdef FK_BUG_FOLD_SHARED
+    } else if (l->nheads == 0 && l->nkids >= 1 && l->nkids <= 2) { /* mutant: also folds a layer with two children */
+#elif defined(FK_BUG_LAYER_NO_FOLD)
+    } else if (0) { /* mutant: single-child layers stay */
+#else
+    } else if (l->nheads == 0 && l->nkids == 1) {
+#endif
+      l = fold_into_kid(s, l);
+    } else {
+      break;
+    }
+  }
+}
+/* A branch is discarded: it no longer has a head. */
+static void release_branch(fk_store *s, uint32_t b) {
+  Layer *h = s->br[b].head;
+  s->br[b].alive = 0;
+  set_head(s, b, NULL);
+#ifdef FK_BUG_LAYER_NO_FREE
+  return; /* mutant: nothing is freed or folded */
+#endif
+  if (h) layer_settle(s, h);
+}
+
 static int apply_commit(fk_store *s, uint32_t b, const PendPage *pp, uint32_t n, uint32_t new_size) {
   Layer *h = s->br[b].head;
   int rc;
@@ -256,14 +385,11 @@ static int apply_fork(fk_store *s, uint32_t src, uint32_t dst) {
   } else {
     Layer *nh = layer_new(s, f);
     if (!nh) return FK_ENOMEM;
-    s->br[src].head = nh;
+    set_head(s, src, nh);
   }
-#ifdef FK_BUG_ID_STALE_HEAD
-  if (dst < s->nb && s->br[dst].head) f = s->br[dst].head; /* mutant: a reused id builds on the discarded branch's layers */
-#endif
   Layer *d = layer_new(s, f);
   if (!d) return FK_ENOMEM;
-  s->br[dst].head = d;
+  set_head(s, dst, d);
   s->br[dst].alive = 1;
   if (dst >= s->nb) s->nb = dst + 1;
   s->last_id = dst;
@@ -403,7 +529,8 @@ static int snap_load(fk_store *s, const uint8_t *st, size_t n, const PendPage *c
     Layer *l = calloc(1, sizeof *l);
     if (!l) { rc = FK_ENOMEM; break; }
     L[i] = l;
-    l->parent = par == NONE ? NULL : L[par];
+    l->slot = i;
+    layer_link(l, par == NONE ? NULL : L[par]);
     l->size = size;
     if (cnt && (rc = layer_reserve(l, cnt)) != FK_OK) break;
     int64_t prev = -1;
@@ -434,6 +561,8 @@ static int snap_load(fk_store *s, const uint8_t *st, size_t n, const PendPage *c
     if (r.bad || last >= nb) rc = FK_ECORRUPT;
   }
   if (rc == FK_OK && r.i != n) rc = FK_ECORRUPT;
+  for (uint32_t b = 0; b < nb && rc == FK_OK; b++)
+    if (br[b].alive) br[b].head->nheads++; /* the new layers start with no heads: count them */
   if (rc != FK_OK) {
     for (uint32_t i = 0; i < nl; i++) layer_free(L[i]);
     free(L);
@@ -543,7 +672,7 @@ static int scan(fk_store *s, int64_t fsize, uint32_t version) {
       if (len != 4 || npend) break;
       uint32_t b = get32(pay);
       if (b == 0 || b >= s->nb || !s->br[b].alive) break;
-      s->br[b].alive = 0;
+      release_branch(s, b);
       unit = 1;
     } else if (type == T_CPAGE) {
       if (len != PAGE_PAYLOAD || slen || get32(pay) != NONE || get32(pay + 4) >= FK_MAX_PAGES) break;
@@ -637,7 +766,7 @@ int fk_open(const fk_io *io, fk_store **out) {
   s->version = version;
   Layer *main_layer = layer_new(s, NULL);
   if (!main_layer) { fk_close(s); return FK_ENOMEM; }
-  s->br[0].head = main_layer;
+  set_head(s, 0, main_layer);
   s->br[0].alive = 1;
   s->nb = 1;
   if ((rc = scan(s, size, version)) != FK_OK) { fk_close(s); return rc; }
@@ -659,6 +788,14 @@ void fk_close(fk_store *s) {
 uint32_t fk_branch_count(const fk_store *s) { return s->nb; }
 int fk_branch_alive(const fk_store *s, uint32_t b) { return b < s->nb && s->br[b].alive; }
 int fk_is_failed(const fk_store *s) { return s->failed; }
+uint32_t fk_layer_count(const fk_store *s) { return (uint32_t)s->nlayers; }
+int fk_branch_depth(const fk_store *s, uint32_t b, uint32_t *depth) {
+  if (!fk_branch_alive(s, b)) return FK_ENOENT;
+  uint32_t d = 0;
+  for (const Layer *l = s->br[b].head; l; l = l->parent) d++;
+  *depth = d;
+  return FK_OK;
+}
 uint64_t fk_index_bytes(const fk_store *s) {
   uint64_t t = (uint64_t)s->caplayers * sizeof(Layer *);
   for (size_t i = 0; i < s->nlayers; i++) t += sizeof(Layer) + (uint64_t)s->layers[i]->cap * (sizeof(uint32_t) + sizeof(uint64_t));
@@ -756,7 +893,7 @@ int fk_discard(fk_store *s, uint32_t b) {
   if (rc == FK_OK) rc = do_sync(s);
   if (rc != FK_OK) return rc;
   commit_tail(s, e, q, l);
-  s->br[b].alive = 0;
+  release_branch(s, b);
   maybe_mark(s);
   return FK_OK;
 }
@@ -872,8 +1009,27 @@ static int plan_build(fk_store *s, Plan *P) {
   }
   for (size_t i = 0; i < s->nlayers; i++) if (s->layers[i]->seen && s->layers[i]->parent) s->layers[i]->parent->kids++;
 #define KEPT(l) ((l)->heads > 0 || (l)->kids != 1)
+  /* Number the kept layers so that a layer's kept ancestor always has the lower number (the snapshot format and its loader
+   * require it). The array of layers is not in that order (dropping a layer moves the last one into its slot), so walk the tree
+   * from its root, parents before children, with an explicit stack. */
   uint32_t nk = 0;
-  for (size_t i = 0; i < s->nlayers; i++) if (s->layers[i]->seen && KEPT(s->layers[i])) s->layers[i]->idx = nk++;
+  {
+    Layer **stack = malloc((s->nlayers ? s->nlayers : 1) * sizeof *stack);
+    if (!stack) return FK_ENOMEM;
+    for (size_t i = 0; i < s->nlayers; i++) {
+      if (s->layers[i]->parent) continue; /* a root */
+      size_t sp = 0;
+      stack[sp++] = s->layers[i];
+      while (sp) {
+        Layer *l = stack[--sp];
+        if (l->seen && KEPT(l)) l->idx = nk++;
+        for (Layer *k = l->kid; k; k = k->sib) stack[sp++] = k;
+      }
+    }
+    free(stack);
+    for (size_t i = 0; i < s->nlayers; i++)
+      if (s->layers[i]->seen && KEPT(s->layers[i]) && s->layers[i]->idx == NONE) return FK_ECORRUPT; /* not reachable from a root: cannot happen */
+  }
   P->l = calloc(nk ? nk : 1, sizeof *P->l);
   if (!P->l) return FK_ENOMEM;
   P->nl = nk;
@@ -891,9 +1047,6 @@ static int plan_build(fk_store *s, Plan *P) {
     size_t m = 0;
     uint32_t prio = 0;
     for (Layer *l = K; l != EP; l = l->parent, prio++) {
-#ifdef FK_BUG_COMPACT_LOSE_PARENT
-      if (l != K) continue; /* mutant: pages held by a folded layer are lost */
-#endif
       for (uint32_t i = 0; i < l->cap; i++)
         if (l->key[i] != KEY_EMPTY) { pe[m].pg = l->key[i]; pe[m].prio = prio; pe[m].off = l->val[i]; m++; }
     }

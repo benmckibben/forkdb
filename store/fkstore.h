@@ -78,6 +78,11 @@ int fk_stats(fk_store *s, uint64_t *file_bytes, uint64_t *live_bytes);
 int fk_is_failed(const fk_store *s); /* after an I/O error that needs a reopen */
 /* Memory used by the in-memory index (layers and their page tables), in bytes. For monitoring and tests. */
 uint64_t fk_index_bytes(const fk_store *s);
+/* The layer tree: how many layers exist, and how many a read on branch b may have to look through (1 = the head only). Layers that
+ * no branch needs are freed when a branch is discarded, and a layer that only one other layer builds on is merged into it, so
+ * these stay small however many forks and discards have happened. For monitoring and tests. */
+uint32_t fk_layer_count(const fk_store *s);
+int fk_branch_depth(const fk_store *s, uint32_t b, uint32_t *depth);
 
 /* CRC-32C, exposed for tests. crc is the finalised value of the previous call (0 to start). Uses the CPU's CRC32 instruction when
  * there is one (x86-64: SSE4.2, checked at run time) and a portable loop otherwise; both give the same result. */
