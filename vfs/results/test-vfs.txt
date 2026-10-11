@@ -1,0 +1,34 @@
+already present: <repo>/spike/vendor/sqlite-amalgamation-3500000
+cached: sqlite3-stock.o
+cached: sqlite3-batch.o
+== SQLite build: batch (address and undefined-behaviour sanitizers on)
+built <repo>/vfs/build/vfs_test-batch-san
+SQLite 3.50.0, batch-atomic compiled in: yes
+T11 power loss under SQLite (batch advertised=1): 7 transactions on b0, a fork after the third, 4 on b1
+   93 I/O events in the run; 189 crash or failure points, 6820 post-crash images checked, 0 violations
+T11 power loss under SQLite (batch advertised=0): 7 transactions on b0, a fork after the third, 4 on b1
+   93 I/O events in the run; 189 crash or failure points, 6820 post-crash images checked, 0 violations
+checks=267 TOTAL FAILS=0
+== SQLite build: stock (address and undefined-behaviour sanitizers on)
+built <repo>/vfs/build/vfs_test-stock-san
+SQLite 3.50.0, batch-atomic compiled in: no
+T11 power loss under SQLite (batch advertised=0): 7 transactions on b0, a fork after the third, 4 on b1
+   93 I/O events in the run; 189 crash or failure points, 6820 post-crash images checked, 0 violations
+checks=253 TOTAL FAILS=0
+== do the tests catch broken VFS code? (each mutant must make the tests fail)
+  caught:   an atomic commit that discards the pages and says OK  (74 failing lines)
+  caught:   a transaction published only half  (325 failing lines)
+  caught:   dedupe drops every page  (199 failing lines)
+  caught:   dedupe off (rollbacks cost a commit)  (3 failing lines)
+  caught:   a shrink is forgotten  (2 failing lines)
+  caught:   no read-your-writes  (3 failing lines)
+  caught:   a writer is not held off by readers  (5 failing lines)
+  caught:   a failed atomic commit is swallowed and its pages dropped  (418 failing lines)
+  caught:   a failed sync is reported as OK  (887 failing lines)
+  caught:   the WAL pragma is not refused  (5 failing lines)
+  caught:   synchronous=OFF is not refused  (4 failing lines)
+  caught:   a truncate keeps the staged pages beyond it  (3 failing lines)
+  caught:   a branch id is not checked  (2 failing lines)
+   13 of 13 mutants caught
+all VFS tests passed
+END rc=0

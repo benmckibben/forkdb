@@ -2,7 +2,7 @@
 
 Instant-branching, copy-on-write SQLite databases for local development, testing and agent sandboxing: fork a database without copying it, let a test or an agent do anything to the fork, then look at the diff and promote it or throw it away.
 
-**Status: just started.** The form factor is decided, a feasibility spike has validated the core mechanics, and the durable page store underneath is built and power-loss tested on its own. It is not yet connected to SQLite: nothing here is installable.
+**Status: just started.** The form factor is decided, a feasibility spike has validated the core mechanics, and the durable page store underneath is built and power-loss tested on its own. A second spike ([vfs/](vfs)) connects the store to SQLite through a VFS and passes the same kind of power-loss tests. It is single-process, has no WAL and no diff or promote yet: nothing here is installable.
 
 ## The idea
 
@@ -17,6 +17,7 @@ Instant-branching, copy-on-write SQLite databases for local development, testing
 | [docs/DESIGN.md](docs/DESIGN.md) | Why SQLite VFS (and not an embedded KV store or a proxy over Postgres/MySQL), the planned v0.1 scope, what is deliberately left out |
 | [docs/SPIKE-FINDINGS.md](docs/SPIKE-FINDINGS.md) | What the spike proved, measured, and what it did not show |
 | [spike/](spike/README.md) | The throwaway spike: one C file, build and run instructions, recorded results |
+| [docs/VFS-SPIKE.md](docs/VFS-SPIKE.md) | SQLite running on the durable store through a VFS ([vfs/](vfs)): what was built, the tests and mutant check, the measurements, and what it changed in the plan |
 | [docs/DURABLE-STORE.md](docs/DURABLE-STORE.md) | The durable, branchable page store ([store/](store)): format, recovery, the power-loss test harness and what it does not cover |
 
 ## Reproduce the spike
@@ -29,7 +30,7 @@ Needs gcc, curl, sha256sum and python3 (the first build downloads and compiles a
 
 ## Known facts that shape the project
 
-- Batch-atomic writes need a **custom SQLite build**, so forkdb has to be correct without them.
+- Batch-atomic writes need a **custom SQLite build**, so forkdb has to be correct without them. On the durable store it does not need them: the VFS spike measured the same commit cost with and without ([docs/VFS-SPIKE.md](docs/VFS-SPIKE.md)).
 - In WAL mode a fork must carry the WAL or checkpoint first.
 - Changesets do **not** capture tables without a PRIMARY KEY or schema changes, so promote must check the schema itself.
 
