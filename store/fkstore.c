@@ -106,10 +106,16 @@ static uint32_t get32(const uint8_t *p) { uint32_t v = 0; for (int i = 3; i >= 0
 static uint64_t get64(const uint8_t *p) { uint64_t v = 0; for (int i = 7; i >= 0; i--) v = (v << 8) | p[i]; return v; }
 
 /* ---------- in-memory layers (rebuilt from the log on open) ---------- */
+/* A layer maps page number -> offset of the PAGE record holding that page's content in this layer (or TOMB: the page reads as
+ * zeros). It is an open-addressing hash table with linear probing, kept at most half full, so its memory is proportional to the
+ * number of pages the layer holds, not to the highest page number it touched. */
+#define KEY_EMPTY UINT32_MAX
 typedef struct Layer {
   struct Layer *parent;
-  uint64_t *off; /* page number -> offset of its PAGE record; 0 = not in this layer; TOMB = zero page */
-  uint32_t cap, size, touched;
+  uint32_t *key; /* page number, or KEY_EMPTY; NULL until the first entry */
+  uint64_t *val;
+  uint32_t cap, count, size; /* cap is 0 or a power of two; count entries; size = database size in pages */
+  uint8_t bits;              /* log2(cap) */
   uint32_t kids, heads, idx; /* scratch for compaction planning */
   uint8_t seen;
 } Layer;
@@ -149,32 +155,93 @@ static Layer *layer_new(fk_store *s, Layer *parent) {
   if (parent) l->size = parent->size;
   return l;
 }
-static int layer_set(Layer *l, uint32_t pgno, uint64_t v) {
-  if (pgno >= FK_MAX_PAGES) return FK_EINVAL;
-  if (pgno >= l->cap) {
-    uint32_t nc = l->cap ? l->cap : 16;
-    while (nc <= pgno) nc *= 2;
-    uint64_t *n = realloc(l->off, (size_t)nc * sizeof *n);
-    if (!n) return FK_ENOMEM;
-    memset(n + l->cap, 0, (size_t)(nc - l->cap) * sizeof *n);
-    l->off = n;
-    l->cap = nc;
+static void layer_free(Layer *l) {
+  if (!l) return;
+  free(l->key);
+  free(l->val);
+  free(l);
+}
+static inline uint32_t lhash(uint32_t pgno, unsigned bits) { return (uint32_t)(pgno * 2654435769u) >> (32 - bits); } /* Fibonacci hashing: the top bits */
+
+/* Make room for at least n entries at half load. On failure the layer is unchanged. */
+static int layer_reserve(Layer *l, uint32_t n) {
+  uint64_t want = (uint64_t)n * 2;
+  if (want <= l->cap) return FK_OK;
+  uint32_t nc = l->cap ? l->cap : 8;
+  while (nc < want) nc *= 2;
+  unsigned bits = 0;
+  while ((1u << bits) < nc) bits++;
+  uint32_t *nk = malloc((size_t)nc * sizeof *nk);
+  uint64_t *nv = malloc((size_t)nc * sizeof *nv);
+  if (!nk || !nv) { free(nk); free(nv); return FK_ENOMEM; }
+  memset(nk, 0xff, (size_t)nc * sizeof *nk); /* KEY_EMPTY */
+  uint32_t mask = nc - 1;
+#ifdef FK_BUG_INDEX_GROW_DROP
+  for (uint32_t i = 0; i + 1 < l->cap; i++) { /* mutant: the last old slot is not moved */
+#else
+  for (uint32_t i = 0; i < l->cap; i++) {
+#endif
+    if (l->key[i] == KEY_EMPTY) continue;
+    uint32_t j = lhash(l->key[i], bits);
+    while (nk[j] != KEY_EMPTY) j = (j + 1) & mask;
+    nk[j] = l->key[i];
+    nv[j] = l->val[i];
   }
-  if (!l->off[pgno]) l->touched++;
-  l->off[pgno] = v;
+  free(l->key);
+  free(l->val);
+  l->key = nk;
+  l->val = nv;
+  l->cap = nc;
+  l->bits = (uint8_t)bits;
   return FK_OK;
 }
+static int layer_set(Layer *l, uint32_t pgno, uint64_t v) {
+  if (pgno >= FK_MAX_PAGES) return FK_EINVAL;
+  if (l->cap) {
+    uint32_t mask = l->cap - 1, i = lhash(pgno, l->bits);
+    for (; l->key[i] != KEY_EMPTY; i = (i + 1) & mask) {
+#ifndef FK_BUG_INDEX_DUP_ON_OVERWRITE
+      if (l->key[i] == pgno) { l->val[i] = v; return FK_OK; } /* mutant: an overwrite adds a second entry instead */
+#endif
+    }
+  }
+  int rc = layer_reserve(l, l->count + 1);
+  if (rc != FK_OK) return rc;
+  uint32_t mask = l->cap - 1, i = lhash(pgno, l->bits);
+  while (l->key[i] != KEY_EMPTY) i = (i + 1) & mask;
+  l->key[i] = pgno;
+  l->val[i] = v;
+  l->count++;
+  return FK_OK;
+}
+/* 0 = this layer has no entry for the page */
+static inline uint64_t layer_get(const Layer *l, uint32_t pgno) {
+  if (!l->cap) return 0;
+  uint32_t i = lhash(pgno, l->bits);
+#ifdef FK_BUG_INDEX_NO_PROBE
+  return l->key[i] == pgno ? l->val[i] : 0; /* mutant: a collision is treated as a miss */
+#else
+  for (uint32_t mask = l->cap - 1; l->key[i] != KEY_EMPTY; i = (i + 1) & mask)
+    if (l->key[i] == pgno) return l->val[i];
+  return 0;
+#endif
+}
 static uint64_t layer_lookup(const Layer *l, uint32_t pgno) {
-  for (; l; l = l->parent)
-    if (pgno < l->cap && l->off[pgno]) return l->off[pgno];
+  for (; l; l = l->parent) {
+    uint64_t v = layer_get(l, pgno);
+    if (v) return v;
+  }
   return 0;
 }
 
 static int apply_commit(fk_store *s, uint32_t b, const PendPage *pp, uint32_t n, uint32_t new_size) {
   Layer *h = s->br[b].head;
   int rc;
-  for (uint32_t pg = new_size; pg < h->size; pg++)
+  for (uint32_t pg = new_size; pg < h->size; pg++) {
+    uint64_t v = layer_lookup(h, pg);
+    if (v == 0 || v == TOMB) continue; /* already reads as zeros: there is nothing below to hide, so no entry is needed */
     if ((rc = layer_set(h, pg, TOMB)) != FK_OK) return rc;
+  }
   for (uint32_t i = 0; i < n; i++)
     if ((rc = layer_set(h, pp[i].pgno, pp[i].off)) != FK_OK) return rc;
   h->size = new_size;
@@ -182,7 +249,7 @@ static int apply_commit(fk_store *s, uint32_t b, const PendPage *pp, uint32_t n,
 }
 static int apply_fork(fk_store *s, uint32_t src, uint32_t dst) {
   Layer *f = s->br[src].head;
-  if (f->touched == 0 && f->parent && f->size == f->parent->size) {
+  if (f->count == 0 && f->parent && f->size == f->parent->size) {
     f = f->parent; /* nothing changed since the last fork: share the parent instead of stacking an empty layer */
   } else {
     Layer *nh = layer_new(s, f);
@@ -332,6 +399,7 @@ static int snap_load(fk_store *s, const uint8_t *st, size_t n, const PendPage *c
     L[i] = l;
     l->parent = par == NONE ? NULL : L[par];
     l->size = size;
+    if (cnt && (rc = layer_reserve(l, cnt)) != FK_OK) break;
     int64_t prev = -1;
     for (uint32_t c = 0; c < cnt && rc == FK_OK; c++) {
       uint32_t pg = r_u32(&r);
@@ -356,11 +424,11 @@ static int snap_load(fk_store *s, const uint8_t *st, size_t n, const PendPage *c
   }
   if (rc == FK_OK && r.i != n) rc = FK_ECORRUPT;
   if (rc != FK_OK) {
-    for (uint32_t i = 0; i < nl; i++) if (L[i]) { free(L[i]->off); free(L[i]); }
+    for (uint32_t i = 0; i < nl; i++) layer_free(L[i]);
     free(L);
     return rc;
   }
-  for (size_t i = 0; i < s->nlayers; i++) { free(s->layers[i]->off); free(s->layers[i]); }
+  for (size_t i = 0; i < s->nlayers; i++) layer_free(s->layers[i]);
   free(s->layers);
   s->layers = L;
   s->nlayers = s->caplayers = nl;
@@ -558,7 +626,7 @@ int fk_open(const fk_io *io, fk_store **out) {
 void fk_close(fk_store *s) {
   if (!s) return;
   if (!s->failed && s->end > s->mark_end) (void)write_marker(s, s->end, 1);
-  for (size_t i = 0; i < s->nlayers; i++) { free(s->layers[i]->off); free(s->layers[i]); }
+  for (size_t i = 0; i < s->nlayers; i++) layer_free(s->layers[i]);
   free(s->layers);
   for (uint32_t i = 0; i < s->npp; i++) free(s->pp[i].data);
   free(s->pp);
@@ -569,6 +637,11 @@ void fk_close(fk_store *s) {
 uint32_t fk_branch_count(const fk_store *s) { return s->nb; }
 int fk_branch_alive(const fk_store *s, uint32_t b) { return b < s->nb && s->br[b].alive; }
 int fk_is_failed(const fk_store *s) { return s->failed; }
+uint64_t fk_index_bytes(const fk_store *s) {
+  uint64_t t = (uint64_t)s->caplayers * sizeof(Layer *);
+  for (size_t i = 0; i < s->nlayers; i++) t += sizeof(Layer) + (uint64_t)s->layers[i]->cap * (sizeof(uint32_t) + sizeof(uint64_t));
+  return t;
+}
 int fk_size(const fk_store *s, uint32_t b, uint32_t *pages) {
   if (!fk_branch_alive(s, b)) return FK_ENOENT;
   *pages = s->br[b].head->size;
@@ -730,6 +803,13 @@ static int up_cmp(const void *a, const void *b) {
   return x->off < y->off ? -1 : x->off > y->off;
 }
 
+typedef struct { uint32_t pg, prio; uint64_t off; } PE; /* one entry of a layer, with the distance of its layer from the kept one */
+static int pe_cmp(const void *a, const void *b) {
+  const PE *x = a, *y = b;
+  if (x->pg != y->pg) return x->pg < y->pg ? -1 : 1;
+  return x->prio < y->prio ? -1 : x->prio > y->prio;
+}
+
 /* What is live: for every live branch walk its layer chain. A frozen layer with exactly one child and no branch of its own is
  * folded into that child (this is the flattening); other layers are kept. Tombstones only matter if there is a layer below to
  * hide, so a layer without a parent drops them. */
@@ -753,43 +833,48 @@ static int plan_build(fk_store *s, Plan *P) {
   for (size_t i = 0; i < s->nlayers; i++) {
     Layer *K = s->layers[i];
     if (!K->seen || !KEPT(K)) continue;
-    uint32_t maxcap = K->cap;
     Layer *EP = K->parent; /* the nearest kept ancestor */
-    while (EP && !KEPT(EP)) { if (EP->cap > maxcap) maxcap = EP->cap; EP = EP->parent; }
-    uint64_t *tmp = calloc(maxcap ? maxcap : 1, sizeof *tmp);
-    if (!tmp) return FK_ENOMEM;
-    for (Layer *l = K; l != EP; l = l->parent) { /* K, then the folded ancestors: the nearest layer wins */
+    while (EP && !KEPT(EP)) EP = EP->parent;
+    /* K and the folded layers between K and EP, nearest first: the nearest layer's entry for a page wins. */
+    size_t cnt = 0;
+    for (Layer *l = K; l != EP; l = l->parent) cnt += l->count;
+    PE *pe = malloc((cnt ? cnt : 1) * sizeof *pe);
+    if (!pe) return FK_ENOMEM;
+    size_t m = 0;
+    uint32_t prio = 0;
+    for (Layer *l = K; l != EP; l = l->parent, prio++) {
 #ifdef FK_BUG_COMPACT_LOSE_PARENT
       if (l != K) continue; /* mutant: pages held by a folded layer are lost */
 #endif
-      for (uint32_t pg = 0; pg < l->cap; pg++) if (l->off[pg] && !tmp[pg]) tmp[pg] = l->off[pg];
+      for (uint32_t i = 0; i < l->cap; i++)
+        if (l->key[i] != KEY_EMPTY) { pe[m].pg = l->key[i]; pe[m].prio = prio; pe[m].off = l->val[i]; m++; }
     }
-    uint32_t n = 0;
-    for (uint32_t pg = 0; pg < maxcap; pg++)
+    qsort(pe, m, sizeof *pe, pe_cmp); /* by page, nearest layer first */
+    size_t n = 0;
+    int64_t prev_pg = -1;
+    for (size_t i = 0; i < m; i++) {
+      if ((int64_t)pe[i].pg == prev_pg) continue; /* a farther layer's entry for the same page */
+      prev_pg = pe[i].pg;
 #ifdef FK_BUG_COMPACT_DROP_TOMB
-      if (tmp[pg] && tmp[pg] != TOMB) n++; /* mutant: tombstones are dropped even where they hide a lower layer */
+      if (pe[i].off == TOMB) continue; /* mutant: tombstones are dropped even where they hide a lower layer */
 #else
-      if (tmp[pg] && (EP || tmp[pg] != TOMB)) n++;
+      if (pe[i].off == TOMB && !EP) continue; /* nothing below to hide */
 #endif
+      pe[n++] = pe[i];
+    }
     PL *pl = &P->l[K->idx];
     pl->parent = EP ? EP->idx : NONE;
     pl->size = K->size;
-    pl->n = n;
+    pl->n = (uint32_t)n;
     pl->pg = calloc(n ? n : 1, sizeof *pl->pg);
     pl->off = calloc(n ? n : 1, sizeof *pl->off);
-    if (!pl->pg || !pl->off) { free(tmp); return FK_ENOMEM; }
-    uint32_t k = 0;
-    for (uint32_t pg = 0; pg < maxcap; pg++) {
-#ifdef FK_BUG_COMPACT_DROP_TOMB
-      if (!(tmp[pg] && tmp[pg] != TOMB)) continue;
-#else
-      if (!(tmp[pg] && (EP || tmp[pg] != TOMB))) continue;
-#endif
-      pl->pg[k] = pg;
-      pl->off[k++] = tmp[pg];
-      if (tmp[pg] != TOMB) total++;
+    if (!pl->pg || !pl->off) { free(pe); return FK_ENOMEM; }
+    for (size_t i = 0; i < n; i++) {
+      pl->pg[i] = pe[i].pg;
+      pl->off[i] = pe[i].off;
+      if (pe[i].off != TOMB) total++;
     }
-    free(tmp);
+    free(pe);
   }
   for (uint32_t b = 0; b < s->nb; b++) P->head[b] = s->br[b].alive ? s->br[b].head->idx : NONE;
   P->u = malloc((total ? total : 1) * sizeof *P->u);

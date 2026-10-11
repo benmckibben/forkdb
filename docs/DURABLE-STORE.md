@@ -57,7 +57,7 @@ The limit of this: damage in the part of the log after the last marker is still 
 
 ## In-memory index
 
-Rebuilt by the same scan. Each branch has a head layer; a layer maps page number to the offset of its PAGE record (or a tombstone, for pages removed by shrinking). Forking freezes the source's head and gives both sides an empty one on top (O(1); an unchanged head is shared instead of stacked). A read walks the layer chain, then reads and checks one record. Chains only get shorter at compaction (below); between compactions a long fork history makes reads walk more layers.
+Rebuilt by the same scan. Each branch has a head layer; a layer maps page number to the offset of its PAGE record (or a tombstone, for pages removed by shrinking). A layer is an **open-addressing hash table** (linear probing, never more than half full, keyed by page number), so its memory is proportional to the number of pages it holds, not to the highest page number it touched: a fork that writes one page near the end of a 1 GiB database costs about 100 bytes instead of 2 MiB. Entries cost 12 bytes in a table that is a quarter to half full, so 24 to 48 bytes per page held; a layer that holds every page of a database costs about three times what a dense array would (6 MiB instead of 2 MiB per GiB), which I accepted for a layer holding all pages of a database. A shrink adds a tombstone only for pages that exist below the layer. Compaction sorts a layer's entries by page to plan the new file; the snapshot format already listed pages sparsely, so it did not change. Forking freezes the source's head and gives both sides an empty one on top (O(1); an unchanged head is shared instead of stacked). A read walks the layer chain, then reads and checks one record. Chains only get shorter at compaction (below); between compactions a long fork history makes reads walk more layers.
 
 ## Compaction
 
@@ -120,6 +120,9 @@ A test that has never failed proves little, so the store has compile-time bugs (
 | compaction: tombstones dropped where they hide a lower layer | no | **catches** | **catches** |
 | compaction: copies a damaged page without checking | no | no | **catches** |
 | open: a leftover compaction file is not deleted | no | no | **catches** |
+| index: a rehash loses one entry (off-by-one in the loop) | no | no | **catches** (needs thousands of pages: the harness's 6 never fill a table enough) |
+| index: a collision is treated as a miss | **catches** | **catches** | **catches** |
+| index: overwriting a page adds a second entry instead | **catches** | **catches** | **catches** |
 | hardware CRC32C leaves out the last bytes of a buffer | no | no | **catches** (the CRC test; the store still works with itself, so nothing else notices) |
 
 Which test catches which is not what I expected in two places, and I would rather say so than let the table suggest more than it shows:

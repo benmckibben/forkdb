@@ -70,6 +70,8 @@ int fk_compact_if_needed(fk_store *s, uint64_t min_bytes, int *did);
 /* The file size, and the size a compacted file would have. */
 int fk_stats(fk_store *s, uint64_t *file_bytes, uint64_t *live_bytes);
 int fk_is_failed(const fk_store *s); /* after an I/O error that needs a reopen */
+/* Memory used by the in-memory index (layers and their page tables), in bytes. For monitoring and tests. */
+uint64_t fk_index_bytes(const fk_store *s);
 
 /* CRC-32C, exposed for tests. crc is the finalised value of the previous call (0 to start). Uses the CPU's CRC32 instruction when
  * there is one (x86-64: SSE4.2, checked at run time) and a portable loop otherwise; both give the same result. */

@@ -56,6 +56,14 @@ static int garbage_state_ok(fk_store *s) {
   return has(s, 0, 0, 2000) && has(s, 0, 1, 9) && has(s, 1, 0, 1199) && has(s, 1, 1, 8) && !fk_branch_alive(s, 2) && fk_branch_count(s) == 3;
 }
 
+/* write n pages in one transaction: page pages[i] gets version vers[i] */
+static int commit_many(fk_store *s, uint32_t b, const uint32_t *pages, const int *vers, uint32_t n, uint32_t size) {
+  uint8_t p[FK_PAGE];
+  if (fk_txn_begin(s, b)) return -1;
+  for (uint32_t i = 0; i < n; i++) { page(p, vers[i]); if (fk_txn_write(s, pages[i], p)) { fk_txn_abort(s); return -1; } }
+  return fk_txn_commit(s, size);
+}
+
 /* CRC-32C reference: one bit at a time, no tables, nothing shared with the implementation under test. */
 static uint32_t crc_ref(uint32_t crc, const uint8_t *b, size_t n) {
   uint32_t c = ~crc;
@@ -377,6 +385,84 @@ int main(void) {
     patch_header_version(cpth, 1);
     CHECK(fk_file_open(cpth, &io) == 0 && fk_open(&io, &s) == FK_ECORRUPT, "relabelled as version 1, its snapshot is refused (and nothing is cut off)");
     fk_file_close(&io);
+  }
+
+  printf("== sparse index: memory follows what a layer holds, not how high its page numbers go\n");
+  {
+    char p[300];
+    snprintf(p, sizeof p, "%s/sparse.fk", dir);
+    fk_io i3; fk_store *s3 = NULL;
+    uint8_t z[FK_PAGE], pg[FK_PAGE];
+    memset(z, 0, sizeof z);
+    CHECK(open_path(p, &i3, &s3) && commit1(s3, 0, 0, 1, 1) == 0, "a store with one page");
+    uint64_t base = fk_index_bytes(s3);
+    uint32_t f1 = 0;
+    CHECK(fk_fork(s3, 0, &f1) == 0 && commit1(s3, f1, 1000000, 77, 1000001) == 0, "a fork that writes a single page, number 1,000,000");
+    CHECK(fk_index_bytes(s3) - base < 4096, "the index grew by less than 4 KiB (one 8-byte offset per page up to the highest would have been 8 MB)");
+    CHECK(has(s3, f1, 1000000, 77) && has(s3, f1, 0, 1) && has(s3, 0, 0, 1), "the page reads back, next to the parent's page");
+    CHECK(fk_read(s3, f1, 500000, pg) == 0 && !memcmp(pg, z, FK_PAGE), "pages in the gap read as zeros");
+    uint64_t one = fk_index_bytes(s3);
+    int ok = 1;
+    for (uint32_t i = 0; i < 300 && ok; i++) {
+      uint32_t f = 0;
+      ok = fk_fork(s3, 0, &f) == 0 && commit1(s3, f, 900000 + i, 1000 + (int)i, 1000001) == 0;
+    }
+    CHECK(ok && fk_index_bytes(s3) - one < (1u << 20), "300 more forks, each writing one page near page 900,000: the index grew by less than 1 MiB in total");
+    ok = 1;
+    for (uint32_t i = 0; i < 300 && ok; i++) ok = has(s3, 2 + i, 900000 + i, 1000 + (int)i) && has(s3, 2 + i, 0, 1) && fk_read(s3, 2 + i, 1000000, pg) == 0 && !memcmp(pg, z, FK_PAGE);
+    CHECK(ok, "every one of them reads back its page and the parent's page 0, and its last page (never written) reads as zeros");
+
+    /* a shrink must not add an entry for every page number it removes, only for pages that exist below */
+    uint64_t pre = fk_index_bytes(s3);
+    CHECK(commit1(s3, f1, 1, 5, 2) == 0 && fk_index_bytes(s3) - pre < 4096, "shrinking the fork from 1,000,001 pages to 2: less than 4 KiB of index (no entry for the 999,998 pages that never existed)");
+    CHECK(fk_read(s3, f1, 1000000, pg) == FK_ENOENT, "its old last page is gone");
+    CHECK(commit1(s3, f1, 2, 6, 1000001) == 0 && fk_read(s3, f1, 1000000, pg) == 0 && !memcmp(pg, z, FK_PAGE) && has(s3, f1, 2, 6) && has(s3, f1, 1, 5), "growing it back: the removed page reads as zeros, not as 77");
+    CHECK(has(s3, 0, 0, 1), "main is unaffected");
+    fk_close(s3); fk_file_close(&i3);
+
+    /* many pages in one layer: sequential, stride 1024, stride 65536. Every table growth must keep every entry. */
+    snprintf(p, sizeof p, "%s/many.fk", dir);
+    enum { NP = 3000 };
+    static uint32_t pages[NP];
+    static int vers[NP];
+    uint32_t n = 0, top = 0;
+    for (uint32_t i = 0; i < 1000; i++) pages[n++] = i;
+    for (uint32_t i = 0; i < 1000; i++) pages[n++] = 100000 + i * 1024;
+    for (uint32_t i = 0; i < 1000; i++) pages[n++] = 10000000 + i * 65536;
+    for (uint32_t i = 0; i < n; i++) { vers[i] = 1 + (int)i; if (pages[i] > top) top = pages[i]; }
+    top += 1;
+    CHECK(open_path(p, &i3, &s3), "a new store");
+    ok = 1;
+    for (uint32_t i = 0; i < n && ok; i += 100) ok = commit_many(s3, 0, pages + i, vers + i, 100, top) == 0; /* 30 commits into one layer: the table grows 10 times */
+    CHECK(ok, "3,000 pages in 30 commits into one layer");
+    ok = 1;
+    for (uint32_t i = 0; i < n && ok; i++) ok = has(s3, 0, pages[i], vers[i]);
+    CHECK(ok, "all 3,000 read back");
+    CHECK(fk_index_bytes(s3) < (uint64_t)NP * 48 + 8192, "index memory is at most 48 bytes per page (table at least a quarter full)");
+    for (uint32_t i = 0; i < n; i += 3) { vers[i] += 10000; }
+    ok = 1;
+    for (uint32_t i = 0; i < n && ok; i += 3) ok = commit_many(s3, 0, pages + i, vers + i, 1, top) == 0;
+    CHECK(ok, "every third page overwritten (an overwrite must replace the entry)");
+    ok = 1;
+    for (uint32_t i = 0; i < n && ok; i++) ok = has(s3, 0, pages[i], vers[i]);
+    CHECK(ok, "all 3,000 read back, overwritten ones with their new content");
+    fk_close(s3); fk_file_close(&i3);
+    s3 = NULL;
+    CHECK(open_path(p, &i3, &s3), "reopen (the index is rebuilt by replaying the log)");
+    ok = 1;
+    for (uint32_t i = 0; i < n && ok; i++) ok = has(s3, 0, pages[i], vers[i]);
+    CHECK(ok, "all 3,000 read back");
+    CHECK(fk_compact(s3) == 0, "compact (the index is dumped to a snapshot, sorted by page)");
+    ok = 1;
+    for (uint32_t i = 0; i < n && ok; i++) ok = has(s3, 0, pages[i], vers[i]);
+    CHECK(ok, "all 3,000 read back");
+    fk_close(s3); fk_file_close(&i3);
+    s3 = NULL;
+    CHECK(open_path(p, &i3, &s3), "reopen the compacted file (the snapshot is loaded into tables)");
+    ok = 1;
+    for (uint32_t i = 0; i < n && ok; i++) ok = has(s3, 0, pages[i], vers[i]);
+    CHECK(ok, "all 3,000 read back");
+    fk_close(s3); fk_file_close(&i3);
   }
 
   printf("\nTOTAL FAILS=%d\n", fails);
