@@ -523,10 +523,19 @@ static int do_txn(sqlite3 *db, int branch, int i) {
   return 0;
 }
 
-static void workload(SimDisk *d, int batch, Ack *a) {
+/* a store behind the preallocation layer (store/io_prealloc.c) when pa is not 0: its chunk size in bytes */
+static void rmio(fk_io *io) { fk_prealloc_release(io); }
+#define CLEANUP_IO __attribute__((cleanup(rmio)))
+static fk_io mkio(SimDisk *d, uint64_t pa) {
+  fk_io io = sim_io(d);
+  if (pa) fk_prealloc_wrap(&io, pa);
+  return io;
+}
+
+static void workload(SimDisk *d, int batch, uint64_t pa, Ack *a) {
   a->ack0 = a->ack1 = -1;
   a->forked = 0;
-  fk_io io = sim_io(d);
+  fk_io io CLEANUP_IO = mkio(d, pa);
   fk_store *s = NULL;
   FkVfs *v = NULL;
   sqlite3 *db0 = NULL, *db1 = NULL;
@@ -561,7 +570,7 @@ out:
   fk_close(s);
 }
 
-typedef struct { Ack a; int batch; long images, violations; const char *what; long crash_at; } Ctx;
+typedef struct { Ack a; int batch; uint64_t pa; long images, violations; const char *what; long crash_at; } Ctx;
 
 static long expect_rows(int last) { long n = 0; for (int j = 1; j <= last; j++) n += rows_for(j); return n; }
 
@@ -587,7 +596,7 @@ static void verify_image(void *cx, const uint8_t *img, uint64_t len) {
   c->images++;
   SimDisk d;
   sim_init(&d, img, len);
-  fk_io io = sim_io(&d);
+  fk_io io CLEANUP_IO = mkio(&d, c->pa);
   fk_store *s = NULL;
   FkVfs *v = NULL;
   char why[200] = "";
@@ -622,12 +631,12 @@ done:
   }
 }
 
-static void power_loss(int batch) {
-  printf("T11 power loss under SQLite (batch advertised=%d): %d transactions on b0, a fork after the third, %d on b1\n", batch, NT, NT - 3);
+static void power_loss(int batch, uint64_t pa) {
+  printf("T11 power loss under SQLite (batch advertised=%d%s): %d transactions on b0, a fork after the third, %d on b1\n", batch, pa ? ", behind the preallocation layer" : "", NT, NT - 3);
   SimDisk d;
   sim_init(&d, NULL, 0);
   Ack a;
-  workload(&d, batch, &a);
+  workload(&d, batch, pa, &a);
   long events = d.events;
   CHECK(a.ack0 == NT && a.ack1 == NT, "the uninterrupted run completes (acks %d, %d)", a.ack0, a.ack1);
   sim_free(&d);
@@ -644,8 +653,9 @@ static void power_loss(int batch) {
       if (mode == 0) w.crash_at = n; else w.fsync_fail_at = n;
       Ctx c;
       memset(&c, 0, sizeof c);
-      workload(&w, batch, &c.a);
+      workload(&w, batch, pa, &c.a);
       c.batch = batch;
+      c.pa = pa;
       c.what = mode ? "fsync fails" : "power cut";
       c.crash_at = n;
       sim_images(&w, &r, verify_image, &c);
@@ -687,8 +697,9 @@ int main(int argc, char **argv) {
     t_names();
   }
   if (!quick) {
-    if (have_batch()) power_loss(1);
-    power_loss(0);
+    if (have_batch()) power_loss(1, 0);
+    power_loss(0, 0);
+    power_loss(0, 16384); /* the journal path again, behind the preallocation layer with small chunks so that the cuts include the zero fills */
   }
   rmdir(dir);
   printf("checks=%d TOTAL FAILS=%d\n", checks, fails);

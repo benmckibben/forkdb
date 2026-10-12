@@ -43,7 +43,7 @@ case $cmd in
     ;;
   test|bench)
     [ -f "$out/sqlite3-$variant.o" ] || { echo "run: $0 sqlite   first" >&2; exit 1; }
-    srcs="$here/fkvfs.c $root/store/fkstore.c $root/store/io_file.c"
+    srcs="$here/fkvfs.c $root/store/fkstore.c $root/store/io_file.c $root/store/io_prealloc.c"
     extra=""
     # SAN=1: address and undefined-behaviour sanitizers on our code (SQLite itself is not instrumented)
     [ -n "${SAN:-}" ] && extra="-fsanitize=address,undefined -fno-sanitize-recover=undefined -g"

@@ -170,13 +170,24 @@ static int match(const Ctx *c, fk_store *s) {
   return -1;
 }
 
+/* CRASH_PREALLOC=n runs every store through the preallocation layer with n-byte chunks (store/io_prealloc.c), so that the cut points
+ * include the zero fills and the cuts they leave behind. A wrapped io is released when its variable goes out of scope. */
+static uint64_t g_prealloc;
+static fk_io mkio(SimDisk *d) {
+  fk_io io = sim_io(d);
+  if (g_prealloc) fk_prealloc_wrap(&io, g_prealloc);
+  return io;
+}
+static void rmio(fk_io *io) { fk_prealloc_release(io); }
+#define CLEANUP_IO __attribute__((cleanup(rmio)))
+
 static void verify_image(void *vc, const uint8_t *img, uint64_t len);
 
 static void nested(const Ctx *c, const uint8_t *img, uint64_t len) {
   /* Recovery itself does I/O (it truncates the torn tail). Cut the power at every one of its events. */
   SimDisk probe;
   sim_init(&probe, img, len);
-  fk_io io = sim_io(&probe);
+  fk_io io CLEANUP_IO = mkio(&probe);
   fk_store *s = NULL;
   if (fk_open(&io, &s) != 0) { sim_free(&probe); return; }
   long events = probe.events;
@@ -186,9 +197,9 @@ static void nested(const Ctx *c, const uint8_t *img, uint64_t len) {
     SimDisk d;
     sim_init(&d, img, len);
     d.crash_at = m;
-    io = sim_io(&d);
+    fk_io io2 CLEANUP_IO = mkio(&d);
     s = NULL;
-    if (fk_open(&io, &s) == 0) fk_close(s);
+    if (fk_open(&io2, &s) == 0) fk_close(s);
     Ctx c2 = *c;
     c2.depth = 1;
     c2.tag = "crash-during-recovery";
@@ -205,7 +216,7 @@ static void verify_image(void *vc, const uint8_t *img, uint64_t len) {
   c->st->images++;
   SimDisk d;
   sim_init(&d, img, len);
-  fk_io io = sim_io(&d);
+  fk_io io CLEANUP_IO = mkio(&d);
   fk_store *s = NULL;
   int rc = fk_open(&io, &s);
   if (rc != 0) {
@@ -255,9 +266,9 @@ static void verify_image(void *vc, const uint8_t *img, uint64_t len) {
     uint64_t dl = 0;
     const uint8_t *dimg = sim_durable(&d, &dl);
     sim_init(&d2, dimg, dl);
-    io = sim_io(&d2);
+    fk_io io2 CLEANUP_IO = mkio(&d2);
     fk_store *s2 = NULL;
-    if (fk_open(&io, &s2) != 0 || !equal_state(s2, &expect)) {
+    if (fk_open(&io2, &s2) != 0 || !equal_state(s2, &expect)) {
       c->st->violations++;
       if (!s2) snprintf(why, sizeof why, "reopen failed");
       report(c, "state after recovery + one more commit + reopen is wrong");
@@ -280,7 +291,7 @@ static long run_case(uint64_t seed, int K, long N, int mode, Stats *st, long *ev
   SimDisk d;
   sim_init(&d, NULL, 0);
   if (mode == 0) d.crash_at = N; else d.fsync_fail_at = N;
-  fk_io io = sim_io(&d);
+  fk_io io CLEANUP_IO = mkio(&d);
   fk_store *s = NULL;
   int acked = 0, inflight = 0;
   long ev_work = 0; /* events of the workload itself, not of the checks after it */
@@ -348,7 +359,7 @@ static long logic_case(uint64_t seed, int K, long *compactions) {
   gen_ops(seed * 977 + 5, K, ops, states);
   SimDisk d;
   sim_init(&d, NULL, 0);
-  fk_io io = sim_io(&d);
+  fk_io io CLEANUP_IO = mkio(&d);
   fk_store *s = NULL;
   long bad = 0;
   if (fk_open(&io, &s) != 0) { free(states); sim_free(&d); return 1; }
@@ -368,9 +379,9 @@ static long logic_case(uint64_t seed, int K, long *compactions) {
     const uint8_t *dimg = sim_durable(&d, &dl);
     SimDisk d2;
     sim_init(&d2, dimg, dl);
-    io = sim_io(&d2);
+    fk_io io2 CLEANUP_IO = mkio(&d2);
     fk_store *s2 = NULL;
-    if (fk_open(&io, &s2) != 0 || !equal_state(s2, &states[K])) { printf("  VIOLATION logic seed=%llu reopen: %s\n", (unsigned long long)seed, s2 ? why : "open failed"); bad = 1; }
+    if (fk_open(&io2, &s2) != 0 || !equal_state(s2, &states[K])) { printf("  VIOLATION logic seed=%llu reopen: %s\n", (unsigned long long)seed, s2 ? why : "open failed"); bad = 1; }
     if (s2) fk_close(s2);
     sim_free(&d2);
   }
@@ -386,6 +397,8 @@ int main(int argc, char **argv) {
   memset(&st, 0, sizeof st);
   long cases = 0, total_events = 0;
   int logic_seeds = argc > 3 ? atoi(argv[3]) : 3000;
+  if (getenv("CRASH_PREALLOC")) g_prealloc = strtoull(getenv("CRASH_PREALLOC"), NULL, 10);
+  if (g_prealloc) printf("every store runs through the preallocation layer, %llu-byte chunks\n", (unsigned long long)g_prealloc);
 #ifdef FK_BUG_SKIP_FSYNC
   printf("MUTANT: commits are acknowledged without fsync\n");
 #endif

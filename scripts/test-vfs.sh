@@ -40,7 +40,7 @@ open(sys.argv[2], 'w').write(s.replace(sys.argv[3], sys.argv[4]))
 EOF
   cp "$here/vfs/fkvfs.h" "$tmp/m/"
   gcc -w -std=gnu11 -O2 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_ENABLE_BATCH_ATOMIC_WRITE -I"$src" -I"$tmp/m" -I"$here/store" \
-    "$here/vfs/vfs_test.c" "$tmp/m/fkvfs.c" "$here/store/fkstore.c" "$here/store/io_file.c" "$here/test/simdisk.c" \
+    "$here/vfs/vfs_test.c" "$tmp/m/fkvfs.c" "$here/store/fkstore.c" "$here/store/io_file.c" "$here/store/io_prealloc.c" "$here/test/simdisk.c" \
     "$here/vfs/build/sqlite3-batch.o" -o "$tmp/m/t" -lpthread -lm
   if timeout "$limit" "$tmp/m/t" > "$tmp/m/out" 2>&1; then
     echo "  SURVIVED: $name"

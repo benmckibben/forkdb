@@ -16,11 +16,11 @@ ops=${OPS:-8}
 [ "${1:-}" = quick ] && seeds=10
 
 # The power-loss model has 8 branch ids so that ids are reused all the time; the file tests use the default (1024).
-crash_src="-DFK_MAX_BRANCHES=8 $here/test/crash_test.c $here/test/simdisk.c $here/store/fkstore.c"
+crash_src="-DFK_MAX_BRANCHES=8 $here/test/crash_test.c $here/test/simdisk.c $here/store/fkstore.c $here/store/io_prealloc.c"
 fdata=("-DFK_TEST_DATA=\"$here/test/data\"") # the path of the version 2 fixture, as a C string
 
 echo "== real-file tests"
-$cc $warn "${fdata[@]}" "$here/test/file_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" -o "$out/file_test"
+$cc $warn "${fdata[@]}" "$here/test/file_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" "$here/store/io_prealloc.c" -o "$out/file_test"
 "$out/file_test"
 
 echo "== power-loss tests (${seeds} seeds x ${ops} operations, address and undefined-behaviour sanitizers on)"
@@ -28,16 +28,19 @@ echo "== power-loss tests (${seeds} seeds x ${ops} operations, address and undef
 $cc $warn -fsanitize=address,undefined -fno-sanitize-recover=undefined $crash_src -o "$out/crash_test"
 "$out/crash_test" "$seeds" "$ops" | grep -E "^(logic pass|workloads|post-crash|append-after|TOTAL)"
 
+echo "== the same power-loss tests with every store behind the preallocation layer (16 KiB chunks, so the cuts include the zero fills)"
+CRASH_PREALLOC=16384 "$out/crash_test" "$seeds" "$ops" | grep -E "^(every store|logic pass|workloads|post-crash|append-after|TOTAL)"
+
 echo "== do the tests catch broken stores? (each mutant must be caught by at least one test)"
-mutant() { # name, flags
-  local name=$1 flags=$2 c=no f=no
+mutant() { # name, flags, [env for the power-loss run, e.g. CRASH_PREALLOC=16384]
+  local name=$1 flags=$2 cenv=${3:-} c=no f=no
   # shellcheck disable=SC2086
   $cc $warn $flags $crash_src -o "$out/m_crash"
   # shellcheck disable=SC2086
-  $cc $warn $flags "${fdata[@]}" "$here/test/file_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" -o "$out/m_file"
+  $cc $warn $flags "${fdata[@]}" "$here/test/file_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" "$here/store/io_prealloc.c" -o "$out/m_file"
   # A broken store may hang instead of failing (an endless loop): five minutes is far more than a healthy run needs (a few
   # seconds for the file tests, under two minutes for the power-loss run), and a hang counts as caught.
-  timeout 300 "$out/m_crash" 25 8 >/dev/null 2>&1 || c=YES
+  env $cenv timeout 300 "$out/m_crash" 25 8 >/dev/null 2>&1 || c=YES
   timeout 300 "$out/m_file" >/dev/null 2>&1 || f=YES
   printf "  %-52s power-loss harness: %-3s  file tests: %s\n" "$name" "$c" "$f"
   [ "$c" = YES ] || [ "$f" = YES ]
@@ -67,4 +70,10 @@ mutant "layers: discard never frees layers" "-DFK_BUG_LAYER_NO_FREE"
 mutant "layers: discard never folds single-child layers" "-DFK_BUG_LAYER_NO_FOLD"
 mutant "ids: recovery rejects a fork that reuses an id" "-DFK_BUG_ID_REPLAY_STRICT"
 mutant "ids: the allocation cursor is not restored from a snapshot" "-DFK_BUG_ID_NO_CURSOR"
+mutant "prealloc: the header is preallocated too (a cut leaves zeros)" "-DFK_BUG_PA_EXTEND_HEADER" "CRASH_PREALLOC=16384"
+mutant "prealloc: the zero fill starts at the file start" "-DFK_BUG_PA_FILL_FROM_ZERO" "CRASH_PREALLOC=16384"
+mutant "prealloc: the zero fill runs after the data is written" "-DFK_BUG_PA_FILL_AFTER_WRITE" "CRASH_PREALLOC=16384"
+mutant "prealloc: the state is forgotten after a compaction" "-DFK_BUG_PA_RENAME_FORGETS_STATE" "CRASH_PREALLOC=16384"
+mutant "prealloc: the trim cuts one byte too many" "-DFK_BUG_PA_TRIM_SHORT" "CRASH_PREALLOC=16384"
+mutant "prealloc: a failed zero fill fails the write" "-DFK_BUG_PA_NO_FALLBACK" "CRASH_PREALLOC=16384"
 echo "all store tests passed"
