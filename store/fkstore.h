@@ -41,6 +41,28 @@ typedef struct fk_io {
   void (*sibling_remove)(void *ctx, struct fk_io *tmp);        /* close and delete the temporary file (tmp may be NULL: delete a leftover from an earlier run) */
 } fk_io;
 
+#define FK_HEADER_SZ 4096u /* the file header: the first FK_HEADER_SZ bytes; records start after it */
+
+/* Preallocation (store/io_prealloc.c). A layer over any fk_io that writes zeros ahead of the end of the log, a chunk at a time, so
+ * that a commit overwrites blocks that already exist instead of growing the file: a commit that appends costs about three times as
+ * much on real disks (docs/VFS-SPIKE.md). The format does not change: the zeros past the end of the log are a torn tail, which
+ * recovery already cuts off. Opt-in.
+ *
+ *   fk_io io; fk_file_open(path, &io);
+ *   fk_prealloc_wrap(&io, FK_PREALLOC_DEFAULT);   // chunk 0 leaves io as it is
+ *   fk_store *s; fk_open(&io, &s); ...; fk_close(s);
+ *   fk_prealloc_close(&io);                       // cut the file back to the log end and free the layer (io is the file again)
+ *   fk_file_close(&io);
+ *
+ * Without the trim (a crash) the file ends in zeros, which the next open cuts off. If the zeros cannot be written (the disk is
+ * full) the layer stops extending and writes plainly, so it never fails a write the file itself would have accepted. The compaction
+ * output is not preallocated (it is written once, in bulk). The cost: every byte of log is written twice, once as zeros. */
+#define FK_PREALLOC_DEFAULT (4u << 20)
+int fk_prealloc_wrap(fk_io *io, uint64_t chunk);
+void fk_prealloc_trim(const fk_io *io);     /* cut the file back to the end of what was written (no-op if io is not wrapped) */
+void fk_prealloc_release(fk_io *io);        /* free the layer, no trim; io is the underlying io again */
+void fk_prealloc_close(fk_io *io);          /* trim, then release */
+
 typedef struct fk_store fk_store;
 
 /* Open (and recover) a store, creating it when the file is empty. Recovery truncates a torn tail. */

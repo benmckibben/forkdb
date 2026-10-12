@@ -18,7 +18,7 @@ Instant-branching, copy-on-write SQLite databases for local development, testing
 | [docs/SPIKE-FINDINGS.md](docs/SPIKE-FINDINGS.md) | What the spike proved, measured, and what it did not show |
 | [spike/](spike/README.md) | The throwaway spike: one C file, build and run instructions, recorded results |
 | [docs/VFS-SPIKE.md](docs/VFS-SPIKE.md) | SQLite running on the durable store through a VFS ([vfs/](vfs)): what was built, the tests and mutant check, the measurements, and what it changed in the plan |
-| [docs/DURABLE-STORE.md](docs/DURABLE-STORE.md) | The durable, branchable page store ([store/](store)): format, recovery, the power-loss test harness and what it does not cover |
+| [docs/DURABLE-STORE.md](docs/DURABLE-STORE.md) | The durable, branchable page store ([store/](store)): format, recovery, the power-loss test harness and what it does not cover; and an opt-in layer that preallocates the log (about 3 times cheaper commits on real disks) |
 
 ## Reproduce the spike
 

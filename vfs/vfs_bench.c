@@ -88,17 +88,20 @@ static fk_io wrap(Cnt *k) {
   return io;
 }
 
-static const char *CFG[] = {"file/DELETE", "file/WAL", "forkdb/batch", "forkdb/journal", "forkdb/prealloc", "forkdb/coalesce", "forkdb/both"};
-static const int KMODE[] = {0, 0, 0, 0, M_PREALLOC, M_COALESCE, M_PREALLOC | M_COALESCE};
+static const char *CFG[] = {"file/DELETE", "file/WAL", "forkdb/batch", "forkdb/journal", "forkdb/prealloc", "forkdb/coalesce", "forkdb/both", "forkdb/pa-1M", "forkdb/pa-4M", "forkdb/pa-16M", "forkdb/pa-64M"};
+static const int KMODE[] = {0, 0, 0, 0, M_PREALLOC, M_COALESCE, M_PREALLOC | M_COALESCE, 0, 0, 0, 0};
+/* the real preallocation layer (store/io_prealloc.c), on top of the counting io, so the counters include the zero fill; 0 = none */
+static const uint64_t KCHUNK[] = {0, 0, 0, 0, 0, 0, 0, 1u << 20, 4u << 20, 16u << 20, 64u << 20};
 
 typedef struct { Cnt c; fk_io io; fk_store *s; FkVfs *v; sqlite3 *db; } Fk;
 
-static void fk_start(Fk *f, const char *path, int batch, int mode) {
+static void fk_start(Fk *f, const char *path, int batch, int mode, uint64_t chunk) {
   memset(f, 0, sizeof *f);
   f->c.mode = mode;
   if (fk_file_open(path, &f->c.real) != 0) die("fk_file_open");
   f->c.prealloc_end = (uint64_t)f->c.real.size(f->c.real.ctx);
   f->io = wrap(&f->c);
+  if (chunk && fk_prealloc_wrap(&f->io, chunk) != FK_OK) die("prealloc wrap");
   if (fk_open(&f->io, &f->s) != 0) die("fk_open");
   must(fkvfs_register(f->s, "fkb", &f->v), "register");
   fkvfs_set_batch_atomic(f->v, batch);
@@ -108,6 +111,7 @@ static void fk_stop(Fk *f) {
   sqlite3_close(f->db);
   must(fkvfs_unregister(f->v), "unregister");
   fk_close(f->s);
+  fk_prealloc_close(&f->io); /* cut the zeros off (a no-op without the layer) */
   fk_file_close(&f->c.real);
 }
 
@@ -145,7 +149,7 @@ static void run(int rep, int kind, const char *dir) {
   unlink(path); unlink(wal); unlink(jr); unlink(copy);
   Fk f;
   sqlite3 *db = NULL;
-  if (kind >= 2) { fk_start(&f, path, kind == 2, KMODE[kind]); db = f.db; }
+  if (kind >= 2) { fk_start(&f, path, kind == 2, KMODE[kind], KCHUNK[kind]); db = f.db; }
   else {
     must(sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL), "open");
     must(sqlite3_exec(db, kind == 1 ? "PRAGMA journal_mode=WAL" : "PRAGMA journal_mode=DELETE", 0, 0, 0), "journal_mode");
@@ -281,6 +285,7 @@ static void run(int rep, int kind, const char *dir) {
     if (fk_file_open(path, &f.c.real) != 0) die("reopen file");
     f.c.prealloc_end = (uint64_t)f.c.real.size(f.c.real.ctx);
     f.io = wrap(&f.c);
+    if (KCHUNK[kind] && fk_prealloc_wrap(&f.io, KCHUNK[kind]) != FK_OK) die("prealloc wrap");
     if (fk_open(&f.io, &f.s) != 0) die("reopen store");
     R(rep, cfg, "w7_fk_open_ms", (now() - a) * 1e3);
     must(fkvfs_register(f.s, "fkb", &f.v), "register");
@@ -304,6 +309,77 @@ static void run(int rep, int kind, const char *dir) {
   unlink(shm);
 }
 
+/* Sustained commits: NS single-row autocommit transactions in a row, so that a preallocating log goes through many extensions (a 64 MiB
+ * chunk holds about 7,900 of them). Reports the latency tail, what the store asked of the disk per commit (zero fill included), and then
+ * what a reopen and the first commit after it cost (the layer starts again from the log's end). */
+static void sustain(int rep, int kind, const char *dir) {
+  const int NS = getenv("BENCH_SUSTAIN_N") ? atoi(getenv("BENCH_SUSTAIN_N")) : 20000;
+  const char *cfg = CFG[kind];
+  char path[400], wal[420], jr[420], shm[430];
+  snprintf(path, sizeof path, "%s/sustain-%d.%s", dir, kind, kind < 2 ? "db" : "fk");
+  snprintf(wal, sizeof wal, "%s-wal", path);
+  snprintf(jr, sizeof jr, "%s-journal", path);
+  snprintf(shm, sizeof shm, "%s-shm", path);
+  unlink(path); unlink(wal); unlink(jr); unlink(shm);
+  Fk f;
+  sqlite3 *db = NULL;
+  if (kind >= 2) { fk_start(&f, path, kind == 2, KMODE[kind], KCHUNK[kind]); db = f.db; }
+  else {
+    must(sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL), "open");
+    must(sqlite3_exec(db, kind == 1 ? "PRAGMA journal_mode=WAL" : "PRAGMA journal_mode=DELETE", 0, 0, 0), "journal_mode");
+    must(sqlite3_exec(db, "PRAGMA synchronous=FULL", 0, 0, 0), "synchronous");
+  }
+  must(sqlite3_exec(db, "CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB)", 0, 0, 0), "create");
+  sqlite3_stmt *ins;
+  must(sqlite3_prepare_v2(db, "INSERT INTO t(v) VALUES (randomblob(100))", -1, &ins, 0), "prepare");
+  double *lat = malloc(sizeof(double) * NS);
+  uint64_t fs0 = kind >= 2 ? f.c.fsyncs : 0, pb0 = kind >= 2 ? f.c.pwrite_bytes : 0, rp0 = kind >= 2 ? f.c.real_pwrites : 0;
+  double t0 = now();
+  for (int i = 0; i < NS; i++) {
+    double a = now();
+    if (sqlite3_step(ins) != SQLITE_DONE) die("sustain insert");
+    sqlite3_reset(ins);
+    lat[i] = (now() - a) * 1e6;
+  }
+  double total = now() - t0, sum = 0;
+  for (int i = 0; i < NS; i++) sum += lat[i];
+  qsort(lat, NS, sizeof *lat, cmpd);
+  R(rep, cfg, "sustain_txn_per_s", NS / total);
+  R(rep, cfg, "sustain_mean_us", sum / NS);
+  R(rep, cfg, "sustain_p50_us", pct(lat, NS, 0.5));
+  R(rep, cfg, "sustain_p99_us", pct(lat, NS, 0.99));
+  R(rep, cfg, "sustain_p999_us", pct(lat, NS, 0.999));
+  R(rep, cfg, "sustain_max_us", lat[NS - 1]);
+  if (kind >= 2) {
+    R(rep, cfg, "sustain_fsyncs_per_txn", (double)(f.c.fsyncs - fs0) / NS);
+    R(rep, cfg, "sustain_bytes_per_txn", (double)(f.c.pwrite_bytes - pb0) / NS);
+    R(rep, cfg, "sustain_pwrites_per_txn", (double)(f.c.real_pwrites - rp0) / NS);
+  }
+  sqlite3_finalize(ins);
+  free(lat);
+  if (kind >= 2) {
+    fk_stop(&f);
+    R(rep, cfg, "sustain_file_bytes_at_rest", (double)fsize(path));
+    double a = now();
+    fk_start(&f, path, kind == 2, KMODE[kind], KCHUNK[kind]);
+    R(rep, cfg, "sustain_reopen_ms", (now() - a) * 1e3);
+    db = f.db;
+  } else {
+    sqlite3_close(db);
+    R(rep, cfg, "sustain_file_bytes_at_rest", (double)fsize(path));
+    double a = now();
+    must(sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, NULL), "reopen");
+    R(rep, cfg, "sustain_reopen_ms", (now() - a) * 1e3);
+  }
+  for (int i = 0; i < 3; i++) { /* the first commit after an open, then two more for comparison */
+    double a = now();
+    must(sqlite3_exec(db, "INSERT INTO t(v) VALUES (randomblob(100))", 0, 0, 0), "post-open insert");
+    R(rep, cfg, i == 0 ? "sustain_first_commit_after_open_us" : (i == 1 ? "sustain_second_commit_after_open_us" : "sustain_third_commit_after_open_us"), (now() - a) * 1e6);
+  }
+  if (kind >= 2) fk_stop(&f); else sqlite3_close(db);
+  unlink(path); unlink(wal); unlink(jr); unlink(shm);
+}
+
 #define NCFG ((int)(sizeof CFG / sizeof *CFG))
 int main(int argc, char **argv) {
   const char *only = getenv("BENCH_ONLY"); /* e.g. BENCH_ONLY='file/WAL forkdb/journal': run just those */
@@ -313,7 +389,10 @@ int main(int argc, char **argv) {
   printf("# SQLite %s, batch-atomic compiled in: %s\n", sqlite3_libversion(), sqlite3_compileoption_used("ENABLE_BATCH_ATOMIC_WRITE") ? "yes" : "no");
   for (int rep = 1; rep <= reps; rep++) {
     fsync_floor(rep, argv[1]);
-    for (int k = 0; k < NCFG; k++) if (!only || strstr(only, CFG[k])) run(rep, k, argv[1]);
+    for (int k = 0; k < NCFG; k++) {
+      if (only && !strstr(only, CFG[k])) continue;
+      if (getenv("BENCH_MODE") && strcmp(getenv("BENCH_MODE"), "sustain") == 0) sustain(rep, k, argv[1]); else run(rep, k, argv[1]);
+    }
   }
   printf("# done\n");
   return 0;

@@ -40,7 +40,7 @@ run_on() { # label device
   [ -n "$dev" ] || { echo "BENCH-SKIP $label: no device"; return; }
   if ! { mkfs.ext4 -q -F "/dev/$dev" && mkdir -p "/mnt/$label" && mount "/dev/$dev" "/mnt/$label"; }; then echo "BENCH-SKIP $label: mkfs or mount failed"; return; fi
   echo "BENCH-BEGIN $label /dev/$dev $(lsblk -dno MODEL "/dev/$dev" | sed "s/ *$//") $(date -u +%T)"
-  timeout 2400 ./vfs/real-disk.sh "/mnt/$label" ${reps} | sed "s/^/[$label] /"
+  timeout 2400 ./vfs/real-disk.sh "/mnt/$label" ${reps} ${bench_mode} | sed "s/^/[$label] /"
   echo "BENCH-END $label $(date -u +%T)"
   umount "/mnt/$label"
 }

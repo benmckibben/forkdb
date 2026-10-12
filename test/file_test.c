@@ -25,6 +25,15 @@ static int open_path(const char *path, fk_io *io, fk_store **s) { return fk_file
 static long fsz(const char *p) { struct stat st; return stat(p, &st) == 0 ? (long)st.st_size : -1; }
 static int exists(const char *p) { return access(p, F_OK) == 0; }
 
+/* an io that refuses big writes (the zero fill of the preallocation layer), like a disk that has room for the log but not for chunks */
+typedef struct { fk_io r; int fail_big; } Shim;
+static int64_t sh_size(void *c) { Shim *x = c; return x->r.size(x->r.ctx); }
+static int sh_pread(void *c, uint64_t o, void *b, size_t n) { Shim *x = c; return x->r.pread(x->r.ctx, o, b, n); }
+static int sh_pwrite(void *c, uint64_t o, const void *b, size_t n) { Shim *x = c; if (x->fail_big && n >= (1u << 20)) return -1; return x->r.pwrite(x->r.ctx, o, b, n); }
+static int sh_truncate(void *c, uint64_t n) { Shim *x = c; return x->r.truncate(x->r.ctx, n); }
+static int sh_fsync(void *c) { Shim *x = c; return x->r.fsync(x->r.ctx); }
+
+
 /* io wrappers that misbehave at one point of a compaction */
 static int (*real_rename)(void *, fk_io *);
 static int (*real_create)(void *, fk_io *);
@@ -186,6 +195,109 @@ int main(void) {
     CHECK(has(os, 0, 0, 7), "the abort left the committed page alone");
     fk_close(os); fk_file_close(&oio);
     unlink(po);
+  }
+  printf("== preallocation layer (store/io_prealloc.c)\n");
+  {
+    const uint64_t chunk = 64 * 1024;
+    char pp[300];
+    snprintf(pp, sizeof pp, "%s/prealloc.fk", dir);
+    fk_io io;
+    fk_store *s = NULL;
+    uint64_t fb = 0, lb = 0;
+    CHECK(fk_file_open(pp, &io) == 0 && fk_prealloc_wrap(&io, chunk) == 0 && fk_open(&io, &s) == 0, "open a store through the layer");
+    int ok = 1;
+    for (int i = 0; i < 40; i++) ok &= commit1(s, 0, (uint32_t)(i % 7), 100 + i, 7) == 0;
+    CHECK(ok && has(s, 0, 0, 135) && has(s, 0, 6, 134) && has(s, 0, 4, 139), "40 commits through it");
+    CHECK(fk_stats(s, &fb, &lb) == 0 && fsz(pp) > (long)fb && fsz(pp) % (long)chunk == 0, "the file is written ahead of the log, in whole chunks");
+    fk_close(s);
+    fk_prealloc_close(&io);
+    CHECK(fsz(pp) == (long)fb, "after a clean close the file is exactly the log");
+    fk_file_close(&io);
+    s = NULL;
+    CHECK(open_path(pp, &io, &s) && has(s, 0, 0, 135) && has(s, 0, 6, 134) && has(s, 0, 3, 138), "a plain reopen reads everything");
+    fk_close(s);
+    fk_file_close(&io);
+
+    /* a process that dies: no trim, the file ends in zeros, and the next open cuts them off */
+    s = NULL;
+    CHECK(fk_file_open(pp, &io) == 0 && fk_prealloc_wrap(&io, chunk) == 0 && fk_open(&io, &s) == 0, "reopen through the layer");
+    ok = 1;
+    for (int i = 0; i < 25; i++) ok &= commit1(s, 0, (uint32_t)(i % 5), 300 + i, 7) == 0;
+    uint64_t fb2 = 0;
+    fk_stats(s, &fb2, &lb);
+    fk_close(s);
+    fk_prealloc_release(&io); /* no trim: what a crash leaves */
+    fk_file_close(&io);
+    CHECK(ok && fsz(pp) > (long)fb2, "without the trim the file ends in zeros past the log");
+    s = NULL;
+    CHECK(open_path(pp, &io, &s) && has(s, 0, 0, 320) && has(s, 0, 4, 324) && fsz(pp) == (long)fb2, "recovery keeps every commit and cuts the zeros off");
+    fk_close(s);
+    fk_file_close(&io);
+
+    /* compaction under the layer, then more commits: the layer must have taken in the new, smaller file */
+    s = NULL;
+    CHECK(fk_file_open(pp, &io) == 0 && fk_prealloc_wrap(&io, chunk) == 0 && fk_open(&io, &s) == 0, "reopen again");
+    ok = 1;
+    for (int i = 0; i < 60; i++) ok &= commit1(s, 0, 0, 500 + i, 7) == 0;
+    CHECK(ok && fk_compact(s) == 0, "compact");
+    uint64_t fb3 = 0;
+    fk_stats(s, &fb3, &lb);
+    CHECK(fb3 == lb && fsz(pp) == (long)fb3, "the compacted file holds only live data, and is exactly that long");
+    ok = 1;
+    for (int i = 0; i < 30; i++) ok &= commit1(s, 0, (uint32_t)(i % 3), 700 + i, 7) == 0;
+    CHECK(ok && has(s, 0, 0, 727) && has(s, 0, 1, 728) && has(s, 0, 4, 324), "commits after the compaction, and the old data next to them, are intact");
+    fk_stats(s, &fb3, &lb);
+    fk_close(s);
+    fk_prealloc_close(&io);
+    CHECK(fsz(pp) == (long)fb3, "and a clean close leaves exactly the log");
+    fk_file_close(&io);
+    s = NULL;
+    CHECK(open_path(pp, &io, &s) && has(s, 0, 0, 727) && has(s, 0, 4, 324), "reopen after compaction + commits");
+    fk_close(s);
+    fk_file_close(&io);
+    unlink(pp);
+
+    /* the disk has no room for a chunk of zeros: the layer must fall back to plain appends, not fail the commit */
+    {
+      char pq[300];
+      snprintf(pq, sizeof pq, "%s/prealloc-full.fk", dir);
+      fk_io base, shim;
+      Shim sx;
+      memset(&sx, 0, sizeof sx);
+      CHECK(fk_file_open(pq, &base) == 0, "open a file for the full-disk case");
+      sx.r = base;
+      sx.fail_big = 1;
+      memset(&shim, 0, sizeof shim);
+      shim.ctx = &sx;
+      shim.size = sh_size; shim.pread = sh_pread; shim.pwrite = sh_pwrite; shim.truncate = sh_truncate; shim.fsync = sh_fsync;
+      s = NULL;
+      CHECK(fk_prealloc_wrap(&shim, 4u << 20) == 0 && fk_open(&shim, &s) == 0, "open a store through the layer (4 MiB chunks, zero fill refused)");
+      ok = 1;
+      for (int i = 0; i < 12; i++) ok &= commit1(s, 0, (uint32_t)(i % 4), 900 + i, 4) == 0;
+      CHECK(ok && has(s, 0, 3, 911), "commits still succeed: the layer falls back to plain writes");
+      fk_stats(s, &fb, &lb);
+      CHECK(fsz(pq) == (long)fb, "and the file is no longer than the log (no zeros were left behind)");
+      fk_close(s);
+      fk_prealloc_release(&shim);
+      fk_file_close(&base);
+      s = NULL;
+      CHECK(open_path(pq, &io, &s) && has(s, 0, 3, 911) && has(s, 0, 0, 908), "reopen: everything is there");
+      fk_close(s);
+      fk_file_close(&io);
+      unlink(pq);
+    }
+    /* chunk 0 leaves the io alone */
+    {
+      fk_io i0;
+      char pz[300];
+      snprintf(pz, sizeof pz, "%s/prealloc-off.fk", dir);
+      CHECK(fk_file_open(pz, &i0) == 0, "open a file");
+      void *before = i0.ctx;
+      CHECK(fk_prealloc_wrap(&i0, 0) == 0 && i0.ctx == before, "chunk 0: the io is not wrapped");
+      fk_prealloc_close(&i0); /* a no-op on an io that is not wrapped */
+      fk_file_close(&i0);
+      unlink(pz);
+    }
   }
   printf("== CRC-32C: portable and hardware implementations agree with a bit-by-bit reference and with each other\n");
   {

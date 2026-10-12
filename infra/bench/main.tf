@@ -81,6 +81,7 @@ locals {
     source_url  = var.source_url
     source_sha  = var.source_sha
     reps        = var.reps
+    bench_mode  = var.bench_mode
     run_tests   = var.run_tests ? "1" : "0"
     max_minutes = var.max_runtime_minutes
   })

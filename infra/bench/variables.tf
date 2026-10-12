@@ -43,6 +43,16 @@ variable "reps" {
   default     = 3
 }
 
+variable "bench_mode" {
+  description = "What vfs/real-disk.sh runs on each disk: commit-path (the raw I/O patterns of one commit and the commit-path SQLite configurations) or sustain (20,000 commits in a row on WAL, the log as it is, and the preallocating log with several chunk sizes)"
+  type        = string
+  default     = "commit-path"
+  validation {
+    condition     = contains(["commit-path", "sustain"], var.bench_mode)
+    error_message = "bench_mode must be commit-path or sustain."
+  }
+}
+
 variable "run_tests" {
   description = "Also run scripts/test-vfs.sh quick on the instance (a different kernel and filesystem than the WSL2 runs)"
   type        = bool

@@ -122,9 +122,48 @@ What it shows:
 - **`fallocate` does not help** (E, 124 against 135 us): it reserves unwritten extents, and the first write into one converts it, which is a metadata change again. Only blocks that have really been written avoid it.
 - **With the log preallocated by writing zeros, a store commit is at WAL parity on NVMe** (43.3 against 44.5 us, a 1000-row commit 0.73 against 0.72 ms) and a fork costs 26 us instead of 97. On gp3 it is 537 us against 2,752 for the store as it is. WAL on gp3 was 992 us in the first run of this series and 2,327 here (with a 1,505 to 2,606 range inside this run), so **the WAL figure on gp3 is not stable between instances and I do not claim a ratio to it there**; the comparison with forkdb is only reliable within one run.
 
-**What these numbers leave out, and it matters.** The zeros are written once, before the timed loop (the first 64 MiB are written when the first table is created), so the commit latencies above are the steady state after preallocation. The zero-fill itself is not free: every byte of log is written twice, once as zeros in a large sequential write and once as data. At about 8.4 KB of log per single-row commit, that is roughly 67 us per commit at the 125 MB/s baseline of gp3 and a few microseconds on NVMe, paid in chunk-sized pauses when the file is extended, or in the background if it were moved off the commit path. A WAL pays the same only in its first lap. **This was not measured**, so I do not claim parity all-in, only at the steady state. Also not measured: other filesystems (ext4 only), other chunk sizes, and what the first commit after opening a store costs, because the store truncates a torn tail when it opens and the file would be extended again.
+**What these numbers leave out, and it matters.** The zeros are written once, before the timed loop (the first 64 MiB are written when the first table is created), so the commit latencies above are the steady state after preallocation. The zero-fill itself is not free: every byte of log is written twice, once as zeros in a large sequential write and once as data. At about 8.4 KB of log per single-row commit, that is roughly 67 us per commit at the 125 MB/s baseline of gp3 and a few microseconds on NVMe, paid in chunk-sized pauses when the file is extended, or in the background if it were moved off the commit path. A WAL pays the same only in its first lap. **This was not measured there; the next section measures it: all-in, parity holds on gp3 and does not on NVMe.** Also not measured: other filesystems (ext4 only), other chunk sizes, and what the first commit after opening a store costs, because the store truncates a torn tail when it opens and the file would be extended again.
 
 **What it would take to ship** (not done, proposed): extend the file in `store/io_file.c` by writing zeros in chunks (with one `fsync` per chunk) whenever a write would pass the allocated end. The store and the format would not change: recovery already stops at the first invalid record and truncates what follows, and a zero tail is an invalid record. The pieces to decide are the chunk size (the fixed cost per chunk is one sync; the per-byte cost is the second write), whether to keep the preallocation across an open instead of truncating and re-extending, and the disk space (a chunk of zeros past the log end). The existing file and power-loss tests would have to cover it, and a run that includes the extensions (tens of thousands of commits, several chunks) is needed before any claim about the all-in cost.
+
+## Preallocation, measured (2026-10-12)
+
+The log can be preallocated by the layer in [store/io_prealloc.c](../store/io_prealloc.c) (design and tests in [DURABLE-STORE.md](DURABLE-STORE.md)): zeros are written ahead of the end of the log, a chunk at a time, so that a commit overwrites blocks that exist. This section measures it with the zero fill **inside** the timed loop, which the previous section did not: 20,000 single-row commits in a row (a 64 MiB chunk holds about 7,900 of them, so the larger chunks go through two to five extensions and the smaller ones through hundreds), on one `i4i.large` (NVMe instance store and gp3, ext4, 3 repetitions, medians; ranges in [vfs/results/preallocation-sustained.txt](../vfs/results/preallocation-sustained.txt)). The layer sits on top of the counting I/O, so bytes and syncs include the zero fill.
+
+| NVME | WAL | log as it was | 1 MiB chunks | 4 MiB chunks | 16 MiB chunks | 64 MiB chunks |
+|---|---|---|---|---|---|---|
+| commits per second | 20,134 | 5,459 | 8,898 | 9,408 | 9,447 | 9,921 |
+| mean (us) | 49.6 | 183 | 112 | 106 | 106 | 101 |
+| p50 (us) | 34.9 | 147 | 43.3 | 43.7 | 43.8 | 43.9 |
+| p99 (us) | 147 | 223 | 3,836 | 81.6 | 81.6 | 79.9 |
+| p99.9 (us) | 5,614 | 4,821 | 11,622 | 23,057 | 7,625 | 7,574 |
+| max (ms) | 5.92 | 4.93 | 11.7 | 30.7 | 84.0 | 290.7 |
+| first commit after an open (ms) | 0.49 | 0.33 | 0.46 | 2.90 | 21.0 | 95.2 |
+| written per commit (bytes, zero fill included) | n/a | 8,437 | 16,826 | 16,826 | 16,826 | 15,148 |
+
+| EBS | WAL | log as it was | 1 MiB chunks | 4 MiB chunks | 16 MiB chunks | 64 MiB chunks |
+|---|---|---|---|---|---|---|
+| commits per second | 831 | 345 | 959 | 1,011 | 1,127 | 1,183 |
+| mean (us) | 1,203 | 2,895 | 1,043 | 989 | 888 | 845 |
+| p50 (us) | 922 | 2,865 | 973 | 953 | 942 | 937 |
+| p99 (us) | 2,876 | 3,798 | 1,961 | 1,858 | 1,840 | 1,842 |
+| p99.9 (us) | 4,430 | 3,987 | 6,702 | 10,366 | 1,968 | 1,934 |
+| max (ms) | 7.68 | 8.63 | 7.86 | 12.3 | 59.1 | 98.9 |
+| first commit after an open (ms) | 5.94 | 3.16 | 4.41 | 9.64 | 28.5 | 50.2 |
+| written per commit (bytes, zero fill included) | n/a | 8,437 | 16,826 | 16,826 | 16,826 | 15,148 |
+
+What it shows:
+
+- **Against the log as it was, preallocation is a clear win on both disks.** Commits per second: 5,459 to 8,898 to 9,921 on NVMe (1.6 to 1.8 times), 345 to 959 to 1,183 on gp3 (2.8 to 3.4 times). p50 on NVMe: 147 us to 43 us.
+- **Against WAL it depends on the disk.** On gp3 forkdb with preallocation is ahead of WAL in this run (959 to 1,183 against 831 commits per second, mean 845 to 1,043 against 1,203 us) and at p50 parity (937 against 922 us). On NVMe it is not: WAL does 20,134 commits per second against 9,921 at best (mean 49.6 against 101 us), and even p50 is 26 percent slower (43.9 against 34.9 us). **The earlier statement that preallocation brings a commit to WAL parity at the steady state holds on gp3 and does not on NVMe.** The WAL figure on gp3 has varied from one instance to the next in this series (992, 2,327 and now 922 us at p50), so treat the gp3 comparison as one run's.
+- **The zero fill is not free, and on NVMe it is what is left.** Every commit writes 16,826 bytes instead of 8,437: the data and, amortised, its zeros. The mean is about twice the p50 on NVMe (101 against 44 us): the difference is the extensions, which are stalls, about 4.5 to 11 ms per MiB of chunk on NVMe (a 64 MiB chunk stalls one commit for about 290 ms). On gp3 the stalls are shorter than I expected for the volume's 125 MB/s baseline (about 99 ms for 64 MiB); **I do not know why**, and I did not look.
+- **The chunk size trades stall length against frequency, not against total cost.** Small chunks stall rarely-per-byte but often: 1 MiB chunks put the p99 at 3.8 ms on NVMe (one commit in 125 stalls for about 4 ms). Large chunks leave p99 at 80 us and put the cost in the last few in ten thousand: 16 MiB chunks, p99.9 7.6 ms, worst 84 ms; 64 MiB, worst 290 ms. The mean improves a little with chunk size (NVMe 112, 106, 106, 101 us; gp3 1,043, 989, 888, 845 us), because there are fewer syncs for the extensions.
+- **A reopen costs the same with or without it** (64 ms for a 169 MB log, about 0.4 s per GiB), **but the first commit after an open pays a whole chunk**: 0.46 ms (1 MiB), 2.9 ms (4 MiB), 21 ms (16 MiB) and 95 ms (64 MiB) on NVMe, against 0.33 ms for the log as it was; gp3: 4.4, 9.6, 28 and 50 ms against 3.2 ms. The second and later commits are as fast as ever. This is what an application sees if it opens a store per request.
+- **The file at rest is exactly the log** after a clean close (168,738,268 bytes for every variant), so the trim works.
+
+**Default chunk: 4 MiB** (`FK_PREALLOC_DEFAULT`). It keeps the worst stall near 30 ms on NVMe and 12 ms on gp3 and the first commit after an open near 3 and 10 ms, for a mean within 5 percent (NVMe) and 17 percent (gp3) of the best measured. A latency-insensitive writer would take 16 or 64 MiB, a store opened per request 1 MiB. This is a judgement on three repetitions of one instance type, not an optimum.
+
+**What is still not known or not done:** one instance of one type and 20,000 commits (169 MB), a database that fits in memory, ext4 only; the zero fill runs on the committing thread, so it shows up as stalls (a background fill, or reusing the old log file after a compaction, whose blocks are already written, would avoid both the stalls and the double write; neither is built or measured); disk space is used a chunk ahead of the log; the first commit after an open pays a chunk because recovery truncates the zero tail and the layer starts again from the log's end.
 
 ## Findings
 

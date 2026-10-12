@@ -6,7 +6,7 @@
 
 #define MAGIC 0x31524b46u /* "FKR1" little-endian */
 #define FK_VERSION 3u     /* 2 added snapshots (compaction); 3 lets fork reuse the ids of discarded branches and adds the allocation cursor to snapshots. Versions 1 and 2 are still read. */
-#define HDR_SZ 4096u
+#define HDR_SZ FK_HEADER_SZ
 #define REC_HDR 32u
 #define PAGE_PAYLOAD (8u + FK_PAGE)
 #define REC_PAGE_SZ (REC_HDR + PAGE_PAYLOAD)
