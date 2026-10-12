@@ -49,12 +49,44 @@ Store only: fsyncs per single-row commit 1.03; bytes written per single-row comm
 
 What to read from it, and what not to:
 
-- **A commit costs the fsync and little else.** 3.99 ms p50 against the 3.98 ms floor. That is 2.7 times faster than SQLite's default rollback journal (10.9 ms: about 2.7 fsyncs' worth, I did not count them) and 25% slower than WAL, which only has to append. The batch path and the journal path are within noise of each other everywhere (one transaction of 200,000 rows is the only place they differ, 0.165 against 0.183 s, and the ranges overlap).
+- **A commit costs the fsync and little else.** 3.99 ms p50 against the 3.98 ms floor. That is 2.7 times faster than SQLite's default rollback journal (10.9 ms: about 2.7 fsyncs' worth, I did not count them) and 25% slower than WAL, which only has to append. The batch path and the journal path are within noise of each other everywhere (one transaction of 200,000 rows is the only place they differ, 0.165 against 0.183 s, and the ranges overlap). **Correction, 2026-10-12: that is how it looks on this WSL2 disk only. On real disks forkdb is about 3 times slower than WAL (see Real disks below).**
 - **The random-read result is not a merit of the store.** The plain-file rollback-journal column is slow because every statement takes and releases a file lock and checks the file header, which are syscalls; the VFS does that in process. The likely reason is not measured (I did not trace the syscalls). Against WAL, which avoids most of that, the two are equal.
 - **Scans are 27% slower** (20.8 against 16.4 ms): every page goes through the layer lookup, a pread and a checksum. The data is in the OS cache; a cold read is not measured.
 - **Fork time is one fsync** (3.6 ms here), independent of the database size by construction, and the log grows 40 bytes. It was measured at one size only; the 38 to 46 ms for the copy is for the same 33.5 MB.
 - **Write amplification is real:** a single-row commit writes 8.4 KB, two pages and the record, because SQLite rewrites page 1 (the file change counter) on every commit. After the whole run the log was 18 MB larger than the live data (52.1 against 34.0); the 2,000 single-row commits alone wrote 16.9 MB. Compaction (already built) is what reclaims it, and nothing triggers it yet.
-- Absolute values will move on a disk whose fsync is not 4 ms. The ratios that are fsync counts (rollback journal against forkdb against WAL) should survive; the ones that are CPU (scan, random read) should not move much. **Not measured.**
+- Absolute values will move on a disk whose fsync is not 4 ms. The ratios that are fsync counts (rollback journal against forkdb against WAL) should survive; the ones that are CPU (scan, random read) should not move much. **Not measured.** **That prediction was wrong for WAL: the ratios did not survive (see Real disks below). The CPU-bound ones did.**
+
+## Real disks (2026-10-12)
+
+One throwaway `i4i.large` (Xeon Platinum 8375C, Amazon Linux 2023, kernel 6.1.188, SQLite 3.50.0) built from `infra/bench` ([README](../infra/bench/README.md)), running the same `vfs_bench`, 3 repetitions on each of two disks, both ext4 with default options: the **local NVMe instance store** and a **gp3 EBS volume** (3000 IOPS, 125 MB/s). Medians, ranges are in [vfs/results/bench-real-disks.txt](../vfs/results/bench-real-disks.txt). The same 335 and 319 checks of `scripts/test-vfs.sh quick` also passed on that host (0 failures), so the VFS tests hold on a second kernel and filesystem.
+
+| single-row commit | rollback journal | WAL | forkdb (batch path) | forkdb (journal path) |
+|---|---|---|---|---|
+| NVMe: p50 (us) | 250.8 | 44.7 | 149.6 | 153.1 |
+| NVMe: commits per second | 3,755 | 11,205 | 6,396 | 6,267 |
+| EBS gp3: p50 (us) | 6,537 | 992 | 2,839 | 2,870 |
+| EBS gp3: commits per second | 155 | 637 | 418 | 345 |
+
+| | NVMe: rollback journal | WAL | forkdb (batch) | EBS: rollback journal | WAL | forkdb (batch) |
+|---|---|---|---|---|---|---|
+| 1000-row commit p50 (ms) | 1.07 | 0.71 | 0.90 | 10.0 | 2.74 | 4.59 |
+| 200,000 rows in one transaction (s) | 0.135 | 0.167 | 0.150 | 0.160 | 0.198 | 0.166 |
+| random primary-key read (us) | 4.11 | 2.21 | 2.96 | 4.10 | 2.07 | 2.90 |
+| full scan (ms) | 15.7 | 16.4 | 21.9 | 16.3 | 14.9 | 22.2 |
+| copy of the database file (ms) | 31.6 | 32.0 | n/a | 56.0 | 55.4 | n/a |
+
+Store only: **fork 97.8 us p50 on NVMe (p99 170 us) and 2.53 ms on EBS**, against 31.6 ms and 56 ms to copy the 33.5 MB file; a one-row update on a fork 271 us on NVMe, 8,324 bytes of log; 1.03 fsyncs and 8,439 bytes written per single-row commit; opening the 52 MB log 18.7 ms, and the first count after reopening 12.1 ms. A 4 KiB write plus fsync on this host: 132 us p50 on NVMe, 2.79 ms on EBS.
+
+What changed, what did not:
+
+- **forkdb is about 3 times slower than WAL at a single-row commit on real disks** (149.6 against 44.7 us on NVMe, 2.84 against 0.99 ms on EBS), not 25% slower as the WSL2 numbers suggested. It is still faster than SQLite's default rollback journal: 1.7 times on NVMe, 2.3 times on EBS. For larger transactions the gap to WAL is smaller (1000 rows: 1.3 times on NVMe, 1.7 times on EBS) and a 200,000-row transaction is within noise of both.
+- **The cause of the gap to WAL is not known.** The store already uses `fdatasync`, so it is not fsync against fdatasync, and it does one sync per commit like WAL. The WAL commit on EBS (0.99 ms) is also faster than my own 4 KiB write plus fsync loop (2.79 ms), so that loop is not a floor for a commit: it extends the file and calls `fsync`. Differences I have not tested: the log grows 8.4 KB on every commit where a WAL is reused after each checkpoint, and the VFS writes two pages and a record where WAL appends frames. **This is a hypothesis list, not a finding.** A measurement that varies one of them (preallocating the log, or counting the I/O with `strace`) would say which.
+- **The WSL2 prediction that the ratios between configurations are fsync counts was wrong** and is corrected above. The CPU-bound results held up: the scan is 34 to 49 percent slower than a plain file (21.9 against 15.7 and 16.4 ms), identical on both disks, so it is the layer lookup, pread and checksum, not the disk.
+- **The random-read result moved.** On WSL2 forkdb looked faster than the plain file with a rollback journal (3.3 against 8.75 us); here it is 2.96 against 4.11 us, still faster than that configuration and about 30 percent slower than WAL (2.21 us).
+- **Fork cost scales with the disk's sync time**, as predicted: one sync, no data copied. On NVMe a fork is about 300 times cheaper than copying this database; on EBS about 22 times.
+- **Write amplification and open time are as before** (8.4 KB per commit; the log is 52.1 MB for 34.0 MB live; 18.7 ms to open it, which is the quantity that grows at about 3 s per GiB of log).
+
+Limits of this run: one instance of one type in one availability zone, three repetitions each (the ranges are in the results file and are small), a database of 33.5 MB that fits in memory, no cold-cache reads, one filesystem (ext4, default options). The first attempt at this run lost its output (the console of a terminated instance is empty), so the numbers come from the second run.
 
 ## Findings
 
@@ -68,7 +100,7 @@ What to read from it, and what not to:
 
 ## Limits: not tested, or only reasoned
 
-- **One machine, three repetitions, a 4 ms fsync.** No NVMe or SSD. No cold-cache reads.
+- **One machine, three repetitions, a 4 ms fsync** for the numbers above. Real disks are measured in the next section, on one instance of one type. No cold-cache reads anywhere.
 - **The power-loss workload is small**: 11 transactions and a fork. The functional tests cover spilled transactions, `VACUUM`, truncation and temporary files, but not under a power cut. The model is `simdisk`'s, with its limits (see DURABLE-STORE.md).
 - **Single process.** Locks are in-process and the store is single-writer. Two processes on one store file are not supported and not tested.
 - **Not tested:** the session extension through this VFS (diff, promote, undo); `ATTACH` of two branches in one transaction, which commits each file separately and is **not atomic across branches** (reasoned: there is one store commit per file, and nothing like a super-journal for it); discarding a branch that has a connection open (ids are reused, as DURABLE-STORE.md warns: close connections first); concurrency stress; databases over 1 GB; any real application.
@@ -88,6 +120,6 @@ Needs gcc, curl, sha256sum and python3. Run the benchmark on the disk you care a
 
 1. ~~Drop batch-atomic from the design (DESIGN.md consequence 1) and say so in the README.~~ Done, in the follow-up docs PR.
 2. A store call to read a page of the open transaction, so the VFS stops staging (finding 5). A small store change with its own tests.
-3. Run the same benchmark on a real SSD or NVMe.
+3. ~~Run the same benchmark on a real SSD or NVMe.~~ Done (below). It changed one conclusion.
 4. The session extension on top of the VFS: diff, promote and undo on a branch.
 5. The open-time checkpoint in the log and an automatic compaction trigger, now that a VFS user would feel both (write amplification above; open time 26 ms for 52 MB here).
