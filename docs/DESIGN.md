@@ -64,6 +64,6 @@ Out:
 
 ## Open questions
 
-- Packaging: a loadable extension still runs inside whatever SQLite the host program links, which may lack the session extension (compile flags `SQLITE_ENABLE_SESSION` and `SQLITE_ENABLE_PREUPDATE_HOOK`). Does forkdb ship its own SQLite (simplest, but a second copy of SQLite in the process) or require a capable one?
+- ~~Packaging~~ Decided 2026-10-12: a loadable extension runs inside whatever SQLite the host links, which may lack the session extension (compile flags `SQLITE_ENABLE_SESSION` and `SQLITE_ENABLE_PREUPDATE_HOOK`). forkdb does **not** ship a second SQLite in the application's process: the library gives the VFS to any host and diff/promote/undo only to hosts that expose the session API, and says so when they do not; the standalone CLI is built with its own SQLite and works offline on a store no application has open. Reasoning and measurements: [SESSION-DESIGN.md](SESSION-DESIGN.md).
 - Language for the real implementation (C for the VFS is natural; the CLI and library bindings could be Rust or Go).
 - ~~License~~ Decided: MIT OR Apache-2.0, as in the author's other projects.

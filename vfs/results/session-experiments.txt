@@ -1,0 +1,115 @@
+# Output of vfs/experiments/session-experiments.sh (X1 to X6, then X7), 2026-10-12, SQLite 3.50.0 built with SQLITE_ENABLE_SESSION and SQLITE_ENABLE_PREUPDATE_HOOK, fkvfs over a real file store on WSL2 (ext4).
+# The [sqlite log ...] lines are SQLite's own log messages (sqlite3_config SQLITE_CONFIG_LOG).
+== X1: diff of a fork against its parent through ATTACH + sqlite3session_diff
+  diff t1: rc=0 (not an error) 
+  diff t2: rc=0 (not an error) 
+  diff t3: rc=0 (not an error) 
+  diff t4: rc=17 (database schema has changed) no such table: base.t4
+  diff t5: rc=0 (not an error) 
+    UPDATE t1 [100] [v100->changed]
+    DELETE t1 [8] [v8]
+    UPDATE t1 [300] [v300->changed]
+    UPDATE t1 [500] [v500->changed]
+    UPDATE t1 [700] [v700->changed]
+    UPDATE t1 [400] [v400->changed]
+    UPDATE t1 [800] [v800->changed]
+    DELETE t1 [7] [v7]
+    INSERT t1 [5001] [new2]
+    INSERT t1 [5000] [new1]
+    UPDATE t1 [200] [v200->changed]
+    UPDATE t1 [600] [v600->changed]
+    UPDATE t1 [900] [v900->changed]
+    UPDATE t1 [1000] [v1000->changed]
+    UPDATE t3 [1] [1] [p->pp]
+    DELETE t5 [k2] [2]
+    total: 2 inserts, 11 updates, 3 deletes, 401 bytes
+  (t2 has no PRIMARY KEY, t4 does not exist in base)
+== X2: a write transaction across two attached branches
+  commit rc=0; journal_opens +2, sync_publish +2, store_commits +2
+  rows: b1 has 9001=1, b2 has 9002=1
+== X3: two-branch read, then a writer on one of them
+  reader sees 11 and 11 rows; writer on the second branch while the reader's txn is open: rc=5 (database is locked)
+  after the reader commits: rc=0
+== X4: changeset_apply against a parent whose schema moved
+  changeset from the fork:
+    UPDATE t1 [100] [v100->changed]
+    UPDATE t1 [150] [v150->changed]
+    DELETE t1 [7] [v7]
+    total: 1 inserts, 4 updates, 1 deletes, 145 bytes
+  apply[same schema]: rc=0 (not an error), conflicts DATA=0 NOTFOUND=0 CONFLICT=0 CONSTRAINT=0 FK=0, log msgs=0
+    after: rows=200, id=900 present=1, id=7 present=0
+  apply[column added at the end]: rc=0 (not an error), conflicts DATA=0 NOTFOUND=0 CONFLICT=0 CONSTRAINT=0 FK=0, log msgs=0
+    after: rows=200, id=900 present=1, id=7 present=0
+    [sqlite log 17] sqlite3changeset_apply(): no such table: t1
+  apply[table dropped]: rc=0 (not an error), conflicts DATA=0 NOTFOUND=0 CONFLICT=0 CONSTRAINT=0 FK=0, log msgs=1
+  apply[column renamed (v -> vv)]: rc=0 (not an error), conflicts DATA=0 NOTFOUND=0 CONFLICT=0 CONSTRAINT=0 FK=0, log msgs=0
+    after: rows=200, id=900 present=1, id=7 present=0
+    [sqlite log 17] sqlite3changeset_apply(): primary key mismatch for table t1
+  apply[primary key changed to (id, v)]: rc=0 (not an error), conflicts DATA=0 NOTFOUND=0 CONFLICT=0 CONSTRAINT=0 FK=0, log msgs=1
+    after: rows=200, id=900 present=0, id=7 present=1
+    conflict callback: DATA
+  apply[column type changed (TEXT -> INTEGER)]: rc=4 (query aborted), conflicts DATA=1 NOTFOUND=0 CONFLICT=0 CONSTRAINT=0 FK=0, log msgs=0
+    after: rows=200, id=900 present=0, id=7 present=1
+  apply[NOT NULL + CHECK added]: rc=0 (not an error), conflicts DATA=0 NOTFOUND=0 CONFLICT=0 CONSTRAINT=0 FK=0, log msgs=0
+    after: rows=200, id=900 present=1, id=7 present=0
+    conflict callback: DATA
+  apply[a column inserted before v]: rc=4 (query aborted), conflicts DATA=1 NOTFOUND=0 CONFLICT=0 CONSTRAINT=0 FK=0, log msgs=0
+    after: rows=200, id=900 present=0, id=7 present=1
+  does a session record DDL? creating a table in a fork with a session attached to all tables:
+    INSERT t9 [1] [x]
+    total: 1 inserts, 0 updates, 0 deletes, 21 bytes
+== X5: triggers and foreign keys under a session and under apply
+  changeset of: 2 inserts into t (a trigger inserts into audit) + 1 child row:
+    INSERT t [1] [a]
+    INSERT t [2] [b]
+    INSERT audit [1] [1]
+    INSERT audit [2] [2]
+    INSERT chi [100] [5]
+    total: 5 inserts, 0 updates, 0 deletes, 112 bytes
+    [sqlite log 1555] abort at 9: UNIQUE constraint failed: audit.n; [INSERT INTO main."audit"("n", "id") VALUES(?, ?)]
+    conflict callback: CONFLICT
+  apply[target with the same trigger]: rc=4 (query aborted), conflicts DATA=0 NOTFOUND=0 CONFLICT=1 CONSTRAINT=0 FK=0, log msgs=1
+    audit rows after apply: 0 (the fork had 2)
+== X5b: replay with the target's triggers dropped inside the same transaction, then re-created
+  apply_v2 (NOSAVEPOINT) rc=0, conflicts=0
+  commit rc=0; t rows=2, audit rows=2 (the fork had 2); trigger present=1
+  trigger still fires after: audit rows=3
+== X5c: foreign keys on apply (no triggers involved)
+    conflict callback: FOREIGN_KEY
+  apply[foreign_keys=ON, parent gone]: rc=19 (constraint failed), conflicts DATA=0 NOTFOUND=0 CONFLICT=0 CONSTRAINT=0 FK=1, log msgs=0
+    chi rows after: 0
+  apply[foreign_keys=OFF, parent gone]: rc=0 (not an error), conflicts DATA=0 NOTFOUND=0 CONFLICT=0 CONSTRAINT=0 FK=0, log msgs=0
+    chi rows after: 1 (an orphan if 1)
+== X6: promote by replay, conflicts, abort atomicity, undo by an inverted changeset
+  F's work (diff against its anchor):     total: 1 inserts, 2 updates, 1 deletes, 80 bytes
+  (a) parent moved on disjoint rows
+  apply[disjoint]: rc=0 (not an error), conflicts DATA=0 NOTFOUND=0 CONFLICT=0 CONSTRAINT=0 FK=0, log msgs=0
+    parent: 100:290 -> 100:287
+  (b) undo: invert the changeset and apply
+  apply[inverse]: rc=0 (not an error), conflicts DATA=0 NOTFOUND=0 CONFLICT=0 CONSTRAINT=0 FK=0, log msgs=0
+    parent back to: 100:290 (id=10 v=v10, id=500 present=0)
+  (c) parent changed a row F also changed: replay must abort and leave the parent untouched
+    conflict callback: DATA
+  apply[same row changed on both sides]: rc=4 (query aborted), conflicts DATA=1 NOTFOUND=0 CONFLICT=0 CONSTRAINT=0 FK=0, log msgs=0
+    parent rows 10,20,60: v10,P2,P2 -> v10,P2,P2; id=500 present=0; in transaction=0
+  (d) both inserted the same primary key
+    [sqlite log 1555] abort at 9: UNIQUE constraint failed: t1.id; [INSERT INTO main."t1"("id", "v") VALUES(?, ?)]
+    conflict callback: CONFLICT
+  apply[same PK inserted on both sides]: rc=4 (query aborted), conflicts DATA=0 NOTFOUND=0 CONFLICT=1 CONSTRAINT=0 FK=0, log msgs=1
+  (e) the same case with the handler answering OMIT (skip the conflicting change, apply the rest)
+    [sqlite log 1555] abort at 9: UNIQUE constraint failed: t1.id; [INSERT INTO main."t1"("id", "v") VALUES(?, ?)]
+    conflict callback: CONFLICT
+  apply[omit]: rc=0 (not an error), conflicts DATA=0 NOTFOUND=0 CONFLICT=1 CONSTRAINT=0 FK=0, log msgs=1
+    rows 10,20,500: F,F,other
+== the same X2/X3 with a VFS that refuses super-journal files
+== X2: a write transaction across two attached branches
+    exec rc=14 (unable to open database file): unable to open database file   <- COMMIT
+  commit rc=14; journal_opens +2, sync_publish +0, store_commits +0
+  rows: b1 has 9001=0, b2 has 9002=0
+== X3: two-branch read, then a writer on one of them
+  reader sees 10 and 10 rows; writer on the second branch while the reader's txn is open: rc=5 (database is locked)
+  after the reader commits: rc=0
+== X7: cost of sqlite3session_diff against table size (100 changed rows; 80-byte rows; fkvfs on a real file)
+     10000 rows (199 pages, 1 MiB): full scan of one branch 1 ms; diff rc=0, 9307-byte changeset, 5 ms
+    100000 rows (1968 pages, 8 MiB): full scan of one branch 8 ms; diff rc=0, 9307-byte changeset, 61 ms
+   1000000 rows (19659 pages, 77 MiB): full scan of one branch 68 ms; diff rc=0, 9307-byte changeset, 598 ms
