@@ -196,7 +196,7 @@ static int publish(FkFile *f, int dedupe) {
   uint32_t zhi = ns < cs ? ns : cs; /* pages the store still has inside the new size but a truncate emptied: write them as zeros */
   uint32_t zlo = f->limit < zhi ? f->limit : zhi;
   int rc = SQLITE_OK;
-  if (nw == 0 && zlo == zhi && ns == cs) goto done;
+  if (nw == 0 && zlo == zhi && ns == cs) goto done; /* nothing to commit; done still drops the staging dedup left in the hash */
   int e = fk_txn_begin(s, f->branch);
   if (e != FK_OK) { rc = map_store_err(e); goto done; }
   uint32_t wrote = 0;
@@ -221,9 +221,10 @@ static int publish(FkFile *f, int dedupe) {
   if (rc != SQLITE_OK) { fk_txn_abort(s); goto done; }
   v->st.store_commits++;
   v->st.pages_published += wrote;
-  discard(f);
 done:
-  if (rc == SQLITE_OK && !dirty(f)) { /* nothing left staged (also the no-op case): reset the bookkeeping */ discard(f); }
+  /* A commit and the no-op both drop staging. Dedup only marks the local keys array, so on the no-op path the hash is still
+   * occupied (and have_size may still be set): dirty() stays true and cannot be the signal to clear it. */
+  if (rc == SQLITE_OK) discard(f);
   free(keys);
   return rc;
 }

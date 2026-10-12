@@ -206,9 +206,9 @@ static void t_spill(int batch) {
   CHECK(sql(db, "CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB)") == 0, "create");
   fill(db, "t", 200, 100);
   CHECK(sql(db, "PRAGMA cache_size=-64") == 0, "small page cache (64 KiB)");
-  FkVfsStats s0, s1;
+  FkVfsStats s0, s1, s2;
   uint32_t pg0, pg1;
-  uint64_t f0, f1, l;
+  uint64_t f0, f1, l, deduped, unlocks, syncs;
   fk_size(e.s, 0, &pg0);
   fk_stats(e.s, &f0, &l);
   fkvfs_stats(e.v, &s0);
@@ -221,6 +221,11 @@ static void t_spill(int batch) {
   fk_stats(e.s, &f1, &l);
   printf("   rollback: store commits +%llu, pages published +%llu, deduped +%llu, journals +%llu, log grew %lld bytes\n", (unsigned long long)(s1.store_commits - s0.store_commits), (unsigned long long)(s1.pages_published - s0.pages_published), (unsigned long long)(s1.pages_deduped - s0.pages_deduped), (unsigned long long)(s1.journal_opens - s0.journal_opens), (long long)(f1 - f0));
   CHECK(scalar(db, "SELECT count(*) FROM t") == 200 && integrity_ok(db), "back to 200 rows, integrity ok");
+  fkvfs_stats(e.v, &s2);
+  CHECK(scalar(db, "SELECT count(*) FROM t") == 200, "read again after the rollback");
+  deduped = s2.pages_deduped; unlocks = s2.unlock_publish; syncs = s2.sync_publish;
+  fkvfs_stats(e.v, &s2);
+  CHECK(s2.pages_deduped == deduped && s2.unlock_publish == unlocks && s2.sync_publish == syncs, "the no-op publish cleared staging: a later lock release did not scan it again (deduped +%llu, unlock-publish +%llu, sync-publish +%llu)", (unsigned long long)(s2.pages_deduped - deduped), (unsigned long long)(s2.unlock_publish - unlocks), (unsigned long long)(s2.sync_publish - syncs));
   CHECK(pg1 == pg0, "database size unchanged (%u vs %u pages)", pg1, pg0);
   CHECK(s1.store_commits == s0.store_commits, "a rolled-back transaction commits nothing to the store (%llu commits)", (unsigned long long)(s1.store_commits - s0.store_commits));
   CHECK(sql(db, "BEGIN") == 0, "begin");
