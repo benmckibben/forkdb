@@ -27,7 +27,7 @@ About **$0.10 for the run, $4 a day if it were left running, which the backstop 
 
 The agent's IAM user (`openclaw-ulrich`) cannot launch instances today (`ec2:RunInstances` is denied; checked with a free `--dry-run` on 2026-10-11). The agent has no IAM rights by design, so this is for you to run once with your own credentials. [iam-policy.json](iam-policy.json) allows only:
 
-- **`RunInstances`** only with the tag `Project=forkdb-bench` on the instance, volumes and network interface, only for `i4i.large` and `i3.large`, only with a security group that carries that tag, plus the public AMI and subnet.
+- **`RunInstances`** only with the tag `Project=forkdb-bench` on the instance and its volumes, only for `i4i.large` and `i3.large` (`StringEquals` with a list: an OR over the two values that fails closed if the key is missing; `ForAllValues` would pass when the key is absent), only with a security group that carries that tag, plus the public AMI, the subnet and the network interface (the provider does not tag the implicit NIC, so a tag condition on it would deny the launch; an untagged NIC is harmless).
 - **`CreateTags`** only at creation (`RunInstances`, `CreateSecurityGroup`) and only with that tag.
 - **Security group:** create one tagged `Project=forkdb-bench` in the VPC; authorize/revoke egress and delete **only security groups with that tag**.
 - **`TerminateInstances`, `GetConsoleOutput`** only on instances with that tag.
