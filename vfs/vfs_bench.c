@@ -27,12 +27,55 @@ static long long scalar(sqlite3 *db, const char *q) {
 static long fsize(const char *p) { struct stat st; return stat(p, &st) == 0 ? (long)st.st_size : 0; }
 
 /* an fk_io that counts what the store asks of the disk */
-typedef struct { fk_io real; uint64_t fsyncs, pwrites, pwrite_bytes; double fsync_s; } Cnt;
+#define PREALLOC_CHUNK (64u << 20)
+/* mode bits: what this wrapper does to the store's I/O (an experiment on the commit path; the store itself is unchanged) */
+enum { M_PREALLOC = 1, M_COALESCE = 2 };
+typedef struct {
+  fk_io real;
+  uint64_t fsyncs, pwrites, pwrite_bytes, real_pwrites;
+  double fsync_s;
+  int mode;
+  uint64_t prealloc_end;                 /* M_PREALLOC: the file is already written (zeros or data) up to here */
+  uint8_t *pend; size_t pend_len, pend_cap; uint64_t pend_off; /* M_COALESCE: contiguous writes not yet handed to the file */
+} Cnt;
 static int64_t c_size(void *c) { Cnt *k = c; return k->real.size(k->real.ctx); }
-static int c_pread(void *c, uint64_t o, void *b, size_t n) { Cnt *k = c; return k->real.pread(k->real.ctx, o, b, n); }
-static int c_pwrite(void *c, uint64_t o, const void *b, size_t n) { Cnt *k = c; k->pwrites++; k->pwrite_bytes += n; return k->real.pwrite(k->real.ctx, o, b, n); }
-static int c_trunc(void *c, uint64_t n) { Cnt *k = c; return k->real.truncate(k->real.ctx, n); }
-static int c_fsync(void *c) { Cnt *k = c; double t = now(); int rc = k->real.fsync(k->real.ctx); k->fsync_s += now() - t; k->fsyncs++; return rc; }
+static int c_flush(Cnt *k) {
+  if (!k->pend_len) return 0;
+  size_t n = k->pend_len;
+  k->pend_len = 0;
+  k->real_pwrites++;
+  return k->real.pwrite(k->real.ctx, k->pend_off, k->pend, n);
+}
+static int c_pread(void *c, uint64_t o, void *b, size_t n) { Cnt *k = c; if (c_flush(k)) return -1; return k->real.pread(k->real.ctx, o, b, n); }
+static int c_extend(Cnt *k, uint64_t upto) { /* write zeros so the file is allocated and written (not merely sparse or unwritten) up to upto */
+  static uint8_t *z;
+  if (!z) z = calloc(1, 1u << 20);
+  while (k->prealloc_end < upto) {
+    for (uint32_t d = 0; d < PREALLOC_CHUNK; d += 1u << 20)
+      if (k->real.pwrite(k->real.ctx, k->prealloc_end + d, z, 1u << 20) != 0) return -1;
+    k->prealloc_end += PREALLOC_CHUNK;
+    if (k->real.fsync(k->real.ctx) != 0) return -1; /* make the extents and the size durable now, once */
+  }
+  return 0;
+}
+static int c_pwrite(void *c, uint64_t o, const void *b, size_t n) {
+  Cnt *k = c;
+  k->pwrites++;
+  k->pwrite_bytes += n;
+  if ((k->mode & M_PREALLOC) && c_extend(k, o + n) != 0) return -1;
+  if (k->mode & M_COALESCE) {
+    if (k->pend_len && o != k->pend_off + k->pend_len && c_flush(k)) return -1;
+    if (k->pend_len + n > k->pend_cap) { size_t nc = (k->pend_len + n) * 2 + 4096; uint8_t *p = realloc(k->pend, nc); if (!p) return -1; k->pend = p; k->pend_cap = nc; }
+    if (!k->pend_len) k->pend_off = o;
+    memcpy(k->pend + k->pend_len, b, n);
+    k->pend_len += n;
+    return 0;
+  }
+  k->real_pwrites++;
+  return k->real.pwrite(k->real.ctx, o, b, n);
+}
+static int c_trunc(void *c, uint64_t n) { Cnt *k = c; if (c_flush(k)) return -1; if (k->prealloc_end > n) k->prealloc_end = n; return k->real.truncate(k->real.ctx, n); }
+static int c_fsync(void *c) { Cnt *k = c; if (c_flush(k)) return -1; double t = now(); int rc = k->real.fsync(k->real.ctx); k->fsync_s += now() - t; k->fsyncs++; return rc; }
 static int c_sc(void *c, fk_io *t) { Cnt *k = c; return k->real.sibling_create(k->real.ctx, t); }
 static int c_sr(void *c, fk_io *t) { Cnt *k = c; return k->real.sibling_rename(k->real.ctx, t); }
 static int c_sd(void *c) { Cnt *k = c; return k->real.sync_dir(k->real.ctx); }
@@ -45,13 +88,16 @@ static fk_io wrap(Cnt *k) {
   return io;
 }
 
-static const char *CFG[] = {"file/DELETE", "file/WAL", "forkdb/batch", "forkdb/journal"};
+static const char *CFG[] = {"file/DELETE", "file/WAL", "forkdb/batch", "forkdb/journal", "forkdb/prealloc", "forkdb/coalesce", "forkdb/both"};
+static const int KMODE[] = {0, 0, 0, 0, M_PREALLOC, M_COALESCE, M_PREALLOC | M_COALESCE};
 
 typedef struct { Cnt c; fk_io io; fk_store *s; FkVfs *v; sqlite3 *db; } Fk;
 
-static void fk_start(Fk *f, const char *path, int batch) {
+static void fk_start(Fk *f, const char *path, int batch, int mode) {
   memset(f, 0, sizeof *f);
+  f->c.mode = mode;
   if (fk_file_open(path, &f->c.real) != 0) die("fk_file_open");
+  f->c.prealloc_end = (uint64_t)f->c.real.size(f->c.real.ctx);
   f->io = wrap(&f->c);
   if (fk_open(&f->io, &f->s) != 0) die("fk_open");
   must(fkvfs_register(f->s, "fkb", &f->v), "register");
@@ -99,7 +145,7 @@ static void run(int rep, int kind, const char *dir) {
   unlink(path); unlink(wal); unlink(jr); unlink(copy);
   Fk f;
   sqlite3 *db = NULL;
-  if (kind >= 2) { fk_start(&f, path, kind == 2); db = f.db; }
+  if (kind >= 2) { fk_start(&f, path, kind == 2, KMODE[kind]); db = f.db; }
   else {
     must(sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL), "open");
     must(sqlite3_exec(db, kind == 1 ? "PRAGMA journal_mode=WAL" : "PRAGMA journal_mode=DELETE", 0, 0, 0), "journal_mode");
@@ -112,7 +158,7 @@ static void run(int rep, int kind, const char *dir) {
   /* W1: single-row autocommit transactions */
   enum { N1 = 2000 };
   static double lat[N1];
-  uint64_t fs0 = kind >= 2 ? f.c.fsyncs : 0, pb0 = kind >= 2 ? f.c.pwrite_bytes : 0;
+  uint64_t fs0 = kind >= 2 ? f.c.fsyncs : 0, pb0 = kind >= 2 ? f.c.pwrite_bytes : 0, rp0 = kind >= 2 ? f.c.real_pwrites : 0;
   double w1 = now();
   for (int i = 0; i < N1; i++) {
     double a = now();
@@ -130,6 +176,7 @@ static void run(int rep, int kind, const char *dir) {
   if (kind >= 2) {
     R(rep, cfg, "w1_fsyncs_per_txn", (double)(f.c.fsyncs - fs0) / N1);
     R(rep, cfg, "w1_bytes_written_per_txn", (double)(f.c.pwrite_bytes - pb0) / N1);
+    R(rep, cfg, "w1_pwrites_per_txn", (double)(f.c.real_pwrites - rp0) / N1);
   }
 
   /* W2: 100 transactions of 1000 rows */
@@ -232,6 +279,7 @@ static void run(int rep, int kind, const char *dir) {
     fk_stop(&f);
     a = now();
     if (fk_file_open(path, &f.c.real) != 0) die("reopen file");
+    f.c.prealloc_end = (uint64_t)f.c.real.size(f.c.real.ctx);
     f.io = wrap(&f.c);
     if (fk_open(&f.io, &f.s) != 0) die("reopen store");
     R(rep, cfg, "w7_fk_open_ms", (now() - a) * 1e3);
@@ -256,14 +304,16 @@ static void run(int rep, int kind, const char *dir) {
   unlink(shm);
 }
 
+#define NCFG ((int)(sizeof CFG / sizeof *CFG))
 int main(int argc, char **argv) {
+  const char *only = getenv("BENCH_ONLY"); /* e.g. BENCH_ONLY='file/WAL forkdb/journal': run just those */
   if (argc < 2) { fprintf(stderr, "usage: %s DIR [REPS]\n", argv[0]); return 2; }
   int reps = argc > 2 ? atoi(argv[2]) : 3;
   setvbuf(stdout, NULL, _IOLBF, 0);
   printf("# SQLite %s, batch-atomic compiled in: %s\n", sqlite3_libversion(), sqlite3_compileoption_used("ENABLE_BATCH_ATOMIC_WRITE") ? "yes" : "no");
   for (int rep = 1; rep <= reps; rep++) {
     fsync_floor(rep, argv[1]);
-    for (int k = 0; k < 4; k++) run(rep, k, argv[1]);
+    for (int k = 0; k < NCFG; k++) if (!only || strstr(only, CFG[k])) run(rep, k, argv[1]);
   }
   printf("# done\n");
   return 0;

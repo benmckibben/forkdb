@@ -32,7 +32,7 @@ done
 echo "instance store: $${NVME:-none}  extra EBS: $${EBS:-none}"
 
 echo "--- build"
-if ! ./vfs/build.sh sqlite || ! ./vfs/build.sh bench batch; then echo "FORKDB-BENCH-FAILED build"; sleep 600; shutdown -h now; exit 1; fi
+if ! ./vfs/build.sh sqlite || ! ./vfs/build.sh bench batch || ! ./vfs/build.sh micro; then echo "FORKDB-BENCH-FAILED build"; sleep 600; shutdown -h now; exit 1; fi
 
 run_on() { # label device
   label=$1
@@ -40,7 +40,7 @@ run_on() { # label device
   [ -n "$dev" ] || { echo "BENCH-SKIP $label: no device"; return; }
   if ! { mkfs.ext4 -q -F "/dev/$dev" && mkdir -p "/mnt/$label" && mount "/dev/$dev" "/mnt/$label"; }; then echo "BENCH-SKIP $label: mkfs or mount failed"; return; fi
   echo "BENCH-BEGIN $label /dev/$dev $(lsblk -dno MODEL "/dev/$dev" | sed "s/ *$//") $(date -u +%T)"
-  timeout 1500 ./vfs/build/vfs_bench-batch "/mnt/$label" ${reps} | sed "s/^/[$label] /"
+  timeout 2400 ./vfs/real-disk.sh "/mnt/$label" ${reps} | sed "s/^/[$label] /"
   echo "BENCH-END $label $(date -u +%T)"
   umount "/mnt/$label"
 }

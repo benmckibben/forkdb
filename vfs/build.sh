@@ -3,6 +3,7 @@
 #   vfs/build.sh sqlite          compile the pinned SQLite twice: stock, and with SQLITE_ENABLE_BATCH_ATOMIC_WRITE (cached; takes minutes)
 #   vfs/build.sh test [variant]  build vfs/build/vfs_test-<variant> (variant: batch or stock; default batch)
 #   vfs/build.sh bench [variant] build vfs/build/vfs_bench-<variant>
+#   vfs/build.sh micro           build vfs/build/commit_micro (raw I/O patterns of one commit; needs only gcc)
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -52,5 +53,9 @@ case $cmd in
     gcc -Wall -Wextra -std=gnu11 -O2 $(flags_for "$variant") $extra -I"$src" -I"$root/store" $srcs "$out/sqlite3-$variant.o" -o "$out/vfs_${cmd}-$variant$suffix" -lpthread -lm
     echo "built $out/vfs_${cmd}-$variant$suffix"
     ;;
-  *) echo "usage: $0 sqlite | test [stock|batch] | bench [stock|batch]" >&2; exit 2 ;;
+  micro)
+    gcc -Wall -Wextra -std=gnu11 -O2 "$here/commit_micro.c" -o "$out/commit_micro"
+    echo "built $out/commit_micro"
+    ;;
+  *) echo "usage: $0 sqlite | micro | test [stock|batch] | bench [stock|batch]" >&2; exit 2 ;;
 esac
