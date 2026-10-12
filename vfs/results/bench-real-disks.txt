@@ -1,0 +1,454 @@
+# Console output of the benchmark host (i4i.large, Amazon Linux 2023, kernel 6.1.188), 2026-10-12, from infra/bench at 34521b5.
+# [nvme] is the local instance store, [ebs] a gp3 volume (3000 IOPS, 125 MB/s); both ext4 with default options. R <rep> <config> <metric> <value>.
+FORKDB-BENCH-START 2026-10-12T05:14:43Z source=34521b5ca670e09ad1226cc788a310954397a780
+Linux 6.1.188-233.386.amzn2023.x86_64 x86_64
+model name	: Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz
+
+Amazon Linux 2023.12.20260930
+Kernel 6.1.188-233.386.amzn2023.x86_64 on an x86_64 (-)
+
+ip-172-31-31-144 login: 
+Installed:
+  annobin-docs-12.69-1.amzn2023.0.1.noarch                                      
+  annobin-plugin-gcc-12.69-1.amzn2023.0.1.x86_64                                
+  cpp-11.5.0-5.amzn2023.0.5.x86_64                                              
+  gc-8.0.4-5.amzn2023.0.2.x86_64                                                
+  gcc-11.5.0-5.amzn2023.0.5.x86_64                                              
+  gcc-plugin-annobin-11.5.0-5.amzn2023.0.5.x86_64                               
+  glibc-devel-2.34-231.amzn2023.0.5.x86_64                                      
+  glibc-headers-x86-2.34-231.amzn2023.0.5.noarch                                
+  guile22-2.2.7-2.amzn2023.0.3.x86_64                                           
+  kernel-headers-1:6.1.188-233.386.amzn2023.x86_64                              
+  libasan-11.5.0-5.amzn2023.0.5.x86_64                                          
+  libmpc-1.2.1-2.amzn2023.0.2.x86_64                                            
+  libtool-ltdl-2.4.7-1.amzn2023.0.3.x86_64                                      
+  libubsan-14.2.1-7.amzn2023.0.2.x86_64                                         
+  libxcrypt-devel-4.4.33-7.amzn2023.x86_64                                      
+  make-1:4.3-5.amzn2023.0.2.x86_64                                              
+
+gcc (GCC) 11.5.0 20240719 (Red Hat 11.5.0-5)
+--- block devices
+NAME            SIZE MODEL                            MOUNTPOINT
+nvme0n1          20G Amazon Elastic Block Store       
+├─nvme0n1p1      20G                                  /
+├─nvme0n1p127     1M                                  
+└─nvme0n1p128    10M                                  /boot/efi
+nvme1n1          20G Amazon Elastic Block Store       
+nvme2n1       435.9G Amazon EC2 NVMe Instance Storage 
+instance store: nvme2n1  extra EBS: nvme1n1
+--- build
+fetched sqlite-amalgamation-3500000 into /opt/forkdb/spike/vendor
+built sqlite3-stock.o
+built sqlite3-batch.o
+built /opt/forkdb/vfs/build/vfs_bench-batch
+[   69.940238] EXT4-fs (nvme2n1): mounted filesystem with ordered data mode. Quota mode: none.
+BENCH-BEGIN nvme /dev/nvme2n1 Amazon EC2 NVMe Instance Storage 05:15:47
+[nvme] # SQLite 3.50.0, batch-atomic compiled in: yes
+[nvme] R 1 disk write4k+fsync_p50_us 100.389000
+[nvme] R 1 disk write4k+fsync_p99_us 173.605000
+[nvme] R 1 file/DELETE w1_txn_per_s 3848.805570
+[nvme] R 1 file/DELETE w1_p50_us 250.338000
+[nvme] R 1 file/DELETE w1_p99_us 411.414000
+[nvme] R 1 file/DELETE w2_ms_per_1000_row_txn_p50 1.068531
+[nvme] R 1 file/DELETE w2_ms_per_1000_row_txn_p99 1.192104
+[nvme] R 1 file/DELETE w3_s_200k_rows_one_txn 0.135431
+[nvme] R 1 file/DELETE w4_us_per_random_read 4.193777
+[nvme] R 1 file/DELETE w5_ms_full_scan 17.195993
+[nvme] R 1 file/DELETE db_pages 8185.000000
+[nvme] R 1 file/DELETE w6_copy_the_file_ms 31.469937
+[nvme] R 1 file/DELETE file_bytes 33525760.000000
+[nvme] R 1 file/DELETE w7_first_count_ms 7.461784
+[nvme] R 1 file/WAL w1_txn_per_s 11123.627850
+[nvme] R 1 file/WAL w1_p50_us 45.094000
+[nvme] R 1 file/WAL w1_p99_us 177.045000
+[nvme] R 1 file/WAL w2_ms_per_1000_row_txn_p50 0.722898
+[nvme] R 1 file/WAL w2_ms_per_1000_row_txn_p99 4.561498
+[nvme] R 1 file/WAL w3_s_200k_rows_one_txn 0.167421
+[nvme] R 1 file/WAL w4_us_per_random_read 2.311049
+[nvme] R 1 file/WAL w5_ms_full_scan 17.052113
+[nvme] R 1 file/WAL db_pages 8185.000000
+[nvme] R 1 file/WAL w6_copy_the_file_ms 31.999918
+[nvme] R 1 file/WAL file_bytes 33525760.000000
+[nvme] R 1 file/WAL w7_first_count_ms 7.481137
+[nvme] R 1 forkdb/batch w1_txn_per_s 6356.746338
+[nvme] R 1 forkdb/batch w1_p50_us 150.525000
+[nvme] R 1 forkdb/batch w1_p99_us 211.437000
+[nvme] R 1 forkdb/batch w1_fsyncs_per_txn 1.031000
+[nvme] R 1 forkdb/batch w1_bytes_written_per_txn 8438.732000
+[nvme] R 1 forkdb/batch w2_ms_per_1000_row_txn_p50 0.904258
+[nvme] R 1 forkdb/batch w2_ms_per_1000_row_txn_p99 1.045990
+[nvme] R 1 forkdb/batch w3_s_200k_rows_one_txn 0.151225
+[nvme] R 1 forkdb/batch w4_us_per_random_read 3.045595
+[nvme] R 1 forkdb/batch w5_ms_full_scan 23.098244
+[nvme] R 1 forkdb/batch db_pages 8185.000000
+[nvme] R 1 forkdb/batch w6_fork_p50_us 97.787000
+[nvme] R 1 forkdb/batch w6_fork_p99_us 171.559000
+[nvme] R 1 forkdb/batch w6_one_row_update_on_fork_us 267.820000
+[nvme] R 1 forkdb/batch w6_one_row_update_on_fork_log_bytes 8324.000000
+[nvme] R 1 forkdb/batch file_bytes 52056208.000000
+[nvme] R 1 forkdb/batch live_bytes 33957354.000000
+[nvme] R 1 forkdb/batch w7_fk_open_ms 19.358665
+[nvme] R 1 forkdb/batch w7_first_count_ms 12.461244
+[nvme] R 1 forkdb/journal w1_txn_per_s 6266.679453
+[nvme] R 1 forkdb/journal w1_p50_us 153.062000
+[nvme] R 1 forkdb/journal w1_p99_us 212.858000
+[nvme] R 1 forkdb/journal w1_fsyncs_per_txn 1.031000
+[nvme] R 1 forkdb/journal w1_bytes_written_per_txn 8438.732000
+[nvme] R 1 forkdb/journal w2_ms_per_1000_row_txn_p50 0.893933
+[nvme] R 1 forkdb/journal w2_ms_per_1000_row_txn_p99 1.225552
+[nvme] R 1 forkdb/journal w3_s_200k_rows_one_txn 0.149793
+[nvme] R 1 forkdb/journal w4_us_per_random_read 2.832175
+[nvme] R 1 forkdb/journal w5_ms_full_scan 20.648587
+[nvme] R 1 forkdb/journal db_pages 8185.000000
+[nvme] R 1 forkdb/journal w6_fork_p50_us 97.648000
+[nvme] R 1 forkdb/journal w6_fork_p99_us 163.460000
+[nvme] R 1 forkdb/journal w6_one_row_update_on_fork_us 234.565000
+[nvme] R 1 forkdb/journal w6_one_row_update_on_fork_log_bytes 8324.000000
+[nvme] R 1 forkdb/journal file_bytes 52056208.000000
+[nvme] R 1 forkdb/journal live_bytes 33957354.000000
+[nvme] R 1 forkdb/journal w7_fk_open_ms 18.244404
+[nvme] R 1 forkdb/journal w7_first_count_ms 12.037486
+[nvme] R 2 disk write4k+fsync_p50_us 131.923000
+[nvme] R 2 disk write4k+fsync_p99_us 210.183000
+[nvme] R 2 file/DELETE w1_txn_per_s 3755.126278
+[nvme] R 2 file/DELETE w1_p50_us 250.817000
+[nvme] R 2 file/DELETE w1_p99_us 753.484000
+[nvme] R 2 file/DELETE w2_ms_per_1000_row_txn_p50 1.074404
+[nvme] R 2 file/DELETE w2_ms_per_1000_row_txn_p99 1.694814
+[nvme] R 2 file/DELETE w3_s_200k_rows_one_txn 0.136557
+[nvme] R 2 file/DELETE w4_us_per_random_read 4.113242
+[nvme] R 2 file/DELETE w5_ms_full_scan 15.671481
+[nvme] R 2 file/DELETE db_pages 8185.000000
+[nvme] R 2 file/DELETE w6_copy_the_file_ms 31.574013
+[nvme] R 2 file/DELETE file_bytes 33525760.000000
+[nvme] R 2 file/DELETE w7_first_count_ms 5.201528
+[nvme] R 2 file/WAL w1_txn_per_s 11205.421793
+[nvme] R 2 file/WAL w1_p50_us 44.642000
+[nvme] R 2 file/WAL w1_p99_us 175.356000
+[nvme] R 2 file/WAL w2_ms_per_1000_row_txn_p50 0.709245
+[nvme] R 2 file/WAL w2_ms_per_1000_row_txn_p99 4.344515
+[nvme] R 2 file/WAL w3_s_200k_rows_one_txn 0.165770
+[nvme] R 2 file/WAL w4_us_per_random_read 2.135459
+[nvme] R 2 file/WAL w5_ms_full_scan 15.615722
+[nvme] R 2 file/WAL db_pages 8185.000000
+[nvme] R 2 file/WAL w6_copy_the_file_ms 30.723205
+[nvme] R 2 file/WAL file_bytes 33525760.000000
+[nvme] R 2 file/WAL w7_first_count_ms 6.349252
+[nvme] R 2 forkdb/batch w1_txn_per_s 6395.995779
+[nvme] R 2 forkdb/batch w1_p50_us 149.599000
+[nvme] R 2 forkdb/batch w1_p99_us 213.738000
+[nvme] R 2 forkdb/batch w1_fsyncs_per_txn 1.031000
+[nvme] R 2 forkdb/batch w1_bytes_written_per_txn 8438.732000
+[nvme] R 2 forkdb/batch w2_ms_per_1000_row_txn_p50 0.897195
+[nvme] R 2 forkdb/batch w2_ms_per_1000_row_txn_p99 1.078708
+[nvme] R 2 forkdb/batch w3_s_200k_rows_one_txn 0.150471
+[nvme] R 2 forkdb/batch w4_us_per_random_read 2.904564
+[nvme] R 2 forkdb/batch w5_ms_full_scan 21.882795
+[nvme] R 2 forkdb/batch db_pages 8185.000000
+[nvme] R 2 forkdb/batch w6_fork_p50_us 98.427000
+[nvme] R 2 forkdb/batch w6_fork_p99_us 162.675000
+[nvme] R 2 forkdb/batch w6_one_row_update_on_fork_us 270.917000
+[nvme] R 2 forkdb/batch w6_one_row_update_on_fork_log_bytes 8324.000000
+[nvme] R 2 forkdb/batch file_bytes 52056208.000000
+[nvme] R 2 forkdb/batch live_bytes 33957354.000000
+[nvme] R 2 forkdb/batch w7_fk_open_ms 18.716869
+[nvme] R 2 forkdb/batch w7_first_count_ms 11.939959
+[nvme] R 2 forkdb/journal w1_txn_per_s 6365.983707
+[nvme] R 2 forkdb/journal w1_p50_us 150.873000
+[nvme] R 2 forkdb/journal w1_p99_us 197.981000
+[nvme] R 2 forkdb/journal w1_fsyncs_per_txn 1.031000
+[nvme] R 2 forkdb/journal w1_bytes_written_per_txn 8438.732000
+[nvme] R 2 forkdb/journal w2_ms_per_1000_row_txn_p50 0.886743
+[nvme] R 2 forkdb/journal w2_ms_per_1000_row_txn_p99 1.099204
+[nvme] R 2 forkdb/journal w3_s_200k_rows_one_txn 0.150112
+[nvme] R 2 forkdb/journal w4_us_per_random_read 2.788703
+[nvme] R 2 forkdb/journal w5_ms_full_scan 21.548812
+[nvme] R 2 forkdb/journal db_pages 8185.000000
+[nvme] R 2 forkdb/journal w6_fork_p50_us 98.114000
+[nvme] R 2 forkdb/journal w6_fork_p99_us 163.918000
+[nvme] R 2 forkdb/journal w6_one_row_update_on_fork_us 266.827000
+[nvme] R 2 forkdb/journal w6_one_row_update_on_fork_log_bytes 8324.000000
+[nvme] R 2 forkdb/journal file_bytes 52056208.000000
+[nvme] R 2 forkdb/journal live_bytes 33957354.000000
+[nvme] R 2 forkdb/journal w7_fk_open_ms 17.758431
+[nvme] R 2 forkdb/journal w7_first_count_ms 11.346586
+[nvme] R 3 disk write4k+fsync_p50_us 131.843000
+[nvme] R 3 disk write4k+fsync_p99_us 193.307000
+[nvme] R 3 file/DELETE w1_txn_per_s 3747.425289
+[nvme] R 3 file/DELETE w1_p50_us 251.112000
+[nvme] R 3 file/DELETE w1_p99_us 748.795000
+[nvme] R 3 file/DELETE w2_ms_per_1000_row_txn_p50 1.058342
+[nvme] R 3 file/DELETE w2_ms_per_1000_row_txn_p99 1.709763
+[nvme] R 3 file/DELETE w3_s_200k_rows_one_txn 0.135363
+[nvme] R 3 file/DELETE w4_us_per_random_read 4.084814
+[nvme] R 3 file/DELETE w5_ms_full_scan 15.542140
+[nvme] R 3 file/DELETE db_pages 8185.000000
+[nvme] R 3 file/DELETE w6_copy_the_file_ms 32.268486
+[nvme] R 3 file/DELETE file_bytes 33525760.000000
+[nvme] R 3 file/DELETE w7_first_count_ms 6.052283
+[nvme] R 3 file/WAL w1_txn_per_s 11231.351527
+[nvme] R 3 file/WAL w1_p50_us 44.673000
+[nvme] R 3 file/WAL w1_p99_us 173.015000
+[nvme] R 3 file/WAL w2_ms_per_1000_row_txn_p50 0.706248
+[nvme] R 3 file/WAL w2_ms_per_1000_row_txn_p99 4.317008
+[nvme] R 3 file/WAL w3_s_200k_rows_one_txn 0.166858
+[nvme] R 3 file/WAL w4_us_per_random_read 2.207179
+[nvme] R 3 file/WAL w5_ms_full_scan 16.372529
+[nvme] R 3 file/WAL db_pages 8185.000000
+[nvme] R 3 file/WAL w6_copy_the_file_ms 33.777242
+[nvme] R 3 file/WAL file_bytes 33525760.000000
+[nvme] R 3 file/WAL w7_first_count_ms 6.247485
+[nvme] R 3 forkdb/batch w1_txn_per_s 6434.851071
+[nvme] R 3 forkdb/batch w1_p50_us 148.736000
+[nvme] R 3 forkdb/batch w1_p99_us 198.252000
+[nvme] R 3 forkdb/batch w1_fsyncs_per_txn 1.031000
+[nvme] R 3 forkdb/batch w1_bytes_written_per_txn 8438.732000
+[nvme] R 3 forkdb/batch w2_ms_per_1000_row_txn_p50 0.896001
+[nvme] R 3 forkdb/batch w2_ms_per_1000_row_txn_p99 9.876169
+[nvme] R 3 forkdb/batch w3_s_200k_rows_one_txn 0.150192
+[nvme] R 3 forkdb/batch w4_us_per_random_read 2.956225
+[nvme] R 3 forkdb/batch w5_ms_full_scan 21.904806
+[nvme] R 3 forkdb/batch db_pages 8185.000000
+[nvme] R 3 forkdb/batch w6_fork_p50_us 97.627000
+[nvme] R 3 forkdb/batch w6_fork_p99_us 170.424000
+[nvme] R 3 forkdb/batch w6_one_row_update_on_fork_us 291.794000
+[nvme] R 3 forkdb/batch w6_one_row_update_on_fork_log_bytes 8324.000000
+[nvme] R 3 forkdb/batch file_bytes 52056208.000000
+[nvme] R 3 forkdb/batch live_bytes 33957354.000000
+[nvme] R 3 forkdb/batch w7_f[   81.974701] EXT4-fs (nvme2n1): unmounting filesystem.
+k_open_ms 18.668367
+[nvme] R 3 forkdb/batch w7_first_count_ms 12.081663
+[nvme] R 3 forkdb/journal w1_txn_per_s 6209.080472
+[nvme] R 3 forkdb/journal w1_p50_us 155.721000
+[nvme] R 3 forkdb/journal w1_p99_us 204.366000
+[nvme] R 3 forkdb/journal w1_fsyncs_per_txn 1.031000
+[nvme] R 3 forkdb/journal w1_bytes_written_per_txn 8438.732000
+[nvme] R 3 forkdb/journal w2_ms_per_1000_row_txn_p50 0.901434
+[nvme] R 3 forkdb/journal w2_ms_per_1000_row_txn_p99 1.225527
+[nvme] R 3 forkdb/journal w3_s_200k_rows_one_txn 0.153363
+[nvme] R 3 forkdb/journal w4_us_per_random_read 2.942205
+[nvme] R 3 forkdb/journal w5_ms_full_scan 21.856453
+[nvme] R 3 forkdb/journal db_pages 8185.000000
+[nvme] R 3 forkdb/journal w6_fork_p50_us 97.632000
+[nvme] R 3 forkdb/journal w6_fork_p99_us 143.581000
+[nvme] R 3 forkdb/journal w6_one_row_update_on_fork_us 299.556000
+[nvme] R 3 forkdb/journal w6_one_row_update_on_fork_log_bytes 8324.000000
+[nvme] R 3 forkdb/journal file_bytes 52056208.000000
+[nvme] R 3 forkdb/journal live_bytes 33957354.000000
+[nvme] R 3 forkdb/journal w7_fk_open_ms 18.164053
+[nvme] R 3 forkdb/journal w7_first_count_ms 12.065216
+[nvme] # done
+BENCH-END nvme 05:15:59
+[   82.243917] EXT4-fs (nvme1n1): mounted filesystem with ordered data mode. Quota mode: none.
+BENCH-BEGIN ebs /dev/nvme1n1 Amazon Elastic Block Store 05:15:59
+[ebs] # SQLite 3.50.0, batch-atomic compiled in: yes
+[ebs] R 1 disk write4k+fsync_p50_us 2698.297000
+[ebs] R 1 disk write4k+fsync_p99_us 2904.373000
+[ebs] R 1 file/DELETE w1_txn_per_s 144.484964
+[ebs] R 1 file/DELETE w1_p50_us 6602.436000
+[ebs] R 1 file/DELETE w1_p99_us 13761.085000
+[ebs] R 1 file/DELETE w2_ms_per_1000_row_txn_p50 10.028171
+[ebs] R 1 file/DELETE w2_ms_per_1000_row_txn_p99 10.333993
+[ebs] R 1 file/DELETE w3_s_200k_rows_one_txn 0.164726
+[ebs] R 1 file/DELETE w4_us_per_random_read 4.102610
+[ebs] R 1 file/DELETE w5_ms_full_scan 16.265474
+[ebs] R 1 file/DELETE db_pages 8185.000000
+[ebs] R 1 file/DELETE w6_copy_the_file_ms 56.014619
+[ebs] R 1 file/DELETE file_bytes 33525760.000000
+[ebs] R 1 file/DELETE w7_first_count_ms 7.039483
+[ebs] R 1 file/WAL w1_txn_per_s 694.855994
+[ebs] R 1 file/WAL w1_p50_us 992.360000
+[ebs] R 1 file/WAL w1_p99_us 2967.002000
+[ebs] R 1 file/WAL w2_ms_per_1000_row_txn_p50 2.727404
+[ebs] R 1 file/WAL w2_ms_per_1000_row_txn_p99 13.826214
+[ebs] R 1 file/WAL w3_s_200k_rows_one_txn 0.195511
+[ebs] R 1 file/WAL w4_us_per_random_read 2.065620
+[ebs] R 1 file/WAL w5_ms_full_scan 15.649763
+[ebs] R 1 file/WAL db_pages 8185.000000
+[ebs] R 1 file/WAL w6_copy_the_file_ms 53.622560
+[ebs] R 1 file/WAL file_bytes 33525760.000000
+[ebs] R 1 file/WAL w7_first_count_ms 5.936181
+[ebs] R 1 forkdb/batch w1_txn_per_s 420.837588
+[ebs] R 1 forkdb/batch w1_p50_us 2812.379000
+[ebs] R 1 forkdb/batch w1_p99_us 3740.674000
+[ebs] R 1 forkdb/batch w1_fsyncs_per_txn 1.031000
+[ebs] R 1 forkdb/batch w1_bytes_written_per_txn 8438.732000
+[ebs] R 1 forkdb/batch w2_ms_per_1000_row_txn_p50 4.576224
+[ebs] R 1 forkdb/batch w2_ms_per_1000_row_txn_p99 5.646533
+[ebs] R 1 forkdb/batch w3_s_200k_rows_one_txn 0.163243
+[ebs] R 1 forkdb/batch w4_us_per_random_read 2.913427
+[ebs] R 1 forkdb/batch w5_ms_full_scan 22.194597
+[ebs] R 1 forkdb/batch db_pages 8185.000000
+[ebs] R 1 forkdb/batch w6_fork_p50_us 2576.590000
+[ebs] R 1 forkdb/batch w6_fork_p99_us 2805.761000
+[ebs] R 1 forkdb/batch w6_one_row_update_on_fork_us 2949.984000
+[ebs] R 1 forkdb/batch w6_one_row_update_on_fork_log_bytes 8324.000000
+[ebs] R 1 forkdb/batch file_bytes 52056208.000000
+[ebs] R 1 forkdb/batch live_bytes 33957354.000000
+[ebs] R 1 forkdb/batch w7_fk_open_ms 18.978844
+[ebs] R 1 forkdb/batch w7_first_count_ms 12.234737
+[ebs] R 1 forkdb/journal w1_txn_per_s 344.791012
+[ebs] R 1 forkdb/journal w1_p50_us 2869.917000
+[ebs] R 1 forkdb/journal w1_p99_us 3789.143000
+[ebs] R 1 forkdb/journal w1_fsyncs_per_txn 1.031000
+[ebs] R 1 forkdb/journal w1_bytes_written_per_txn 8438.732000
+[ebs] R 1 forkdb/journal w2_ms_per_1000_row_txn_p50 4.580516
+[ebs] R 1 forkdb/journal w2_ms_per_1000_row_txn_p99 5.697327
+[ebs] R 1 forkdb/journal w3_s_200k_rows_one_txn 0.163477
+[ebs] R 1 forkdb/journal w4_us_per_random_read 2.700727
+[ebs] R 1 forkdb/journal w5_ms_full_scan 20.371745
+[ebs] R 1 forkdb/journal db_pages 8185.000000
+[ebs] R 1 forkdb/journal w6_fork_p50_us 2522.560000
+[ebs] R 1 forkdb/journal w6_fork_p99_us 2768.361000
+[ebs] R 1 forkdb/journal w6_one_row_update_on_fork_us 2930.978000
+[ebs] R 1 forkdb/journal w6_one_row_update_on_fork_log_bytes 8324.000000
+[ebs] R 1 forkdb/journal file_bytes 52056208.000000
+[ebs] R 1 forkdb/journal live_bytes 33957354.000000
+[ebs] R 1 forkdb/journal w7_fk_open_ms 18.657181
+[ebs] R 1 forkdb/journal w7_first_count_ms 11.968770
+[ebs] R 2 disk write4k+fsync_p50_us 2789.971000
+[ebs] R 2 disk write4k+fsync_p99_us 2974.911000
+[ebs] R 2 file/DELETE w1_txn_per_s 154.681304
+[ebs] R 2 file/DELETE w1_p50_us 6536.914000
+[ebs] R 2 file/DELETE w1_p99_us 8622.344000
+[ebs] R 2 file/DELETE w2_ms_per_1000_row_txn_p50 10.063920
+[ebs] R 2 file/DELETE w2_ms_per_1000_row_txn_p99 10.494325
+[ebs] R 2 file/DELETE w3_s_200k_rows_one_txn 0.159969
+[ebs] R 2 file/DELETE w4_us_per_random_read 4.029211
+[ebs] R 2 file/DELETE w5_ms_full_scan 16.554602
+[ebs] R 2 file/DELETE db_pages 8185.000000
+[ebs] R 2 file/DELETE w6_copy_the_file_ms 59.885110
+[ebs] R 2 file/DELETE file_bytes 33525760.000000
+[ebs] R 2 file/DELETE w7_first_count_ms 6.450465
+[ebs] R 2 file/WAL w1_txn_per_s 636.768712
+[ebs] R 2 file/WAL w1_p50_us 1000.871000
+[ebs] R 2 file/WAL w1_p99_us 2973.732000
+[ebs] R 2 file/WAL w2_ms_per_1000_row_txn_p50 2.735029
+[ebs] R 2 file/WAL w2_ms_per_1000_row_txn_p99 17.000719
+[ebs] R 2 file/WAL w3_s_200k_rows_one_txn 0.199660
+[ebs] R 2 file/WAL w4_us_per_random_read 2.065827
+[ebs] R 2 file/WAL w5_ms_full_scan 14.880395
+[ebs] R 2 file/WAL db_pages 8185.000000
+[ebs] R 2 file/WAL w6_copy_the_file_ms 55.370460
+[ebs] R 2 file/WAL file_bytes 33525760.000000
+[ebs] R 2 file/WAL w7_first_count_ms 4.950084
+[ebs] R 2 forkdb/batch w1_txn_per_s 417.548064
+[ebs] R 2 forkdb/batch w1_p50_us 2838.632000
+[ebs] R 2 forkdb/batch w1_p99_us 3767.402000
+[ebs] R 2 forkdb/batch w1_fsyncs_per_txn 1.031000
+[ebs] R 2 forkdb/batch w1_bytes_written_per_txn 8438.732000
+[ebs] R 2 forkdb/batch w2_ms_per_1000_row_txn_p50 4.611095
+[ebs] R 2 forkdb/batch w2_ms_per_1000_row_txn_p99 5.610715
+[ebs] R 2 forkdb/batch w3_s_200k_rows_one_txn 0.166495
+[ebs] R 2 forkdb/batch w4_us_per_random_read 2.886856
+[ebs] R 2 forkdb/batch w5_ms_full_scan 21.413541
+[ebs] R 2 forkdb/batch db_pages 8185.000000
+[ebs] R 2 forkdb/batch w6_fork_p50_us 2531.048000
+[ebs] R 2 forkdb/batch w6_fork_p99_us 2812.016000
+[ebs] R 2 forkdb/batch w6_one_row_update_on_fork_us 2962.009000
+[ebs] R 2 forkdb/batch w6_one_row_update_on_fork_log_bytes 8324.000000
+[ebs] R 2 forkdb/batch file_bytes 52056208.000000
+[ebs] R 2 forkdb/batch live_bytes 33957354.000000
+[ebs] R 2 forkdb/batch w7_fk_open_ms 18.695532
+[ebs] R 2 forkdb/batch w7_first_count_ms 11.899020
+[ebs] R 2 forkdb/journal w1_txn_per_s 347.686474
+[ebs] R 2 forkdb/journal w1_p50_us 2843.244000
+[ebs] R 2 forkdb/journal w1_p99_us 3769.116000
+[ebs] R 2 forkdb/journal w1_fsyncs_per_txn 1.031000
+[ebs] R 2 forkdb/journal w1_bytes_written_per_txn 8438.732000
+[ebs] R 2 forkdb/journal w2_ms_per_1000_row_txn_p50 4.568814
+[ebs] R 2 forkdb/journal w2_ms_per_1000_row_txn_p99 5.573410
+[ebs] R 2 forkdb/journal w3_s_200k_rows_one_txn 0.163019
+[ebs] R 2 forkdb/journal w4_us_per_random_read 2.918248
+[ebs] R 2 forkdb/journal w5_ms_full_scan 21.858322
+[ebs] R 2 forkdb/journal db_pages 8185.000000
+[ebs] R 2 forkdb/journal w6_fork_p50_us 2571.525000
+[ebs] R 2 forkdb/journal w6_fork_p99_us 2781.854000
+[ebs] R 2 forkdb/journal w6_one_row_update_on_fork_us 3120.577000
+[ebs] R 2 forkdb/journal w6_one_row_update_on_fork_log_bytes 8324.000000
+[ebs] R 2 forkdb/journal file_bytes 52056208.000000
+[ebs] R 2 forkdb/journal live_bytes 33957354.000000
+[ebs] R 2 forkdb/journal w7_fk_open_ms 18.547758
+[ebs] R 2 forkdb/journal w7_first_count_ms 12.472076
+[ebs] R 3 disk write4k+fsync_p50_us 2795.639000
+[ebs] R 3 disk write4k+fsync_p99_us 2957.476000
+[ebs] R 3 file/DELETE w1_txn_per_s 154.921547
+[ebs] R 3 file/DELETE w1_p50_us 6527.453000
+[ebs] R 3 file/DELETE w1_p99_us 8593.446000
+[ebs] R 3 file/DELETE w2_ms_per_1000_row_txn_p50 10.023097
+[ebs] R 3 file/DELETE w2_ms_per_1000_row_txn_p99 10.320334
+[ebs] R 3 file/DELETE w3_s_200k_rows_one_txn 0.158114
+[ebs] R 3 file/DELETE w4_us_per_random_read 4.168967
+[ebs] R 3 file/DELETE w5_ms_full_scan 16.127969
+[ebs] R 3 file/DELETE db_pages 8185.000000
+[ebs] R 3 file/DELETE w6_copy_the_file_ms 46.964911
+[ebs] R 3 file/DELETE file_bytes 33525760.000000
+[ebs] R 3 file/DELETE w7_first_count_ms 5.805825
+[ebs] R 3 file/WAL w1_txn_per_s 621.323515
+[ebs] R 3 file/WAL w1_p50_us 985.542000
+[ebs] R 3 file/WAL w1_p99_us 2934.222000
+[ebs] R 3 file/WAL w2_ms_per_1000_row_txn_p50 2.742067
+[ebs] R 3 file/WAL w2_ms_per_1000_row_txn_p99 13.971189
+[ebs] R 3 file/WAL w3_s_200k_rows_one_txn 0.197793
+[ebs] R 3 file/WAL w4_us_per_random_read 2.076213
+[ebs] R 3 file/WAL w5_ms_full_scan 14.761552
+[ebs] R 3 file/WAL db_pages 8185.000000
+[ebs] R 3 file/WAL w6_copy_the_file_ms 60.639054
+[ebs] R 3 file/WAL file_bytes 33525760.000000
+[ebs] R 3 file/WAL w7_first_count_ms 6.143421
+[ebs] R 3 forkdb/batch w1_txn_per_s 417.063097
+[ebs] R 3 forkdb/batch w1_p50_us 2841.457000
+[ebs] R 3 forkdb/batch w1_p99_us 3769.818000
+[ebs] R 3 forkdb/batch w1_fsyncs_per_txn 1.031000
+[ebs] R 3 forkdb/batch w1_bytes_written_per_txn 8438.732000
+[ebs] R 3 forkdb/batch w2_ms_per_1000_row_txn_p50 4.587946
+[ebs] R 3 forkdb/batch w2_ms_per_1000_row_txn_p99 5.597127
+[ebs] R 3 forkdb/batch w3_s_200k_rows_one_txn 0.221132
+[ebs] R 3 forkdb/batch w4_us_per_random_read 2.902165
+[ebs] R 3 forkdb/batch w5_ms_full_scan 22.576166
+[ebs] R 3 forkdb/batch db_pages 8185.000000
+[ebs] R 3 forkdb/batch w6_fork_p50_us 1042.576000
+[ebs] R 3 forkdb/batch w6_fork_p99_us 2758.490000
+[ebs] R 3 forkdb/batch w6_one_row_update_on_fork_us 3089.874000
+[ebs] R 3 forkdb/batch w6_one_row_update_on_fork_log_bytes 8324.000000
+[ebs] R 3 forkdb/batch file_bytes 52056208.000000
+[ebs] R 3 forkdb/batch live_bytes 33957354.000000
+[ebs] R 3 forkdb/batch w7_fk_open_ms 19.092265
+[ebs] R 3 forkdb/batch w7_first_count_ms 12.400293
+[ebs] R 3 forkdb/journal w1_txn_per_s 344.977966
+[ebs] R 3 forkdb/journal w1_p50_us 2871.416000
+[ebs] R 3 forkdb/journal w1_p99_us 3766.966000
+[ebs] R 3 forkdb/journal w1_fsyncs_per_txn 1.031000
+[ebs] R 3 forkdb/journal w1_bytes_written_per_txn 8438.732000
+[ebs] R 3 forkdb/journal w2_ms_per_1000_row_txn_p50 4.593744
+[ebs] R 3 forkdb/journal w2_ms_per_1000_row_txn_p99 5.676596
+[ebs] R 3 forkdb/journal w3_s_200k_rows_one_txn 0.16231[  183.532512] EXT4-fs (nvme1n1): unmounting filesystem.
+5
+[ebs] R 3 forkdb/journal w4_us_per_random_read 3.116359
+[ebs] R 3 forkdb/journal w5_ms_full_scan 23.064439
+[ebs] R 3 forkdb/journal db_pages 8185.000000
+[ebs] R 3 forkdb/journal w6_fork_p50_us 2608.899000
+[ebs] R 3 forkdb/journal w6_fork_p99_us 2774.878000
+[ebs] R 3 forkdb/journal w6_one_row_update_on_fork_us 3070.525000
+[ebs] R 3 forkdb/journal w6_one_row_update_on_fork_log_bytes 8324.000000
+[ebs] R 3 forkdb/journal file_bytes 52056208.000000
+[ebs] R 3 forkdb/journal live_bytes 33957354.000000
+[ebs] R 3 forkdb/journal w7_fk_open_ms 18.452000
+[ebs] R 3 forkdb/journal w7_first_count_ms 11.983016
+[ebs] # done
+BENCH-END ebs 05:17:40
+--- scripts/test-vfs.sh quick
+== SQLite build: batch (address and undefined-behaviour sanitizers on)
+SQLite 3.50.0, batch-atomic compiled in: yes
+T11 power loss under SQLite (batch advertised=1): 7 transactions on b0, a fork after the third, 4 on b1
+   93 I/O events in the run; 28 crash or failure points, 468 post-crash images checked, 0 violations
+T11 power loss under SQLite (batch advertised=0): 7 transactions on b0, a fork after the third, 4 on b1
+   93 I/O events in the run; 28 crash or failure points, 468 post-crash images checked, 0 violations
+checks=335 TOTAL FAILS=0
+== SQLite build: stock (address and undefined-behaviour sanitizers on)
+SQLite 3.50.0, batch-atomic compiled in: no
+T11 power loss under SQLite (batch advertised=0): 7 transactions on b0, a fork after the third, 4 on b1
+   93 I/O events in the run; 28 crash or failure points, 468 post-crash images checked, 0 violations
+checks=319 TOTAL FAILS=0
+test-vfs rc=0
+FORKDB-BENCH-DONE 2026-10-12T05:17:49Z
