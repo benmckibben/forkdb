@@ -1,6 +1,6 @@
 # Session extension on the VFS: design note
 
-Status: **design only, no code in this change.** What was measured is in [vfs/results/session-experiments.txt](../vfs/results/session-experiments.txt) (produced by [vfs/experiments/session-experiments.sh](../vfs/experiments/session-experiments.sh), a throwaway program that drives SQLite's session extension through the real VFS and a real file store). Where a statement below is reasoned and not measured, it says so.
+Status: **design only, no code in this change; the decisions at the end were taken by Ben on 2026-10-12.** What was measured is in [vfs/results/session-experiments.txt](../vfs/results/session-experiments.txt) (produced by [vfs/experiments/session-experiments.sh](../vfs/experiments/session-experiments.sh), a throwaway program that drives SQLite's session extension through the real VFS and a real file store). Where a statement below is reasoned and not measured, it says so.
 
 The goal ([DESIGN.md](DESIGN.md), v0.1 scope): **diff, promote and undo** for branches, through SQLite session changesets. Promote fast-forwards when the parent has not moved, and otherwise replays the changeset and reports conflicts. The three open questions were: what happens when a transaction touches two attached branches, what schema drift does to a replay, and how to get a SQLite with the session extension.
 
@@ -12,7 +12,7 @@ The goal ([DESIGN.md](DESIGN.md), v0.1 scope): **diff, promote and undo** for br
 4. **Promote is one SQLite transaction on the parent** (so one store commit and atomic) when it replays, or one store record when it fast-forwards. It refuses what a changeset cannot carry (see the policy table): SQLite silently skipped or misapplied three of the eight schema-drift cases tried (two more were caught only because the data happened to differ).
 5. **History is snapshots, not stored changesets.** An undo point is a pair of snapshots around a promote; the inverse is computed when needed. Nothing is written into the user's database, and no reserved tables are needed.
 6. **A transaction that writes two attached branches is not atomic today: it commits as two separate durable store commits.** Measured. One added line in the VFS (refuse the super-journal file) makes it fail cleanly with nothing written; measured too. Reads across branches are fine.
-7. **Packaging:** the amalgamation's `sqlite3.h` does not declare the session API, and the extension interface (`sqlite3ext.h`) has no session functions, so a loadable extension cannot call them through the host. The library and CLI ship the pinned SQLite built with the two flags; the loadable extension gives the VFS to any host and gives diff/promote/undo only to hosts that expose the session API.
+7. **Packaging (decided):** the amalgamation's `sqlite3.h` does not declare the session API, and the extension interface (`sqlite3ext.h`) has no session functions, so a loadable extension cannot call them through the host. **forkdb does not put a second SQLite in the application's process.** The in-app library/extension gives the VFS to any host and gives diff/promote/undo only to hosts that expose the session API, and says so plainly when one does not. Only the standalone CLI, a separate program that works on a store no application has open, is built with its own SQLite with the two flags.
 
 ## What the experiments showed
 
@@ -99,15 +99,16 @@ The refusals are the product's honesty: a promote that succeeds must mean the pa
 
 ### Transactions across branches
 
-Contract: **a transaction writes one branch.** The VFS enforces it by refusing the super-journal file (`SQLITE_OPEN_SUPER_JOURNAL`) in `xOpen`, so a write transaction that spans attached branches fails at commit before anything is published (measured, X2 refuse). Reading several attached branches is unaffected. Diff and promote never write two branches in one transaction by construction.
+Contract (decided, option A): **a transaction writes one branch.** The VFS enforces it by refusing the super-journal file (`SQLITE_OPEN_SUPER_JOURNAL`) in `xOpen`, so a write transaction that spans attached branches fails at commit before anything is published (measured, X2 refuse: `COMMIT` returns `SQLITE_CANTOPEN`, rc 14, "unable to open database file", the rows are rolled back, 0 store commits). Reading several attached branches is unaffected. Diff and promote never write two branches in one transaction by construction. **Known roughness, to be documented:** the failure comes at `COMMIT`, not at the first write, and the message does not say why; the VFS should record the reason where the host can read it (a log line through `sqlite3_log`, and a documented error). Rejected: allowing it and documenting the crash window (it breaks "nothing partial after a crash"), and making several branches commit atomically in one store record (a format change and VFS work for which no feature has a use; revisit if one does).
 
 ### Packaging
 
 - The amalgamation's `sqlite3.h` **does not declare the session API**; the header is inside `sqlite3.c` between two marker comments (1,819 lines). The build extracts it (the experiment script does this) rather than vendoring a second download.
 - The pinned SQLite 3.50.0 compiled with `-DSQLITE_ENABLE_SESSION -DSQLITE_ENABLE_PREUPDATE_HOOK` and ran every experiment through the VFS. **The existing gates have not been run on that build** (that is the first step of the build plan).
-- **Library and CLI:** ship the pinned SQLite built with both flags.
-- **Loadable extension:** the VFS works in any host SQLite. diff/promote/undo need the session API, which the extension interface does not provide, so they are available only when the host exports it. Measured: an extension linked to the host's shared `libsqlite3` can call it (Python's system SQLite here). Reasoned, not tested: hosts with a statically linked or privately built SQLite (most language bindings that bundle their own) will not export it. The extension tests for it at load time and the SQL functions then say so plainly.
-- **Rejected for now: a SQL-level diff and apply of our own**, which would remove the dependency. It would reimplement conflict detection, inversion and value encoding, the part the experiments found to be subtle (triggers, foreign keys, positional columns), and carry its own test burden. Reconsider if the host restriction turns out to matter.
+- **Library (the in-app extension): no SQLite of ours.** The VFS works in any host SQLite. diff/promote/undo need the session API, which the extension interface does not provide, so they are available only when the host exports it; the extension checks at load time and the SQL functions then fail with a message that names the missing piece. (Decided: a second SQLite in the application's process is out of scope.)
+- **What is known about hosts:** measured, an extension linked to the host's shared `libsqlite3` can call the session API (Python's system SQLite here, 3.45.1, which has both compile options). Reasoned, not tested: hosts with a statically linked or privately built SQLite (most language bindings that bundle their own) will not export it. **No survey of common hosts has been done**; step 1 of the build plan does it, so the limit is written down with evidence, not guessed.
+- **CLI: its own SQLite, built with the two flags (`vfs/build.sh` already builds variants).** It is a separate program, so it adds no second SQLite to any application. The store is single-process, so the CLI can only work on a store no application has open: offline inspection, diff, promote, undo and scripted use, not a live sandbox an agent is writing to. That limit goes in the CLI's documentation.
+- **Rejected (decided): a SQL-level diff and apply of our own**, and **a bundled SQLite inside the library**. The first would reimplement conflict detection, inversion and value encoding, the part the experiments found to be subtle (triggers, foreign keys, positional columns), and carry its own test burden; the second puts two SQLites in one process (symbol clashes, version skew). Reconsider the first only if the host survey shows common hosts lack the session API.
 
 ## Cost of the session build
 
@@ -126,7 +127,7 @@ Contract: **a transaction writes one branch.** The VFS enforces it by refusing t
 
 Each step is its own PR, reviewed before the next.
 
-1. **Session build and the one-line VFS contract.** Pin the session flags and the header extraction in `vfs/build.sh`, run both gates on the session build, refuse super-journal files with a test (cross-branch write fails and writes nothing, in the crash harness too).
+1. **Session build, the host survey and the VFS contract.** Pin the session flags and the header extraction in `vfs/build.sh` (used by the CLI and the tests), run both gates on the session build, refuse super-journal files with a test (cross-branch write fails, writes nothing, leaves a readable reason, in the crash harness too), and survey which common hosts expose the session API (Python builds, Node, Go, the macOS and Linux system libraries) and write the result into this note.
 2. **Store format v4:** `RESET`, metadata, state id, parent, read-only flag enforcement hook, upgrade by compaction. The power-loss harness's model gets the new records; mutants for each rule (a reset that keeps the old size, a state id not replaced by a commit, a fork that loses its metadata across compaction, ...).
 3. **The branch layer (`fkx`):** fork with base, diff, promote (fast-forward and replay with the policy), undo, garbage collection, retention. Tests include crash sequences across the several records of one operation, and every refusal in the policy table.
 4. **SQL functions and the CLI.**
@@ -135,10 +136,10 @@ Each step is its own PR, reviewed before the next.
 
 One process, one thread (as the store). Two forks merged into each other (only fork into parent). Re-basing a fork. Replaying DDL (added tables and columns are the obvious next case; the data of a new table would need an empty base to diff against). Virtual tables and FTS shadow tables. Large changesets are held in memory (a streaming interface exists). The cost figures are one machine, WSL2, and in-memory or small-commit workloads; a real-disk figure for the diff was not taken.
 
-## Decisions needed
+## Decisions (Ben, 2026-10-12)
 
-1. **History as snapshots** (no changeset blobs stored, two branch ids per undo point), or stored changesets in a reserved table inside the user's database?
-2. **Format v4** (reset, metadata, state id) as the next step after the session build, before any layer code?
-3. **v0.1 refuses** replay when the fork changed the schema or rows of tables without a primary key; fast-forward only for those. Acceptable?
-4. **Ship our own SQLite** for the library and CLI, with the extension feature-detecting?
-5. **A transaction writes one branch** as the documented contract, enforced by the VFS?
+1. **History is snapshots** (no changeset blobs stored, two branch ids per undo point). Decided.
+2. **Format v4** (reset, metadata, state id) is the step after the session build and before any layer code. Decided.
+3. **Tables without a PRIMARY KEY are a documented limitation.** Read as: replay refuses a fork that changed rows of such a table and says which table; fast-forward is still allowed. It is never a silent drop. Decided; the wording "refuses and says why" is my reading of it.
+4. **Packaging:** the library/extension needs a host that exposes the session API and says so when it does not; the CLI is built with its own SQLite for offline use. No bundled SQLite in the library and no SQL-level diff of our own. Decided.
+5. **A transaction writes one branch**, enforced by the VFS refusing the super-journal (option A). Decided for v0.1; atomic multi-branch commit stays out unless a feature needs it.
