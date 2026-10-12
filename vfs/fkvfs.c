@@ -48,6 +48,17 @@ static uint8_t *stage_find(const Stage *t, uint32_t k) {
   return NULL;
 }
 
+/* 1 when k is in the table. stage_take clears the value and leaves the key, so this stays true after the buffer has been handed over. */
+static int stage_has(const Stage *t, uint32_t k) {
+  if (!t->cap) return 0;
+  size_t j = hsh(k, t->cap);
+  while (t->k[j] != EMPTY) {
+    if (t->k[j] == k) return 1;
+    j = (j + 1) & (t->cap - 1);
+  }
+  return 0;
+}
+
 /* The page buffer for pgno, allocating it (contents undefined) when new. NULL on out of memory. */
 static uint8_t *stage_put(Stage *t, uint32_t k) {
   uint8_t *p = stage_find(t, k);
@@ -213,8 +224,9 @@ static int publish(FkFile *f, int dedupe) {
   uint32_t wrote = 0;
   for (uint32_t i = 0; i < n && rc == SQLITE_OK; i++) {
     if (keys[i] == EMPTY) continue;
-    /* The store takes the staged buffer itself: a transaction's pages are held once, not twice, until the commit. A page that was
-     * handed over is no longer in the table, so after any failure below the staging is dropped, not kept for a retry. */
+    /* The store takes the staged buffer itself: a transaction's pages are held once, not twice, until the commit. stage_take
+     * clears the value and leaves the key, so the page is still recorded; after any failure below the staging is dropped, not kept
+     * for a retry. */
     uint8_t *pg = stage_take(&f->st, keys[i]);
     if (v->fail_page > 0 && wrote + 1 == (uint32_t)v->fail_page) { v->fail_page = 0; e = FK_ENOMEM; } /* test hook */
     else e = pg ? fk_txn_write_owned(s, keys[i], pg) : FK_EINVAL;
@@ -224,7 +236,8 @@ static int publish(FkFile *f, int dedupe) {
     uint8_t zero[PG];
     memset(zero, 0, sizeof zero);
     for (uint32_t pg = zlo; pg < zhi && rc == SQLITE_OK; pg++) {
-      if (stage_find(&f->st, pg)) continue;
+      /* Written above: stage_take cleared the buffer and left the key, which is what records the page. */
+      if (stage_has(&f->st, pg)) continue;
       e = fk_txn_write(s, pg, zero);
       if (e != FK_OK) rc = map_store_err(e); else wrote++;
     }

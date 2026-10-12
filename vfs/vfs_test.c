@@ -277,6 +277,55 @@ static void t_failed_publish(void) {
   unlink(pp);
 }
 
+static int write_filled(sqlite3_file *f, uint32_t pg, uint8_t byte) {
+  uint8_t buf[FK_PAGE];
+  memset(buf, byte, sizeof buf);
+  return f->pMethods->xWrite(f, buf, (int)FK_PAGE, (sqlite3_int64)pg * FK_PAGE);
+}
+
+static int page_is(sqlite3_file *f, uint32_t pg, uint8_t byte) {
+  uint8_t buf[FK_PAGE];
+  if (f->pMethods->xRead(f, buf, (int)FK_PAGE, (sqlite3_int64)pg * FK_PAGE) != SQLITE_OK) return 0;
+  for (unsigned i = 0; i < FK_PAGE; i++) if (buf[i] != byte) return 0;
+  return 1;
+}
+
+/* Truncate, then write a page back inside the old size. Publish must keep that page and zero only the hole. */
+static void t_trunc_rewrite(void) {
+  printf("T13 a page written back into a truncated range survives publish\n");
+  char pp[400];
+  Env e;
+  int opened = env_open(&e, P("t13.fk", pp, sizeof pp));
+  CHECK(opened == 0, "open");
+  if (opened != 0) return;
+  sqlite3_vfs *vfs = sqlite3_vfs_find("forkdb");
+  CHECK(vfs != NULL, "vfs is registered");
+  sqlite3_file *f = vfs ? calloc(1, (size_t)vfs->szOsFile) : NULL;
+  CHECK(f != NULL, "file buffer");
+  int orc = f ? vfs->xOpen(vfs, "b0", f, SQLITE_OPEN_MAIN_DB | SQLITE_OPEN_READWRITE, NULL) : SQLITE_NOMEM;
+  CHECK(orc == SQLITE_OK, "open b0 (rc=%d)", orc);
+  if (orc == SQLITE_OK) {
+    for (uint32_t pg = 0; pg < 6; pg++) CHECK(write_filled(f, pg, (uint8_t)(0x10 + pg)) == SQLITE_OK, "write page %u", pg);
+    CHECK(f->pMethods->xSync(f, SQLITE_SYNC_NORMAL) == SQLITE_OK, "commit six pages");
+    CHECK(f->pMethods->xTruncate(f, 2 * (sqlite3_int64)FK_PAGE) == SQLITE_OK, "truncate to 2 pages");
+    CHECK(write_filled(f, 0, 0xB0) == SQLITE_OK, "rewrite a page below the truncate point");
+    CHECK(write_filled(f, 2, 0xB2) == SQLITE_OK, "rewrite the first page of the hole");
+    CHECK(write_filled(f, 4, 0xB4) == SQLITE_OK, "write back further into the old size");
+    CHECK(f->pMethods->xSync(f, SQLITE_SYNC_NORMAL) == SQLITE_OK, "publish the truncate and the rewritten pages");
+    sqlite3_int64 sz = -1;
+    CHECK(f->pMethods->xFileSize(f, &sz) == SQLITE_OK && sz == 5 * (sqlite3_int64)FK_PAGE, "size is 5 pages (%lld)", (long long)sz);
+    CHECK(page_is(f, 0, 0xB0), "page 0 is the rewrite below the truncate point");
+    CHECK(page_is(f, 1, 0x11), "page 1 is unchanged");
+    CHECK(page_is(f, 2, 0xB2), "page 2 keeps the bytes written into the truncated range");
+    CHECK(page_is(f, 3, 0x00), "page 3, the hole, is zeros");
+    CHECK(page_is(f, 4, 0xB4), "page 4 keeps the bytes written into the re-expanded area");
+    f->pMethods->xClose(f);
+  }
+  free(f);
+  env_close(&e);
+  unlink(pp);
+}
+
 static void t_pagesize(void) {
   printf("T5 page sizes\n");
   char pp[400];
@@ -626,6 +675,7 @@ int main(int argc, char **argv) {
     t_fork();
     t_fallback();
     t_failed_publish();
+    t_trunc_rewrite();
     t_spill(1);
     t_spill(0);
     t_pagesize();
