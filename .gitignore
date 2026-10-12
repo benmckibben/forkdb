@@ -16,3 +16,6 @@ spike/build/
 .vscode/
 .idea/
 .DS_Store
+
+# VFS spike build output
+vfs/build/

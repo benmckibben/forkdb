@@ -56,7 +56,7 @@ Out:
 
 ## Consequences of the spike
 
-1. Ship a **pinned SQLite build** with the right compile flags; make batch-atomic an optional optimisation.
+1. Ship a **pinned SQLite build** with the right compile flags; make batch-atomic an optional optimisation. *Update 2026-10-11: the VFS spike over the durable store found batch-atomic gives no benefit there (the store's commit is already atomic, so the journal can stay in memory); see [VFS-SPIKE.md](VFS-SPIKE.md). A pinned build is still needed if the session extension is required, which that spike did not test.*
 2. A snapshot is main file plus WAL; **fork checkpoints by default**.
 3. **Promote must be schema-aware**: refuse when the schema differs, warn or refuse for tables without a PRIMARY KEY.
 4. Plan **layer flattening** from the start.
