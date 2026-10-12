@@ -1,6 +1,6 @@
 # infra/bench: forkdb on real SSD / NVMe (OpenTofu)
 
-One throwaway EC2 host that runs the VFS benchmark (`vfs/vfs_bench`) on **local NVMe instance store** and on a **gp3 EBS volume**, so the numbers in `docs/VFS-SPIKE.md` (all from one WSL2 machine with a 4 ms fsync) can be compared with real disks. It also runs `scripts/test-vfs.sh quick` on a different kernel and filesystem. **Nothing here has been applied.** Plan and validate only, until you say go.
+One throwaway EC2 host that runs the VFS benchmark on **local NVMe instance store** and on a **gp3 EBS volume**, so the numbers in `docs/VFS-SPIKE.md` (the first ones came from one WSL2 machine with a 4 ms fsync) can be compared with real disks. It runs `vfs/real-disk.sh` on each disk (the SQLite benchmark on the commit-path configurations, and the raw I/O patterns of one commit), and optionally `scripts/test-vfs.sh quick` (set `run_tests=false` to skip it). **It has been applied three times**, each time with a `tofu destroy` at the end; the results are in `vfs/results/`.
 
 ## What it creates
 

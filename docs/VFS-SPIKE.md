@@ -80,13 +80,51 @@ Store only: **fork 97.8 us p50 on NVMe (p99 170 us) and 2.53 ms on EBS**, agains
 What changed, what did not:
 
 - **forkdb is about 3 times slower than WAL at a single-row commit on real disks** (149.6 against 44.7 us on NVMe, 2.84 against 0.99 ms on EBS), not 25% slower as the WSL2 numbers suggested. It is still faster than SQLite's default rollback journal: 1.7 times on NVMe, 2.3 times on EBS. For larger transactions the gap to WAL is smaller (1000 rows: 1.3 times on NVMe, 1.7 times on EBS) and a 200,000-row transaction is within noise of both.
-- **The cause of the gap to WAL is not known.** The store already uses `fdatasync`, so it is not fsync against fdatasync, and it does one sync per commit like WAL. The WAL commit on EBS (0.99 ms) is also faster than my own 4 KiB write plus fsync loop (2.79 ms), so that loop is not a floor for a commit: it extends the file and calls `fsync`. Differences I have not tested: the log grows 8.4 KB on every commit where a WAL is reused after each checkpoint, and the VFS writes two pages and a record where WAL appends frames. **This is a hypothesis list, not a finding.** A measurement that varies one of them (preallocating the log, or counting the I/O with `strace`) would say which.
+- **The cause of the gap to WAL was not known when this section was written; it is now: see The gap to WAL below** (file growth, not the number of writes or the sync call). The paragraph that followed here listed hypotheses and is kept as written in the git history.
 - **The WSL2 prediction that the ratios between configurations are fsync counts was wrong** and is corrected above. The CPU-bound results held up: the scan is 34 to 49 percent slower than a plain file (21.9 against 15.7 and 16.4 ms), identical on both disks, so it is the layer lookup, pread and checksum, not the disk.
 - **The random-read result moved.** On WSL2 forkdb looked faster than the plain file with a rollback journal (3.3 against 8.75 us); here it is 2.96 against 4.11 us, still faster than that configuration and about 30 percent slower than WAL (2.21 us).
 - **Fork cost scales with the disk's sync time**, as predicted: one sync, no data copied. On NVMe a fork is about 300 times cheaper than copying this database; on EBS about 22 times.
 - **Write amplification and open time are as before** (8.4 KB per commit; the log is 52.1 MB for 34.0 MB live; 18.7 ms to open it, which is the quantity that grows at about 3 s per GiB of log).
 
 Limits of this run: one instance of one type in one availability zone, three repetitions each (the ranges are in the results file and are small), a database of 33.5 MB that fits in memory, no cold-cache reads, one filesystem (ext4, default options). The first attempt at this run lost its output (the console of a terminated instance is empty), so the numbers come from the second run.
+
+## The gap to WAL: it is file growth (2026-10-12)
+
+The last section left the 3x gap to WAL unexplained. A second run on the same kind of host (one `i4i.large`, NVMe instance store and gp3, ext4, 3 repetitions, raw output in [vfs/results/commit-path-real-disks.txt](../vfs/results/commit-path-real-disks.txt)) varied one thing at a time, first on the file alone and then on the store. Nothing in the store, the VFS or the format was changed: the variants wrap the store's I/O in the benchmark.
+
+**Raw patterns of one commit** (two 4,120-byte page records and a 40-byte commit record, then a sync; [vfs/commit_micro.c](../vfs/commit_micro.c)), p50 in microseconds, NVMe and gp3:
+
+| pattern | NVMe | gp3 |
+|---|---|---|
+| A. append, 3 writes, `fdatasync` (what the store does) | 136.5 | 2,807 |
+| B. append, 1 write, `fdatasync` | 134.8 | 2,814 |
+| C. file already written to the end (zeros), 3 writes, `fdatasync` | 44.5 | 528 |
+| D. already written, 1 write, `fdatasync` | 44.5 | 544 |
+| E. `fallocate` first, 1 write, `fdatasync` | 124.2 | 2,722 |
+| F. append, 1 write, `O_DSYNC` | 134.7 | 2,806 |
+| G. already written, 1 write, `O_DSYNC` | 44.6 | 934 |
+| H. already written, 1 write, `fsync` | 44.4 | 526 |
+
+**The store, with its I/O wrapped** (single-row commit p50 in microseconds; the 1000-row column is milliseconds), NVMe and gp3:
+
+| | 1 row, NVMe | 1 row, gp3 | 1000 rows, NVMe | 1000 rows, gp3 | fork, NVMe | fork, gp3 |
+|---|---|---|---|---|---|---|
+| WAL | 44.5 | 2,327 (range 1,505 to 2,606) | 0.717 | 2.69 | n/a | n/a |
+| forkdb as it is | 149.0 | 2,752 | 0.889 | 4.56 | 97.4 | 1,612 |
+| forkdb, writes coalesced into one per commit | 147.5 | 2,813 | 0.864 | 4.50 | 97.6 | 1,487 |
+| forkdb, log preallocated by writing zeros | 43.3 | 537.5 | 0.729 | 1.56 | 26.4 | 456 |
+| both | 42.7 | 530.4 | 0.723 | 1.62 | 26.4 | 492 |
+
+What it shows:
+
+- **The cost is the file growing.** Appending to a file extends its size and allocates blocks, and the `fdatasync` that follows has to commit that metadata through the filesystem journal as well as flush the data. Overwriting blocks that are already allocated and written needs only the data flush: 44 us on NVMe, the same as a WAL commit (44.5 us), where appending is 136 us. A WAL, as I understand SQLite's behavior (I did not trace it), starts over at the beginning of a file that already exists after each checkpoint, so it mostly overwrites; forkdb's log only ever grows.
+- **It is not the number of writes** (A against B, C against D, and the coalesced store variant change nothing), **and it is not the choice of sync call** (H, `fsync` on a written file, is as fast as `fdatasync`).
+- **`fallocate` does not help** (E, 124 against 135 us): it reserves unwritten extents, and the first write into one converts it, which is a metadata change again. Only blocks that have really been written avoid it.
+- **With the log preallocated by writing zeros, a store commit is at WAL parity on NVMe** (43.3 against 44.5 us, a 1000-row commit 0.73 against 0.72 ms) and a fork costs 26 us instead of 97. On gp3 it is 537 us against 2,752 for the store as it is. WAL on gp3 was 992 us in the first run of this series and 2,327 here (with a 1,505 to 2,606 range inside this run), so **the WAL figure on gp3 is not stable between instances and I do not claim a ratio to it there**; the comparison with forkdb is only reliable within one run.
+
+**What these numbers leave out, and it matters.** The zeros are written once, before the timed loop (the first 64 MiB are written when the first table is created), so the commit latencies above are the steady state after preallocation. The zero-fill itself is not free: every byte of log is written twice, once as zeros in a large sequential write and once as data. At about 8.4 KB of log per single-row commit, that is roughly 67 us per commit at the 125 MB/s baseline of gp3 and a few microseconds on NVMe, paid in chunk-sized pauses when the file is extended, or in the background if it were moved off the commit path. A WAL pays the same only in its first lap. **This was not measured**, so I do not claim parity all-in, only at the steady state. Also not measured: other filesystems (ext4 only), other chunk sizes, and what the first commit after opening a store costs, because the store truncates a torn tail when it opens and the file would be extended again.
+
+**What it would take to ship** (not done, proposed): extend the file in `store/io_file.c` by writing zeros in chunks (with one `fsync` per chunk) whenever a write would pass the allocated end. The store and the format would not change: recovery already stops at the first invalid record and truncates what follows, and a zero tail is an invalid record. The pieces to decide are the chunk size (the fixed cost per chunk is one sync; the per-byte cost is the second write), whether to keep the preallocation across an open instead of truncating and re-extending, and the disk space (a chunk of zeros past the log end). The existing file and power-loss tests would have to cover it, and a run that includes the extensions (tens of thousands of commits, several chunks) is needed before any claim about the all-in cost.
 
 ## Findings
 

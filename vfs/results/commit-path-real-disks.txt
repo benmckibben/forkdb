@@ -1,0 +1,438 @@
+# Console output of the commit-path experiment on the benchmark host (i4i.large, Amazon Linux 2023, kernel 6.1.188), 2026-10-12, source 924209f.
+# [nvme] local instance store, [ebs] gp3; both ext4 default options. M <rep> <pattern> p50_us|p99_us <value>: raw I/O patterns (vfs/commit_micro.c).
+# R <rep> <config> <metric> <value>: SQLite benchmark, filtered to the commit-path metrics (vfs/real-disk.sh).
+FORKDB-BENCH-START 2026-10-12T05:40:20Z source=924209fb7f45bf56e5a99a81d0d613ddbde18795
+Linux 6.1.188-233.386.amzn2023.x86_64 x86_64
+model name	: Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz
+
+Amazon Linux 2023.12.20260930
+Kernel 6.1.188-233.386.amzn2023.x86_64 on an x86_64 (-)
+
+ip-172-31-31-247 login: 
+Installed:
+  annobin-docs-12.69-1.amzn2023.0.1.noarch                                      
+  annobin-plugin-gcc-12.69-1.amzn2023.0.1.x86_64                                
+  cpp-11.5.0-5.amzn2023.0.5.x86_64                                              
+  gc-8.0.4-5.amzn2023.0.2.x86_64                                                
+  gcc-11.5.0-5.amzn2023.0.5.x86_64                                              
+  gcc-plugin-annobin-11.5.0-5.amzn2023.0.5.x86_64                               
+  glibc-devel-2.34-231.amzn2023.0.5.x86_64                                      
+  glibc-headers-x86-2.34-231.amzn2023.0.5.noarch                                
+  guile22-2.2.7-2.amzn2023.0.3.x86_64                                           
+  kernel-headers-1:6.1.188-233.386.amzn2023.x86_64                              
+  libasan-11.5.0-5.amzn2023.0.5.x86_64                                          
+  libmpc-1.2.1-2.amzn2023.0.2.x86_64                                            
+  libtool-ltdl-2.4.7-1.amzn2023.0.3.x86_64                                      
+  libubsan-14.2.1-7.amzn2023.0.2.x86_64                                         
+  libxcrypt-devel-4.4.33-7.amzn2023.x86_64                                      
+  make-1:4.3-5.amzn2023.0.2.x86_64                                              
+
+gcc (GCC) 11.5.0 20240719 (Red Hat 11.5.0-5)
+--- block devices
+NAME            SIZE MODEL                            MOUNTPOINT
+nvme0n1          20G Amazon Elastic Block Store       
+├─nvme0n1p1      20G                                  /
+├─nvme0n1p127     1M                                  
+└─nvme0n1p128    10M                                  /boot/efi
+nvme1n1          20G Amazon Elastic Block Store       
+nvme2n1       435.9G Amazon EC2 NVMe Instance Storage 
+instance store: nvme2n1  extra EBS: nvme1n1
+--- build
+fetched sqlite-amalgamation-3500000 into /opt/forkdb/spike/vendor
+built sqlite3-stock.o
+built sqlite3-batch.o
+built /opt/forkdb/vfs/build/vfs_bench-batch
+built /opt/forkdb/vfs/build/commit_micro
+[   70.783254] EXT4-fs (nvme2n1): mounted filesystem with ordered data mode. Quota mode: none.
+BENCH-BEGIN nvme /dev/nvme2n1 Amazon EC2 NVMe Instance Storage 05:41:24
+[nvme] --- raw patterns of one commit (2 page records + 1 commit record, 8280 bytes)
+[nvme] M 1 A append, 3 writes, fdatasync p50_us 136.36
+[nvme] M 1 A append, 3 writes, fdatasync p99_us 169.62
+[nvme] M 1 B append, 1 write, fdatasync p50_us 134.75
+[nvme] M 1 B append, 1 write, fdatasync p99_us 170.69
+[nvme] M 1 C zero-prealloc, 3 writes, fdatasync p50_us 44.40
+[nvme] M 1 C zero-prealloc, 3 writes, fdatasync p99_us 62.69
+[nvme] M 1 D zero-prealloc, 1 write, fdatasync p50_us 44.43
+[nvme] M 1 D zero-prealloc, 1 write, fdatasync p99_us 64.43
+[nvme] M 1 E fallocate, 1 write, fdatasync p50_us 124.06
+[nvme] M 1 E fallocate, 1 write, fdatasync p99_us 159.83
+[nvme] M 1 F append, 1 write, O_DSYNC p50_us 134.63
+[nvme] M 1 F append, 1 write, O_DSYNC p99_us 169.09
+[nvme] M 1 G zero-prealloc, 1 write, O_DSYNC p50_us 44.57
+[nvme] M 1 G zero-prealloc, 1 write, O_DSYNC p99_us 62.75
+[nvme] M 1 H zero-prealloc, 1 write, fsync p50_us 44.44
+[nvme] M 1 H zero-prealloc, 1 write, fsync p99_us 71.43
+[nvme] M 2 A append, 3 writes, fdatasync p50_us 136.55
+[nvme] M 2 A append, 3 writes, fdatasync p99_us 167.71
+[nvme] M 2 B append, 1 write, fdatasync p50_us 134.59
+[nvme] M 2 B append, 1 write, fdatasync p99_us 170.99
+[nvme] M 2 C zero-prealloc, 3 writes, fdatasync p50_us 44.58
+[nvme] M 2 C zero-prealloc, 3 writes, fdatasync p99_us 64.44
+[nvme] M 2 D zero-prealloc, 1 write, fdatasync p50_us 44.48
+[nvme] M 2 D zero-prealloc, 1 write, fdatasync p99_us 63.03
+[nvme] M 2 E fallocate, 1 write, fdatasync p50_us 124.16
+[nvme] M 2 E fallocate, 1 write, fdatasync p99_us 164.01
+[nvme] M 2 F append, 1 write, O_DSYNC p50_us 134.66
+[nvme] M 2 F append, 1 write, O_DSYNC p99_us 170.45
+[nvme] M 2 G zero-prealloc, 1 write, O_DSYNC p50_us 44.52
+[nvme] M 2 G zero-prealloc, 1 write, O_DSYNC p99_us 64.47
+[nvme] M 2 H zero-prealloc, 1 write, fsync p50_us 44.42
+[nvme] M 2 H zero-prealloc, 1 write, fsync p99_us 66.90
+[nvme] M 3 A append, 3 writes, fdatasync p50_us 136.51
+[nvme] M 3 A append, 3 writes, fdatasync p99_us 167.15
+[nvme] M 3 B append, 1 write, fdatasync p50_us 134.92
+[nvme] M 3 B append, 1 write, fdatasync p99_us 169.77
+[nvme] M 3 C zero-prealloc, 3 writes, fdatasync p50_us 44.52
+[nvme] M 3 C zero-prealloc, 3 writes, fdatasync p99_us 62.51
+[nvme] M 3 D zero-prealloc, 1 write, fdatasync p50_us 44.52
+[nvme] M 3 D zero-prealloc, 1 write, fdatasync p99_us 63.41
+[nvme] M 3 E fallocate, 1 write, fdatasync p50_us 124.29
+[nvme] M 3 E fallocate, 1 write, fdatasync p99_us 170.04
+[nvme] M 3 F append, 1 write, O_DSYNC p50_us 134.65
+[nvme] M 3 F append, 1 write, O_DSYNC p99_us 168.22
+[nvme] M 3 G zero-prealloc, 1 write, O_DSYNC p50_us 44.57
+[nvme] M 3 G zero-prealloc, 1 write, O_DSYNC p99_us 64.17
+[nvme] M 3 H zero-prealloc, 1 write, fsync p50_us 44.47
+[nvme] M 3 H zero-prealloc, 1 write, fsync p99_us 65.93
+[nvme] # done
+[nvme] --- SQLite benchmark
+[nvme] R 1 disk write4k+fsync_p50_us 124.453000
+[nvme] R 1 disk write4k+fsync_p99_us 161.348000
+[nvme] R 1 file/WAL w1_txn_per_s 11590.233395
+[nvme] R 1 file/WAL w1_p50_us 44.513000
+[nvme] R 1 file/WAL w1_p99_us 166.459000
+[nvme] R 1 file/WAL w2_ms_per_1000_row_txn_p50 0.715046
+[nvme] R 1 file/WAL file_bytes 33525760.000000
+[nvme] R 1 forkdb/journal w1_txn_per_s 6555.559397
+[nvme] R 1 forkdb/journal w1_p50_us 148.963000
+[nvme] R 1 forkdb/journal w1_p99_us 187.565000
+[nvme] R 1 forkdb/journal w1_fsyncs_per_txn 1.031000
+[nvme] R 1 forkdb/journal w1_bytes_written_per_txn 8438.732000
+[nvme] R 1 forkdb/journal w1_pwrites_per_txn 3.058500
+[nvme] R 1 forkdb/journal w2_ms_per_1000_row_txn_p50 0.888692
+[nvme] R 1 forkdb/journal w6_fork_p50_us 97.301000
+[nvme] R 1 forkdb/journal file_bytes 52056208.000000
+[nvme] R 1 forkdb/journal w7_fk_open_ms 17.803646
+[nvme] R 1 forkdb/prealloc w1_txn_per_s 22128.991796
+[nvme] R 1 forkdb/prealloc w1_p50_us 43.267000
+[nvme] R 1 forkdb/prealloc w1_p99_us 73.091000
+[nvme] R 1 forkdb/prealloc w1_fsyncs_per_txn 1.031000
+[nvme] R 1 forkdb/prealloc w1_bytes_written_per_txn 8438.732000
+[nvme] R 1 forkdb/prealloc w1_pwrites_per_txn 3.058500
+[nvme] R 1 forkdb/prealloc w2_ms_per_1000_row_txn_p50 0.723152
+[nvme] R 1 forkdb/prealloc w6_fork_p50_us 26.422000
+[nvme] R 1 forkdb/prealloc file_bytes 52056208.000000
+[nvme] R 1 forkdb/prealloc w7_fk_open_ms 19.185676
+[nvme] R 1 forkdb/coalesce w1_txn_per_s 6628.753731
+[nvme] R 1 forkdb/coalesce w1_p50_us 147.520000
+[nvme] R 1 forkdb/coalesce w1_p99_us 183.936000
+[nvme] R 1 forkdb/coalesce w1_fsyncs_per_txn 1.031000
+[nvme] R 1 forkdb/coalesce w1_bytes_written_per_txn 8438.732000
+[nvme] R 1 forkdb/coalesce w1_pwrites_per_txn 1.031000
+[nvme] R 1 forkdb/coalesce w2_ms_per_1000_row_txn_p50 0.865013
+[nvme] R 1 forkdb/coalesce w6_fork_p50_us 97.573000
+[nvme] R 1 forkdb/coalesce file_bytes 52056208.000000
+[nvme] R 1 forkdb/coalesce w7_fk_open_ms 17.788519
+[nvme] R 1 forkdb/both w1_txn_per_s 22348.978427
+[nvme] R 1 forkdb/both w1_p50_us 42.860000
+[nvme] R 1 forkdb/both w1_p99_us 72.350000
+[nvme] R 1 forkdb/both w1_fsyncs_per_txn 1.031000
+[nvme] R 1 forkdb/both w1_bytes_written_per_txn 8438.732000
+[nvme] R 1 forkdb/both w1_pwrites_per_txn 1.031000
+[nvme] R 1 forkdb/both w2_ms_per_1000_row_txn_p50 0.722591
+[nvme] R 1 forkdb/both w6_fork_p50_us 26.315000
+[nvme] R 1 forkdb/both file_bytes 52056208.000000
+[nvme] R 1 forkdb/both w7_fk_open_ms 19.266047
+[nvme] R 2 disk write4k+fsync_p50_us 124.146000
+[nvme] R 2 disk write4k+fsync_p99_us 169.102000
+[nvme] R 2 file/WAL w1_txn_per_s 11641.710932
+[nvme] R 2 file/WAL w1_p50_us 43.753000
+[nvme] R 2 file/WAL w1_p99_us 165.660000
+[nvme] R 2 file/WAL w2_ms_per_1000_row_txn_p50 0.717169
+[nvme] R 2 file/WAL file_bytes 33525760.000000
+[nvme] R 2 forkdb/journal w1_txn_per_s 6562.822793
+[nvme] R 2 forkdb/journal w1_p50_us 149.008000
+[nvme] R 2 forkdb/journal w1_p99_us 185.890000
+[nvme] R 2 forkdb/journal w1_fsyncs_per_txn 1.031000
+[nvme] R 2 forkdb/journal w1_bytes_written_per_txn 8438.732000
+[nvme] R 2 forkdb/journal w1_pwrites_per_txn 3.058500
+[nvme] R 2 forkdb/journal w2_ms_per_1000_row_txn_p50 0.886255
+[nvme] R 2 forkdb/journal w6_fork_p50_us 97.379000
+[nvme] R 2 forkdb/journal file_bytes 52056208.000000
+[nvme] R 2 forkdb/journal w7_fk_open_ms 17.859549
+[nvme] R 2 forkdb/prealloc w1_txn_per_s 21967.331371
+[nvme] R 2 forkdb/prealloc w1_p50_us 43.388000
+[nvme] R 2 forkdb/prealloc w1_p99_us 72.094000
+[nvme] R 2 forkdb/prealloc w1_fsyncs_per_txn 1.031000
+[nvme] R 2 forkdb/prealloc w1_bytes_written_per_txn 8438.732000
+[nvme] R 2 forkdb/prealloc w1_pwrites_per_txn 3.058500
+[nvme] R 2 forkdb/prealloc w2_ms_per_1000_row_txn_p50 0.729311
+[nvme] R 2 forkdb/prealloc w6_fork_p50_us 26.504000
+[nvme] R 2 forkdb/prealloc file_bytes 52056208.000000
+[nvme] R 2 forkdb/prealloc w7_fk_open_ms 1[   90.463019] EXT4-fs (nvme2n1): unmounting filesystem.
+9.238281
+[nvme] R 2 forkdb/coalesce w1_txn_per_s 6621.033620
+[nvme] R 2 forkdb/coalesce w1_p50_us 147.538000
+[nvme] R 2 forkdb/coalesce w1_p99_us 183.492000
+[nvme] R 2 forkdb/coalesce w1_fsyncs_per_txn 1.031000
+[nvme] R 2 forkdb/coalesce w1_bytes_written_per_txn 8438.732000
+[nvme] R 2 forkdb/coalesce w1_pwrites_per_txn 1.031000
+[nvme] R 2 forkdb/coalesce w2_ms_per_1000_row_txn_p50 0.864083
+[nvme] R 2 forkdb/coalesce w6_fork_p50_us 98.457000
+[nvme] R 2 forkdb/coalesce file_bytes 52056208.000000
+[nvme] R 2 forkdb/coalesce w7_fk_open_ms 17.781993
+[nvme] R 2 forkdb/both w1_txn_per_s 22383.568455
+[nvme] R 2 forkdb/both w1_p50_us 42.693000
+[nvme] R 2 forkdb/both w1_p99_us 71.575000
+[nvme] R 2 forkdb/both w1_fsyncs_per_txn 1.031000
+[nvme] R 2 forkdb/both w1_bytes_written_per_txn 8438.732000
+[nvme] R 2 forkdb/both w1_pwrites_per_txn 1.031000
+[nvme] R 2 forkdb/both w2_ms_per_1000_row_txn_p50 0.723281
+[nvme] R 2 forkdb/both w6_fork_p50_us 26.359000
+[nvme] R 2 forkdb/both file_bytes 52056208.000000
+[nvme] R 2 forkdb/both w7_fk_open_ms 29.586283
+[nvme] R 3 disk write4k+fsync_p50_us 124.471000
+[nvme] R 3 disk write4k+fsync_p99_us 168.797000
+[nvme] R 3 file/WAL w1_txn_per_s 11596.066941
+[nvme] R 3 file/WAL w1_p50_us 44.783000
+[nvme] R 3 file/WAL w1_p99_us 164.924000
+[nvme] R 3 file/WAL w2_ms_per_1000_row_txn_p50 0.717593
+[nvme] R 3 file/WAL file_bytes 33525760.000000
+[nvme] R 3 forkdb/journal w1_txn_per_s 6559.421051
+[nvme] R 3 forkdb/journal w1_p50_us 148.799000
+[nvme] R 3 forkdb/journal w1_p99_us 185.572000
+[nvme] R 3 forkdb/journal w1_fsyncs_per_txn 1.031000
+[nvme] R 3 forkdb/journal w1_bytes_written_per_txn 8438.732000
+[nvme] R 3 forkdb/journal w1_pwrites_per_txn 3.058500
+[nvme] R 3 forkdb/journal w2_ms_per_1000_row_txn_p50 0.889181
+[nvme] R 3 forkdb/journal w6_fork_p50_us 98.051000
+[nvme] R 3 forkdb/journal file_bytes 52056208.000000
+[nvme] R 3 forkdb/journal w7_fk_open_ms 17.688925
+[nvme] R 3 forkdb/prealloc w1_txn_per_s 22168.975054
+[nvme] R 3 forkdb/prealloc w1_p50_us 43.211000
+[nvme] R 3 forkdb/prealloc w1_p99_us 72.273000
+[nvme] R 3 forkdb/prealloc w1_fsyncs_per_txn 1.031000
+[nvme] R 3 forkdb/prealloc w1_bytes_written_per_txn 8438.732000
+[nvme] R 3 forkdb/prealloc w1_pwrites_per_txn 3.058500
+[nvme] R 3 forkdb/prealloc w2_ms_per_1000_row_txn_p50 0.734638
+[nvme] R 3 forkdb/prealloc w6_fork_p50_us 26.266000
+[nvme] R 3 forkdb/prealloc file_bytes 52056208.000000
+[nvme] R 3 forkdb/prealloc w7_fk_open_ms 18.938533
+[nvme] R 3 forkdb/coalesce w1_txn_per_s 6630.468816
+[nvme] R 3 forkdb/coalesce w1_p50_us 147.324000
+[nvme] R 3 forkdb/coalesce w1_p99_us 183.986000
+[nvme] R 3 forkdb/coalesce w1_fsyncs_per_txn 1.031000
+[nvme] R 3 forkdb/coalesce w1_bytes_written_per_txn 8438.732000
+[nvme] R 3 forkdb/coalesce w1_pwrites_per_txn 1.031000
+[nvme] R 3 forkdb/coalesce w2_ms_per_1000_row_txn_p50 0.861905
+[nvme] R 3 forkdb/coalesce w6_fork_p50_us 97.480000
+[nvme] R 3 forkdb/coalesce file_bytes 52056208.000000
+[nvme] R 3 forkdb/coalesce w7_fk_open_ms 17.620436
+[nvme] R 3 forkdb/both w1_txn_per_s 22412.426023
+[nvme] R 3 forkdb/both w1_p50_us 42.662000
+[nvme] R 3 forkdb/both w1_p99_us 71.079000
+[nvme] R 3 forkdb/both w1_fsyncs_per_txn 1.031000
+[nvme] R 3 forkdb/both w1_bytes_written_per_txn 8438.732000
+[nvme] R 3 forkdb/both w1_pwrites_per_txn 1.031000
+[nvme] R 3 forkdb/both w2_ms_per_1000_row_txn_p50 0.723781
+[nvme] R 3 forkdb/both w6_fork_p50_us 26.568000
+[nvme] R 3 forkdb/both file_bytes 52056208.000000
+[nvme] R 3 forkdb/both w7_fk_open_ms 18.906538
+BENCH-END nvme 05:41:43
+[   90.746155] EXT4-fs (nvme1n1): mounted filesystem with ordered data mode. Quota mode: none.
+BENCH-BEGIN ebs /dev/nvme1n1 Amazon Elastic Block Store 05:41:44
+[ebs] --- raw patterns of one commit (2 page records + 1 commit record, 8280 bytes)
+[ebs] M 1 A append, 3 writes, fdatasync p50_us 2813.23
+[ebs] M 1 A append, 3 writes, fdatasync p99_us 6215.57
+[ebs] M 1 B append, 1 write, fdatasync p50_us 2820.74
+[ebs] M 1 B append, 1 write, fdatasync p99_us 6209.33
+[ebs] M 1 C zero-prealloc, 3 writes, fdatasync p50_us 528.00
+[ebs] M 1 C zero-prealloc, 3 writes, fdatasync p99_us 1060.16
+[ebs] M 1 D zero-prealloc, 1 write, fdatasync p50_us 517.13
+[ebs] M 1 D zero-prealloc, 1 write, fdatasync p99_us 906.51
+[ebs] M 1 E fallocate, 1 write, fdatasync p50_us 2726.29
+[ebs] M 1 E fallocate, 1 write, fdatasync p99_us 5067.76
+[ebs] M 1 F append, 1 write, O_DSYNC p50_us 2811.90
+[ebs] M 1 F append, 1 write, O_DSYNC p99_us 3909.76
+[ebs] M 1 G zero-prealloc, 1 write, O_DSYNC p50_us 933.68
+[ebs] M 1 G zero-prealloc, 1 write, O_DSYNC p99_us 1263.95
+[ebs] M 1 H zero-prealloc, 1 write, fsync p50_us 519.80
+[ebs] M 1 H zero-prealloc, 1 write, fsync p99_us 1790.42
+[ebs] M 2 A append, 3 writes, fdatasync p50_us 2797.86
+[ebs] M 2 A append, 3 writes, fdatasync p99_us 4031.18
+[ebs] M 2 B append, 1 write, fdatasync p50_us 2789.67
+[ebs] M 2 B append, 1 write, fdatasync p99_us 6284.14
+[ebs] M 2 C zero-prealloc, 3 writes, fdatasync p50_us 556.08
+[ebs] M 2 C zero-prealloc, 3 writes, fdatasync p99_us 1602.05
+[ebs] M 2 D zero-prealloc, 1 write, fdatasync p50_us 549.84
+[ebs] M 2 D zero-prealloc, 1 write, fdatasync p99_us 1191.06
+[ebs] M 2 E fallocate, 1 write, fdatasync p50_us 2663.25
+[ebs] M 2 E fallocate, 1 write, fdatasync p99_us 6043.89
+[ebs] M 2 F append, 1 write, O_DSYNC p50_us 2801.49
+[ebs] M 2 F append, 1 write, O_DSYNC p99_us 3995.55
+[ebs] M 2 G zero-prealloc, 1 write, O_DSYNC p50_us 933.22
+[ebs] M 2 G zero-prealloc, 1 write, O_DSYNC p99_us 1387.96
+[ebs] M 2 H zero-prealloc, 1 write, fsync p50_us 526.41
+[ebs] M 2 H zero-prealloc, 1 write, fsync p99_us 1913.49
+[ebs] M 3 A append, 3 writes, fdatasync p50_us 2806.65
+[ebs] M 3 A append, 3 writes, fdatasync p99_us 3424.00
+[ebs] M 3 B append, 1 write, fdatasync p50_us 2813.74
+[ebs] M 3 B append, 1 write, fdatasync p99_us 3662.81
+[ebs] M 3 C zero-prealloc, 3 writes, fdatasync p50_us 525.71
+[ebs] M 3 C zero-prealloc, 3 writes, fdatasync p99_us 1119.42
+[ebs] M 3 D zero-prealloc, 1 write, fdatasync p50_us 543.78
+[ebs] M 3 D zero-prealloc, 1 write, fdatasync p99_us 1157.62
+[ebs] M 3 E fallocate, 1 write, fdatasync p50_us 2721.59
+[ebs] M 3 E fallocate, 1 write, fdatasync p99_us 3336.70
+[ebs] M 3 F append, 1 write, O_DSYNC p50_us 2805.60
+[ebs] M 3 F append, 1 write, O_DSYNC p99_us 3840.42
+[ebs] M 3 G zero-prealloc, 1 write, O_DSYNC p50_us 936.33
+[ebs] M 3 G zero-prealloc, 1 write, O_DSYNC p99_us 1202.89
+[ebs] M 3 H zero-prealloc, 1 write, fsync p50_us 542.69
+[ebs] M 3 H zero-prealloc, 1 write, fsync p99_us 1935.41
+[ebs] # done
+[ebs] --- SQLite benchmark
+[ebs] R 1 disk write4k+fsync_p50_us 2419.146000
+[ebs] R 1 disk write4k+fsync_p99_us 3090.021000
+[ebs] R 1 file/WAL w1_txn_per_s 520.942943
+[ebs] R 1 file/WAL w1_p50_us 2326.639000
+[ebs] R 1 file/WAL w1_p99_us 3921.566000
+[ebs] R 1 file/WAL w2_ms_per_1000_row_txn_p50 2.818171
+[ebs] R 1 file/WAL file_bytes 33525760.000000
+[ebs] R 1 forkdb/journal w1_txn_per_s 421.029352
+[ebs] R 1 forkdb/journal w1_p50_us 2751.756000
+[ebs] R 1 forkdb/journal w1_p99_us 3732.995000
+[ebs] R 1 forkdb/journal w1_fsyncs_per_txn 1.031000
+[ebs] R 1 forkdb/journal w1_bytes_written_per_txn 8438.732000
+[ebs] R 1 forkdb/journal w1_pwrites_per_txn 3.058500
+[ebs] R 1 forkdb/journal w2_ms_per_1000_row_txn_p50 4.527834
+[ebs] R 1 forkdb/journal w6_fork_p50_us 1498.123000
+[ebs] R 1 forkdb/journal file_bytes 52056208.000000
+[ebs] R 1 forkdb/journal w7_fk_open_ms 18.254900
+[ebs] R 1 forkdb/prealloc w1_txn_per_s 1684.280492
+[ebs] R 1 forkdb/prealloc w1_p50_us 524.790000
+[ebs] R 1 forkdb/prealloc w1_p99_us 1611.852000
+[ebs] R 1 forkdb/prealloc w1_fsyncs_per_txn 1.031000
+[ebs] R 1 forkdb/prealloc w1_bytes_written_per_txn 8438.732000
+[ebs] R 1 forkdb/prealloc w1_pwrites_per_txn 3.058500
+[ebs] R 1 forkdb/prealloc w2_ms_per_1000_row_txn_p50 1.572738
+[ebs] R 1 forkdb/prealloc w6_fork_p50_us 439.272000
+[ebs] R 1 forkdb/prealloc file_bytes 52056208.000000
+[ebs] R 1 forkdb/prealloc w7_fk_open_ms 21.787451
+[ebs] R 1 forkdb/coalesce w1_txn_per_s 372.795817
+[ebs] R 1 forkdb/coalesce w1_p50_us 2821.056000
+[ebs] R 1 forkdb/coalesce w1_p99_us 3759.660000
+[ebs] R 1 forkdb/coalesce w1_fsyncs_per_txn 1.031000
+[ebs] R 1 forkdb/coalesce w1_bytes_written_per_txn 8438.732000
+[ebs] R 1 forkdb/coalesce w1_pwrites_per_txn 1.031000
+[ebs] R 1 forkdb/coalesce w2_ms_per_1000_row_txn_p50 4.536230
+[ebs] R 1 forkdb/coalesce w6_fork_p50_us 1595.010000
+[ebs] R 1 forkdb/coalesce file_bytes 52056208.000000
+[ebs] R 1 forkdb/coalesce w7_fk_open_ms 18.153630
+[ebs] R 1 forkdb/both w1_txn_per_s 1506.500874
+[ebs] R 1 forkdb/both w1_p50_us 570.249000
+[ebs] R 1 forkdb/both w1_p99_us 1790.921000
+[ebs] R 1 forkdb/both w1_fsyncs_per_txn 1.031000
+[ebs] R 1 forkdb/both w1_bytes_written_per_txn 8438.732000
+[ebs] R 1 forkdb/both w1_pwrites_per_txn 1.031000
+[ebs] R 1 forkdb/both w2_ms_per_1000_row_txn_p50 1.616073
+[ebs] R 1 forkdb/both w6_fork_p50_us 510.411000
+[ebs] R 1 forkdb/both file_bytes 52056208.000000
+[ebs] R 1 forkdb/both w7_fk_open_ms 21.344348
+[ebs] R 2 disk write4k+fsync_p50_us 1593.161000
+[ebs] R 2 disk write4k+fsync_p99_us 3055.760000
+[ebs] R 2 file/WAL w1_txn_per_s 564.305927
+[ebs] R 2 file/WAL w1_p50_us 1504.702000
+[ebs] R 2 file/WAL w1_p99_us 3644.460000
+[ebs] R 2 file/WAL w2_ms_per_1000_row_txn_p50 2.673495
+[ebs] R 2 file/WAL file_bytes 33525760.000000
+[ebs] R 2 forkdb/journal w1_txn_per_s 421.278021
+[ebs] R 2 forkdb/journal w1_p50_us 2771.478000
+[ebs] R 2 forkdb/journal w1_p99_us 3676.487000
+[ebs] R 2 forkdb/journal w1_fsyncs_per_txn 1.031000
+[ebs] R 2 forkdb/journal w1_bytes_written_per_txn 8438.732000
+[ebs] R 2 forkdb/journal w1_pwrites_per_txn 3.058500
+[ebs] R 2 forkdb/journal w2_ms_per_1000_row_txn_p50 4.564597
+[ebs] R 2 forkdb/journal w6_fork_p50_us 1612.132000
+[ebs] R 2 forkdb/journal file_bytes 52056208.000000
+[ebs] R 2 forkdb/journal w7_fk_open_ms 18.225376
+[ebs] R 2 forkdb/prealloc w1_txn_per_s 1556.820853
+[ebs] R 2 forkdb/prealloc w1_p50_us 568.131000
+[ebs] R 2 forkdb/prealloc w1_p99_us 1411.686000
+[ebs] R 2 forkdb/prealloc w1_fsyncs_per_txn 1.031000
+[ebs] R 2 forkdb/prealloc w1_bytes_written_per_txn 8438.732000
+[ebs] R 2 forkdb/prealloc w1_pwrites_per_txn 3.058500
+[ebs] R 2 forkdb/prealloc w2_ms_per_1000_row_txn_p50 1.551485
+[ebs] R 2 forkdb/prealloc w6_fork_p50_us 456.288000
+[ebs] R 2 forkdb/prealloc file_bytes 52056208.000000
+[ebs] R 2 forkdb/prealloc w7_fk_open_ms 21.871861
+[ebs] R 2 forkdb/coalesce w1_txn_per_s 388.496945
+[ebs] R 2 forkdb/coalesce w1_p50_us 2790.382000
+[ebs] R 2 forkdb/coalesce w1_p99_us 3794.588000
+[ebs] R 2 forkdb/coalesce w1_fsyncs_per_txn 1.031000
+[ebs] R 2 forkdb/coalesce w1_bytes_written_per_txn 8438.732000
+[ebs] R 2 forkdb/coalesce w1_pwrites_per_txn 1.031000
+[ebs] R 2 forkdb/coalesce w2_ms_per_1000_row_txn_p50 4.495221
+[ebs] R 2 forkdb/coalesce w6_fork_p50_us 1483.331000
+[ebs] R 2 forkdb/coalesce file_bytes 52056208.000000
+[ebs] R 2 forkdb/coalesce w7_fk_open_ms 18.195172
+[ebs] R 2 forkdb/both w1_txn_per_s 1816.433216
+[ebs] R 2 forkdb/both w1_p50_us 519.487000
+[ebs] R 2 forkdb/both w1_p99_us 1040.974000
+[ebs] R 2 forkdb/both w1_fsyncs_per_txn 1.031000
+[ebs] R 2 forkdb/both w1_bytes_written_per_txn 8438.732000
+[ebs] R 2 forkdb/both w1_pwrites_per_txn 1.031000
+[ebs] R 2 forkdb/both w2_ms_per_1000_row_txn_p50 1.629665
+[ebs] R 2 forkdb/both w6_fork_p50_us 482.414000
+[ebs] R 2 forkdb/both file_bytes 52056208.000000
+[ebs] R 2 forkdb/both w7_fk_open_ms 21.349735
+[ebs] R 3 disk write4k+fsync_p50_us 1682.387000
+[ebs] R 3 disk write4k+fsync_p99_us 3303.367000
+[ebs] R 3 file/WAL w1_txn_per_s 520.645987
+[ebs] R 3 file/WAL w1_p50_us 2606.401000
+[ebs] R 3 file/WAL w1_p99_us 3292.096000
+[ebs] R 3 file/WAL w2_ms_per_1000_row_txn_p50 2.686266
+[ebs] R 3 file/WAL file_bytes 33525760.000000
+[ebs] R 3 forkdb/journal w1_txn_per_s 398.623293
+[ebs] R 3 forkdb/journal w1_p50_us 2747.588000
+[ebs] R 3 forkdb/journal w1_p99_us 4272.872000
+[ebs] R 3 forkdb/journal w1_fsyncs_per_txn 1.031000
+[ebs] R 3 forkdb/journal w1_bytes_written_per_txn 8438.732000
+[ebs] R 3 forkdb/journal w1_pwrites_per_txn 3.058500
+[ebs] R 3 forkdb/journal w2_ms_per_1000_row_txn_p50 4.558915
+[ebs] R 3 forkdb/journal w6_fork_p50_us 1644.107000
+[ebs] R 3 forkdb/journal file_bytes 52056208.000000
+[ebs] R 3 forkdb/journal w7_fk_open_ms 18.237110
+[ebs] R 3 forkdb/prealloc w1_txn_per_s 1704.574169
+[ebs] R 3 forkdb/prealloc w1_p50_us 537.450000
+[ebs] [  246.255638] EXT4-fs (nvme1n1): unmounting filesystem.
+R 3 forkdb/prealloc w1_p99_us 1184.342000
+[ebs] R 3 forkdb/prealloc w1_fsyncs_per_txn 1.031000
+[ebs] R 3 forkdb/prealloc w1_bytes_written_per_txn 8438.732000
+[ebs] R 3 forkdb/prealloc w1_pwrites_per_txn 3.058500
+[ebs] R 3 forkdb/prealloc w2_ms_per_1000_row_txn_p50 1.557945
+[ebs] R 3 forkdb/prealloc w6_fork_p50_us 504.978000
+[ebs] R 3 forkdb/prealloc file_bytes 52056208.000000
+[ebs] R 3 forkdb/prealloc w7_fk_open_ms 21.397884
+[ebs] R 3 forkdb/coalesce w1_txn_per_s 364.025783
+[ebs] R 3 forkdb/coalesce w1_p50_us 2813.193000
+[ebs] R 3 forkdb/coalesce w1_p99_us 3900.075000
+[ebs] R 3 forkdb/coalesce w1_fsyncs_per_txn 1.031000
+[ebs] R 3 forkdb/coalesce w1_bytes_written_per_txn 8438.732000
+[ebs] R 3 forkdb/coalesce w1_pwrites_per_txn 1.031000
+[ebs] R 3 forkdb/coalesce w2_ms_per_1000_row_txn_p50 4.480895
+[ebs] R 3 forkdb/coalesce w6_fork_p50_us 1487.412000
+[ebs] R 3 forkdb/coalesce file_bytes 52056208.000000
+[ebs] R 3 forkdb/coalesce w7_fk_open_ms 18.433749
+[ebs] R 3 forkdb/both w1_txn_per_s 1699.852961
+[ebs] R 3 forkdb/both w1_p50_us 530.360000
+[ebs] R 3 forkdb/both w1_p99_us 1222.695000
+[ebs] R 3 forkdb/both w1_fsyncs_per_txn 1.031000
+[ebs] R 3 forkdb/both w1_bytes_written_per_txn 8438.732000
+[ebs] R 3 forkdb/both w1_pwrites_per_txn 1.031000
+[ebs] R 3 forkdb/both w2_ms_per_1000_row_txn_p50 1.561060
+[ebs] R 3 forkdb/both w6_fork_p50_us 492.012000
+[ebs] R 3 forkdb/both file_bytes 52056208.000000
+[ebs] R 3 forkdb/both w7_fk_open_ms 21.509924
+BENCH-END ebs 05:44:19
+FORKDB-BENCH-DONE 2026-10-12T05:44:19Z
