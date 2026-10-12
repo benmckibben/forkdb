@@ -906,7 +906,7 @@ int fk_txn_begin(fk_store *s, uint32_t b) {
   s->txn_branch = b;
   return FK_OK;
 }
-int fk_txn_write(fk_store *s, uint32_t pgno, const void *page) {
+static int txn_push(fk_store *s, uint32_t pgno, uint8_t *data) { /* the pending list takes data on FK_OK */
   if (!s->txn_open) return FK_EINVAL;
   if (s->npp == s->cpp) {
     uint32_t nc = s->cpp ? s->cpp * 2 : 8;
@@ -915,14 +915,24 @@ int fk_txn_write(fk_store *s, uint32_t pgno, const void *page) {
     s->pp = n;
     s->cpp = nc;
   }
+  s->pp[s->npp].pgno = pgno;
+  s->pp[s->npp].off = 0;
+  s->pp[s->npp].data = data;
+  s->npp++;
+  return FK_OK;
+}
+int fk_txn_write(fk_store *s, uint32_t pgno, const void *page) {
+  if (!s->txn_open) return FK_EINVAL;
   uint8_t *d = malloc(FK_PAGE);
   if (!d) return FK_ENOMEM;
   memcpy(d, page, FK_PAGE);
-  s->pp[s->npp].pgno = pgno;
-  s->pp[s->npp].off = 0;
-  s->pp[s->npp].data = d;
-  s->npp++;
-  return FK_OK;
+  int rc = txn_push(s, pgno, d);
+  if (rc != FK_OK) free(d);
+  return rc;
+}
+int fk_txn_write_owned(fk_store *s, uint32_t pgno, void *page) {
+  if (!page) return FK_EINVAL;
+  return txn_push(s, pgno, page); /* on an error the caller still owns page */
 }
 void fk_txn_abort(fk_store *s) {
   for (uint32_t i = 0; i < s->npp; i++) free(s->pp[i].data);

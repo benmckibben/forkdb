@@ -50,7 +50,7 @@ static sqlite3 *openb(const char *vfs, uint32_t b) {
 }
 
 /* a store in a real file, with the VFS over it */
-typedef struct { fk_io io; fk_store *s; FkVfs *v; char path[320]; } Env;
+typedef struct { fk_io io; fk_store *s; FkVfs *v; char path[320]; int allow_err; } Env;
 
 static int env_open(Env *e, const char *path) {
   memset(e, 0, sizeof *e);
@@ -62,6 +62,7 @@ static void env_close(Env *e) {
   FkVfsStats st;
   fkvfs_stats(e->v, &st);
   CHECK(st.unlock_publish_errors == 0, "no publish failed silently at unlock (%llu did)", (unsigned long long)st.unlock_publish_errors);
+  CHECK(e->allow_err || st.sync_publish_errors == 0, "no publish failed at xSync, where a rollback can swallow the error (%llu did)", (unsigned long long)st.sync_publish_errors);
   int rc = fkvfs_unregister(e->v);
   CHECK(rc == SQLITE_OK, "unregister: all connections were closed (rc=%d)", rc);
   fk_close(e->s);
@@ -239,6 +240,38 @@ static void t_spill(int batch) {
   CHECK(env_open(&e, pp) == 0, "reopen");
   db = openb("forkdb", 0);
   CHECK(db && scalar(db, "SELECT count(*) FROM t") == 20200 && integrity_ok(db), "20200 rows after reopen");
+  sqlite3_close(db);
+  env_close(&e);
+  unlink(pp);
+}
+
+static void t_failed_publish(void) {
+  printf("T12 a publish that fails part way (the store took some pages): the transaction fails, and the connection and the branch stay sound\n");
+  char pp[400];
+  Env e;
+  CHECK(env_open(&e, P("t12.fk", pp, sizeof pp)) == 0, "open");
+  e.allow_err = 1; /* the failures here are injected */
+  fkvfs_set_batch_atomic(e.v, 0); /* the journal path: the publish happens at xSync */
+  sqlite3 *db = openb("forkdb", 0);
+  CHECK(sql(db, "CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB)") == 0, "create");
+  fill(db, "t", 200, 100);
+  FkVfsStats s0, s1;
+  fkvfs_stats(e.v, &s0);
+  fkvfs_fail_publish_page(e.v, 2);
+  CHECK(sql(db, "BEGIN") == 0, "begin");
+  fill(db, "t", 300, 100);
+  int rc = sql(db, "COMMIT");
+  CHECK(rc != SQLITE_OK, "the commit fails (rc=%d)", rc);
+  sql(db, "ROLLBACK"); /* the transaction may already be over */
+  fkvfs_stats(e.v, &s1);
+  CHECK(s1.sync_publish_errors == s0.sync_publish_errors + 1, "the failure was at xSync (%llu)", (unsigned long long)(s1.sync_publish_errors - s0.sync_publish_errors));
+  CHECK(scalar(db, "SELECT count(*) FROM t") == 200 && integrity_ok(db), "back to 200 rows, integrity ok");
+  CHECK(sql(db, "INSERT INTO t(v) VALUES (x'01')") == 0 && scalar(db, "SELECT count(*) FROM t") == 201, "the connection is usable, and the next transaction commits");
+  sqlite3_close(db);
+  env_close(&e);
+  CHECK(env_open(&e, pp) == 0, "reopen");
+  db = openb("forkdb", 0);
+  CHECK(db && scalar(db, "SELECT count(*) FROM t") == 201 && integrity_ok(db), "201 rows after a reopen: the failed transaction left nothing");
   sqlite3_close(db);
   env_close(&e);
   unlink(pp);
@@ -592,6 +625,7 @@ int main(int argc, char **argv) {
     t_basic(0, 1);
     t_fork();
     t_fallback();
+    t_failed_publish();
     t_spill(1);
     t_spill(0);
     t_pagesize();

@@ -58,11 +58,12 @@ mutant 'a shrink is forgotten' 'e = fk_txn_commit(s, ns);' 'e = fk_txn_commit(s,
 mutant 'no read-your-writes' 'if (p) { memcpy(out, p, PG); return 0; }' 'if (0 && p) { memcpy(out, p, PG); return 0; }'
 mutant 'a writer is not held off by readers' 'if (b->nshared > 1) return SQLITE_BUSY;' 'if (0) return SQLITE_BUSY;'
 mutant 'a failed atomic commit is swallowed and its pages dropped' 'if (rc != SQLITE_OK) { v->st.commit_failed++; return SQLITE_IOERR_COMMIT_ATOMIC; }' 'if (rc != SQLITE_OK) { v->st.commit_failed++; discard(f); return SQLITE_OK; }'
-mutant 'a failed sync is reported as OK' $'  int rc = publish(f, 1);\n  if (rc == SQLITE_OK) f->v->st.sync_publish++;\n  return rc;' $'  int rc = publish(f, 1);\n  if (rc == SQLITE_OK) f->v->st.sync_publish++;\n  return SQLITE_OK;'
+mutant 'a failed sync is reported as OK' $'  int rc = publish(f, 1);\n  if (rc == SQLITE_OK) f->v->st.sync_publish++; else f->v->st.sync_publish_errors++;\n  return rc;' $'  int rc = publish(f, 1);\n  if (rc == SQLITE_OK) f->v->st.sync_publish++; else f->v->st.sync_publish_errors++;\n  return SQLITE_OK;'
 mutant 'the WAL pragma is not refused' 'sqlite3_stricmp(a[1], "journal_mode") == 0 && sqlite3_stricmp(a[2], "wal") == 0' '0'
 mutant 'synchronous=OFF is not refused' 'sqlite3_stricmp(a[1], "synchronous") == 0 && (' '0 && ('
 mutant 'a truncate keeps the staged pages beyond it' 'stage_drop_from(&f->st, pages);' '(void)pages;'
 mutant 'a no-op publish leaves its staging in place' 'if (rc == SQLITE_OK) discard(f);' 'if (rc == SQLITE_OK && !dirty(f)) discard(f);'
+mutant 'a failed commit keeps staging whose pages the store already took' 'fk_txn_abort(s); discard(f); goto done;' 'fk_txn_abort(s); goto done;'
 mutant 'a branch id is not checked' 'if (parse_branch(zName, &b) != 0 || !fk_branch_alive(v->s, b)) return SQLITE_CANTOPEN;' 'if (parse_branch(zName, &b) != 0) return SQLITE_CANTOPEN;'
 echo "   $caught of $total mutants caught"
 [ "$caught" = "$total" ] || { echo "harness gap: a mutant survived"; exit 1; }
