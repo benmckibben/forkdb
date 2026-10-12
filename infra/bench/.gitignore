@@ -1,0 +1,7 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+backend_override.tf
+*.auto.tfvars
+tofu.env

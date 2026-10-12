@@ -1,0 +1,61 @@
+#!/bin/bash
+# forkdb benchmark host bootstrap (cloud-init user data). Rendered by OpenTofu; shell variables are plain $NAME, template values are the ones with braces.
+# Everything is printed to the serial console as well as /var/log/forkdb-bench.log: that is how the results leave the host.
+set -uo pipefail
+exec > >(tee -a /var/log/forkdb-bench.log > /dev/console) 2>&1
+
+# backstop: power off after at most ${max_minutes} minutes whatever happens (instance-initiated shutdown is set to terminate)
+shutdown -h +${max_minutes} "forkdb-bench backstop" || true
+
+echo "FORKDB-BENCH-START $(date -u +%FT%TZ) source=${source_sha}"
+uname -srm
+grep -m1 "model name" /proc/cpuinfo
+
+dnf -y -q install gcc make tar gzip python3 util-linux e2fsprogs libasan libubsan || echo "WARN: dnf install failed"
+gcc --version | head -1
+
+mkdir -p /opt/forkdb && cd /opt/forkdb || exit 1
+if ! curl -fsSL "${source_url}" | tar xz; then echo "FORKDB-BENCH-FAILED source download"; sleep 600; shutdown -h now; exit 1; fi
+
+echo "--- block devices"
+lsblk -o NAME,SIZE,MODEL,MOUNTPOINT
+NVME=""
+EBS=""
+for d in $(lsblk -dno NAME); do
+  model=$(lsblk -dno MODEL "/dev/$d" | sed "s/ *$//")
+  lines=$(lsblk -n "/dev/$d" | wc -l)
+  case "$model" in
+    "Amazon EC2 NVMe Instance Storage") NVME=$d ;;
+    "Amazon Elastic Block Store") [ "$lines" -eq 1 ] && EBS=$d ;;
+  esac
+done
+echo "instance store: $${NVME:-none}  extra EBS: $${EBS:-none}"
+
+echo "--- build"
+if ! ./vfs/build.sh sqlite || ! ./vfs/build.sh bench batch; then echo "FORKDB-BENCH-FAILED build"; sleep 600; shutdown -h now; exit 1; fi
+
+run_on() { # label device
+  label=$1
+  dev=$2
+  [ -n "$dev" ] || { echo "BENCH-SKIP $label: no device"; return; }
+  if ! { mkfs.ext4 -q -F "/dev/$dev" && mkdir -p "/mnt/$label" && mount "/dev/$dev" "/mnt/$label"; }; then echo "BENCH-SKIP $label: mkfs or mount failed"; return; fi
+  echo "BENCH-BEGIN $label /dev/$dev $(lsblk -dno MODEL "/dev/$dev" | sed "s/ *$//") $(date -u +%T)"
+  timeout 1500 ./vfs/build/vfs_bench-batch "/mnt/$label" ${reps} | sed "s/^/[$label] /"
+  echo "BENCH-END $label $(date -u +%T)"
+  umount "/mnt/$label"
+}
+run_on nvme "$NVME"
+run_on ebs "$EBS"
+
+if [ "${run_tests}" = "1" ]; then
+  echo "--- scripts/test-vfs.sh quick"
+  timeout 900 ./scripts/test-vfs.sh quick 2>&1 | grep -E "^(SQLite|T11|   [0-9]+ I/O|checks=|  FAIL|  VIOLATION|==)" | cut -c1-160
+  echo "test-vfs rc=$${PIPESTATUS[0]}"
+fi
+
+echo "FORKDB-BENCH-DONE $(date -u +%FT%TZ)"
+# Hold the host up: the serial console buffer is only refreshed every few minutes, and it is wiped when the instance terminates, so the
+# results must be fetched (watch-console.sh) while the host is still running.
+sleep 600
+shutdown -h now
+
