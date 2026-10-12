@@ -14,14 +14,14 @@ No key pair, no instance role, no SSM. The source comes in by a **presigned S3 U
 
 ## Cost (my estimate from memory of the on-demand price: confirm before applying)
 
-| | per hour | this run (about 30 to 40 min) |
+| | per hour | this run (about 15 min: 5 to run, 10 held for the console) |
 |---|---|---|
-| `i4i.large` | about $0.17 | about $0.10 |
-| `i3.large` | about $0.16 | about $0.09 |
+| `i4i.large` | about $0.17 | about $0.05 |
+| `i3.large` | about $0.16 | about $0.04 |
 | 2 x 20 GB gp3 | about $0.0022 | under $0.01 |
 | public IPv4 | $0.005 | about $0.003 |
 
-About **$0.10 for the run, $4 a day if it were left running, which the backstop prevents.** An S3 object of about 150 KB and a state file of a few KB cost nothing measurable. Teardown leaves $0/day.
+About **$0.05 for the run (the first run took 4.5 minutes and cost about $0.02), $4 a day if it were left running, which the backstop prevents.** An S3 object of about 150 KB and a state file of a few KB cost nothing measurable. Teardown leaves $0/day.
 
 ## One-time, by hand: the IAM policy (least privilege)
 
@@ -55,9 +55,10 @@ infra/bench/package-source.sh            # tar the current commit, upload to s3:
 set -a; . ~/.config/forkdb-bench/tofu.env; set +a
 cd infra/bench && tofu init && tofu plan -out tfplan   # expect: 2 to add (security group, instance), 0 to change, 0 to destroy
 tofu apply tfplan
-# wait for the host to finish and power off (about 30 to 40 minutes), then:
-$(tofu output -raw read_results) > /tmp/bench-console.txt
-grep -E 'FORKDB-BENCH-DONE|^\\[(nvme|ebs)\\] R ' /tmp/bench-console.txt | head
+# the host runs for about 5 minutes, prints FORKDB-BENCH-DONE and then stays up for 10 more so the console can be fetched.
+# Save the console while it runs (timestamped copies, never overwritten; the console is empty after termination):
+infra/bench/watch-console.sh "$(tofu output -raw instance_id)" /tmp/forkdb-bench-console
+grep -aE 'FORKDB-BENCH-DONE|^\\[(nvme|ebs)\\] R ' /tmp/forkdb-bench-console/console-final.txt | head
 tofu destroy                              # the instance has already terminated itself; this removes the security group and state
 ```
 

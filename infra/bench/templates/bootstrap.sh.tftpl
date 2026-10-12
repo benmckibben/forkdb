@@ -15,7 +15,7 @@ dnf -y -q install gcc make tar gzip python3 util-linux e2fsprogs libasan libubsa
 gcc --version | head -1
 
 mkdir -p /opt/forkdb && cd /opt/forkdb || exit 1
-if ! curl -fsSL "${source_url}" | tar xz; then echo "FORKDB-BENCH-FAILED source download"; sleep 15; shutdown -h now; exit 1; fi
+if ! curl -fsSL "${source_url}" | tar xz; then echo "FORKDB-BENCH-FAILED source download"; sleep 600; shutdown -h now; exit 1; fi
 
 echo "--- block devices"
 lsblk -o NAME,SIZE,MODEL,MOUNTPOINT
@@ -32,7 +32,7 @@ done
 echo "instance store: $${NVME:-none}  extra EBS: $${EBS:-none}"
 
 echo "--- build"
-if ! ./vfs/build.sh sqlite || ! ./vfs/build.sh bench batch; then echo "FORKDB-BENCH-FAILED build"; sleep 15; shutdown -h now; exit 1; fi
+if ! ./vfs/build.sh sqlite || ! ./vfs/build.sh bench batch; then echo "FORKDB-BENCH-FAILED build"; sleep 600; shutdown -h now; exit 1; fi
 
 run_on() { # label device
   label=$1
@@ -54,6 +54,8 @@ if [ "${run_tests}" = "1" ]; then
 fi
 
 echo "FORKDB-BENCH-DONE $(date -u +%FT%TZ)"
-sleep 20 # let the console buffer flush
+# Hold the host up: the serial console buffer is only refreshed every few minutes, and it is wiped when the instance terminates, so the
+# results must be fetched (watch-console.sh) while the host is still running.
+sleep 600
 shutdown -h now
 
