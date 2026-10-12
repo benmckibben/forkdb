@@ -10,7 +10,7 @@ A branch is an immutable base plus an overlay of dirty pages, served to SQLite t
 
 - **Feasibility: high, complexity moderate.** The VFS interface is small and stable. Page lookup through a chain of layers is simple; flattening is needed for long chains.
 - **Diff and merge** cannot be done on pages (two branches that touch the same page may touch different rows). They are done on a logical layer with SQLite's session extension (changesets).
-- **Sharp edges:** WAL needs shared memory and real locking; transactions that don't fit the batch-atomic path need a journal fallback; the database is only visible to programs that open it through the VFS (so it needs to ship as a loadable extension plus a library); fsync ordering mistakes are the classic way to lose data; VACUUM rewrites every page and bloats a layer chain; layers need garbage collection.
+- **Sharp edges:** WAL needs shared memory and real locking; a transaction commits through the store, and SQLite's rollback journal is kept in memory (see Consequences, 1); the database is only visible to programs that open it through the VFS (so it needs to ship as a loadable extension plus a library); fsync ordering mistakes are the classic way to lose data; VACUUM rewrites every page and bloats a layer chain; layers need garbage collection.
 - **Why it fits the use:** SQLite is what agents and local tools already use; it is in-process, with no server to manage; and agent sandboxing (fork, run something destructive, review the diff, promote or discard) is the sharpest need.
 
 ### B. Embedded key-value store with Git-like DAG branching
@@ -56,7 +56,7 @@ Out:
 
 ## Consequences of the spike
 
-1. Ship a **pinned SQLite build** with the right compile flags; make batch-atomic an optional optimisation. *Update 2026-10-11: the VFS spike over the durable store found batch-atomic gives no benefit there (the store's commit is already atomic, so the journal can stay in memory); see [VFS-SPIKE.md](VFS-SPIKE.md). A pinned build is still needed if the session extension is required, which that spike did not test.*
+1. **Batch-atomic writes are not part of the design** (decided 2026-10-11). The spike first planned them as an optional optimisation that needed a custom SQLite build. The VFS spike over the durable store ([VFS-SPIKE.md](VFS-SPIKE.md)) showed they buy nothing: the store's commit is already atomic, so the VFS keeps SQLite's rollback journal in memory and publishes a transaction's pages in one store commit at `xSync`, at the same measured cost and with one fsync, on a stock SQLite build. forkdb is correct and equally fast without them, and nothing relies on them. (The VFS can still advertise them to a SQLite built with the flag, and the tests exercise that path as a comparison; that is not a feature.) A **pinned SQLite build** is still open, but only for the session extension, which needs its own compile flags: see the open question below.
 2. A snapshot is main file plus WAL; **fork checkpoints by default**.
 3. **Promote must be schema-aware**: refuse when the schema differs, warn or refuse for tables without a PRIMARY KEY.
 4. Plan **layer flattening** from the start.
@@ -64,6 +64,6 @@ Out:
 
 ## Open questions
 
-- Packaging: a loadable extension still runs inside whatever SQLite the host program links, which may lack the session extension and batch-atomic support. Does forkdb ship its own SQLite (simplest, but a second copy of SQLite in the process) or require a capable one?
+- Packaging: a loadable extension still runs inside whatever SQLite the host program links, which may lack the session extension (compile flags `SQLITE_ENABLE_SESSION` and `SQLITE_ENABLE_PREUPDATE_HOOK`). Does forkdb ship its own SQLite (simplest, but a second copy of SQLite in the process) or require a capable one?
 - Language for the real implementation (C for the VFS is natural; the CLI and library bindings could be Rust or Go).
 - ~~License~~ Decided: MIT OR Apache-2.0, as in the author's other projects.

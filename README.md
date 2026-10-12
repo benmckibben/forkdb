@@ -30,7 +30,7 @@ Needs gcc, curl, sha256sum and python3 (the first build downloads and compiles a
 
 ## Known facts that shape the project
 
-- Batch-atomic writes need a **custom SQLite build**, so forkdb has to be correct without them. On the durable store it does not need them: the VFS spike measured the same commit cost with and without ([docs/VFS-SPIKE.md](docs/VFS-SPIKE.md)).
+- Batch-atomic writes need a **custom SQLite build**, and forkdb does not use them: the VFS spike measured the same commit cost with and without ([docs/VFS-SPIKE.md](docs/VFS-SPIKE.md)), so they are out of the design.
 - In WAL mode a fork must carry the WAL or checkpoint first.
 - Changesets do **not** capture tables without a PRIMARY KEY or schema changes, so promote must check the schema itself.
 

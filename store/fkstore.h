@@ -64,6 +64,10 @@ int fk_discard(fk_store *s, uint32_t b);                 /* branch 0 cannot be d
 /* A transaction: pages written here become visible, all together, when commit returns FK_OK. */
 int fk_txn_begin(fk_store *s, uint32_t b);
 int fk_txn_write(fk_store *s, uint32_t pgno, const void *page);
+/* The same, without the copy: page must be a malloc'd buffer of FK_PAGE bytes. On FK_OK the store owns it (it frees it at commit or
+ * abort, so the caller must not touch it again); on any error the caller still owns it. For a caller that stages a transaction's
+ * pages anyway and would otherwise hold every page twice until the commit. */
+int fk_txn_write_owned(fk_store *s, uint32_t pgno, void *page);
 int fk_txn_commit(fk_store *s, uint32_t new_size_pages); /* every written pgno must be < new_size_pages */
 void fk_txn_abort(fk_store *s);
 

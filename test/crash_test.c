@@ -94,7 +94,15 @@ static int run_op(fk_store *s, const Op *o) {
     if (rc) return rc;
     for (uint32_t j = 0; j < o->np; j++) {
       gen_page(o->key + j, buf);
-      rc = fk_txn_write(s, o->pgno[j], buf);
+      if (j % 2) { /* half the pages go in through the ownership-transfer call, so the power-loss workloads cover it */
+        uint8_t *d = malloc(FK_PAGE);
+        if (!d) { fk_txn_abort(s); return FK_ENOMEM; }
+        memcpy(d, buf, FK_PAGE);
+        rc = fk_txn_write_owned(s, o->pgno[j], d);
+        if (rc) free(d);
+      } else {
+        rc = fk_txn_write(s, o->pgno[j], buf);
+      }
       if (rc) { fk_txn_abort(s); return rc; }
     }
     rc = fk_txn_commit(s, o->new_size);
