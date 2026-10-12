@@ -23,6 +23,7 @@ typedef struct {
   uint64_t sync_publish;          /* staged pages published at xSync (the journal path) */
   uint64_t unlock_publish;        /* staged pages published when the write lock was dropped (synchronous=OFF) */
   uint64_t unlock_publish_errors; /* ... and how many of those failed (SQLite cannot be told: unlock has no error path) */
+  uint64_t sync_publish_errors;   /* publishes at xSync that failed (SQLite is told, and a rollback may swallow it, so a test must look here) */
   uint64_t store_commits;         /* fk_txn_commit calls that succeeded */
   uint64_t pages_published;       /* pages handed to the store */
   uint64_t pages_deduped;         /* staged pages dropped at publish because they equal the committed page */
@@ -42,6 +43,8 @@ void fkvfs_stats(const FkVfs *v, FkVfsStats *out);
 void fkvfs_set_batch_atomic(FkVfs *v, int on);
 /* Test hook: the next n atomic commits fail. */
 void fkvfs_fail_commits(FkVfs *v, int n);
+/* Test hook: the next publish fails (a non-fatal store error, as out of memory would be) when it hands over its nth page; 0 turns it off. */
+void fkvfs_fail_publish_page(FkVfs *v, int n);
 /* The database name for a branch, e.g. "b3". */
 void fkvfs_branch_name(uint32_t branch, char *buf, size_t n);
 

@@ -50,7 +50,7 @@ static sqlite3 *openb(const char *vfs, uint32_t b) {
 }
 
 /* a store in a real file, with the VFS over it */
-typedef struct { fk_io io; fk_store *s; FkVfs *v; char path[320]; } Env;
+typedef struct { fk_io io; fk_store *s; FkVfs *v; char path[320]; int allow_err; } Env;
 
 static int env_open(Env *e, const char *path) {
   memset(e, 0, sizeof *e);
@@ -62,6 +62,7 @@ static void env_close(Env *e) {
   FkVfsStats st;
   fkvfs_stats(e->v, &st);
   CHECK(st.unlock_publish_errors == 0, "no publish failed silently at unlock (%llu did)", (unsigned long long)st.unlock_publish_errors);
+  CHECK(e->allow_err || st.sync_publish_errors == 0, "no publish failed at xSync, where a rollback can swallow the error (%llu did)", (unsigned long long)st.sync_publish_errors);
   int rc = fkvfs_unregister(e->v);
   CHECK(rc == SQLITE_OK, "unregister: all connections were closed (rc=%d)", rc);
   fk_close(e->s);
@@ -240,6 +241,87 @@ static void t_spill(int batch) {
   db = openb("forkdb", 0);
   CHECK(db && scalar(db, "SELECT count(*) FROM t") == 20200 && integrity_ok(db), "20200 rows after reopen");
   sqlite3_close(db);
+  env_close(&e);
+  unlink(pp);
+}
+
+static void t_failed_publish(void) {
+  printf("T12 a publish that fails part way (the store took some pages): the transaction fails, and the connection and the branch stay sound\n");
+  char pp[400];
+  Env e;
+  CHECK(env_open(&e, P("t12.fk", pp, sizeof pp)) == 0, "open");
+  e.allow_err = 1; /* the failures here are injected */
+  fkvfs_set_batch_atomic(e.v, 0); /* the journal path: the publish happens at xSync */
+  sqlite3 *db = openb("forkdb", 0);
+  CHECK(sql(db, "CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB)") == 0, "create");
+  fill(db, "t", 200, 100);
+  FkVfsStats s0, s1;
+  fkvfs_stats(e.v, &s0);
+  fkvfs_fail_publish_page(e.v, 2);
+  CHECK(sql(db, "BEGIN") == 0, "begin");
+  fill(db, "t", 300, 100);
+  int rc = sql(db, "COMMIT");
+  CHECK(rc != SQLITE_OK, "the commit fails (rc=%d)", rc);
+  sql(db, "ROLLBACK"); /* the transaction may already be over */
+  fkvfs_stats(e.v, &s1);
+  CHECK(s1.sync_publish_errors == s0.sync_publish_errors + 1, "the failure was at xSync (%llu)", (unsigned long long)(s1.sync_publish_errors - s0.sync_publish_errors));
+  CHECK(scalar(db, "SELECT count(*) FROM t") == 200 && integrity_ok(db), "back to 200 rows, integrity ok");
+  CHECK(sql(db, "INSERT INTO t(v) VALUES (x'01')") == 0 && scalar(db, "SELECT count(*) FROM t") == 201, "the connection is usable, and the next transaction commits");
+  sqlite3_close(db);
+  env_close(&e);
+  CHECK(env_open(&e, pp) == 0, "reopen");
+  db = openb("forkdb", 0);
+  CHECK(db && scalar(db, "SELECT count(*) FROM t") == 201 && integrity_ok(db), "201 rows after a reopen: the failed transaction left nothing");
+  sqlite3_close(db);
+  env_close(&e);
+  unlink(pp);
+}
+
+static int write_filled(sqlite3_file *f, uint32_t pg, uint8_t byte) {
+  uint8_t buf[FK_PAGE];
+  memset(buf, byte, sizeof buf);
+  return f->pMethods->xWrite(f, buf, (int)FK_PAGE, (sqlite3_int64)pg * FK_PAGE);
+}
+
+static int page_is(sqlite3_file *f, uint32_t pg, uint8_t byte) {
+  uint8_t buf[FK_PAGE];
+  if (f->pMethods->xRead(f, buf, (int)FK_PAGE, (sqlite3_int64)pg * FK_PAGE) != SQLITE_OK) return 0;
+  for (unsigned i = 0; i < FK_PAGE; i++) if (buf[i] != byte) return 0;
+  return 1;
+}
+
+/* Truncate, then write a page back inside the old size. Publish must keep that page and zero only the hole. */
+static void t_trunc_rewrite(void) {
+  printf("T13 a page written back into a truncated range survives publish\n");
+  char pp[400];
+  Env e;
+  int opened = env_open(&e, P("t13.fk", pp, sizeof pp));
+  CHECK(opened == 0, "open");
+  if (opened != 0) return;
+  sqlite3_vfs *vfs = sqlite3_vfs_find("forkdb");
+  CHECK(vfs != NULL, "vfs is registered");
+  sqlite3_file *f = vfs ? calloc(1, (size_t)vfs->szOsFile) : NULL;
+  CHECK(f != NULL, "file buffer");
+  int orc = f ? vfs->xOpen(vfs, "b0", f, SQLITE_OPEN_MAIN_DB | SQLITE_OPEN_READWRITE, NULL) : SQLITE_NOMEM;
+  CHECK(orc == SQLITE_OK, "open b0 (rc=%d)", orc);
+  if (orc == SQLITE_OK) {
+    for (uint32_t pg = 0; pg < 6; pg++) CHECK(write_filled(f, pg, (uint8_t)(0x10 + pg)) == SQLITE_OK, "write page %u", pg);
+    CHECK(f->pMethods->xSync(f, SQLITE_SYNC_NORMAL) == SQLITE_OK, "commit six pages");
+    CHECK(f->pMethods->xTruncate(f, 2 * (sqlite3_int64)FK_PAGE) == SQLITE_OK, "truncate to 2 pages");
+    CHECK(write_filled(f, 0, 0xB0) == SQLITE_OK, "rewrite a page below the truncate point");
+    CHECK(write_filled(f, 2, 0xB2) == SQLITE_OK, "rewrite the first page of the hole");
+    CHECK(write_filled(f, 4, 0xB4) == SQLITE_OK, "write back further into the old size");
+    CHECK(f->pMethods->xSync(f, SQLITE_SYNC_NORMAL) == SQLITE_OK, "publish the truncate and the rewritten pages");
+    sqlite3_int64 sz = -1;
+    CHECK(f->pMethods->xFileSize(f, &sz) == SQLITE_OK && sz == 5 * (sqlite3_int64)FK_PAGE, "size is 5 pages (%lld)", (long long)sz);
+    CHECK(page_is(f, 0, 0xB0), "page 0 is the rewrite below the truncate point");
+    CHECK(page_is(f, 1, 0x11), "page 1 is unchanged");
+    CHECK(page_is(f, 2, 0xB2), "page 2 keeps the bytes written into the truncated range");
+    CHECK(page_is(f, 3, 0x00), "page 3, the hole, is zeros");
+    CHECK(page_is(f, 4, 0xB4), "page 4 keeps the bytes written into the re-expanded area");
+    f->pMethods->xClose(f);
+  }
+  free(f);
   env_close(&e);
   unlink(pp);
 }
@@ -592,6 +674,8 @@ int main(int argc, char **argv) {
     t_basic(0, 1);
     t_fork();
     t_fallback();
+    t_failed_publish();
+    t_trunc_rewrite();
     t_spill(1);
     t_spill(0);
     t_pagesize();

@@ -64,7 +64,15 @@ static int garbage_state_ok(fk_store *s) {
 static int commit_many(fk_store *s, uint32_t b, const uint32_t *pages, const int *vers, uint32_t n, uint32_t size) {
   uint8_t p[FK_PAGE];
   if (fk_txn_begin(s, b)) return -1;
-  for (uint32_t i = 0; i < n; i++) { page(p, vers[i]); if (fk_txn_write(s, pages[i], p)) { fk_txn_abort(s); return -1; } }
+  for (uint32_t i = 0; i < n; i++) {
+    page(p, vers[i]);
+    if (i % 2) { /* every other page goes in through the ownership-transfer call */
+      uint8_t *d = malloc(FK_PAGE);
+      if (!d) { fk_txn_abort(s); return -1; }
+      memcpy(d, p, FK_PAGE);
+      if (fk_txn_write_owned(s, pages[i], d)) { free(d); fk_txn_abort(s); return -1; }
+    } else if (fk_txn_write(s, pages[i], p)) { fk_txn_abort(s); return -1; }
+  }
   return fk_txn_commit(s, size);
 }
 
@@ -156,6 +164,29 @@ int main(void) {
   snprintf(path, sizeof path, "%s/store.fk", dir);
   fk_io io; fk_store *s = NULL;
 
+  printf("== ownership-transfer write: the store takes the buffer on success, the caller keeps it on error\n");
+  {
+    char po[300];
+    snprintf(po, sizeof po, "%s/owned.fk", dir);
+    fk_io oio; fk_store *os = NULL;
+    CHECK(open_path(po, &oio, &os), "open a store");
+    uint8_t *d = malloc(FK_PAGE);
+    page(d, 7);
+    CHECK(fk_txn_write_owned(os, 0, d) == FK_EINVAL, "no transaction open: refused, the caller still owns the buffer (it is handed over again below)");
+    CHECK(fk_txn_begin(os, 0) == 0 && fk_txn_write_owned(os, 0, NULL) == FK_EINVAL, "a NULL buffer is refused");
+    CHECK(fk_txn_write_owned(os, 0, d) == 0, "accepted: the store owns the buffer now (it must not be touched again)");
+    uint8_t *d2 = malloc(FK_PAGE);
+    page(d2, 8);
+    CHECK(fk_txn_write_owned(os, 1, d2) == 0 && fk_txn_commit(os, 2) == 0, "two pages handed over and committed");
+    CHECK(has(os, 0, 0, 7) && has(os, 0, 1, 8), "both read back, and the store did not alias or free them early");
+    uint8_t *d3 = malloc(FK_PAGE);
+    page(d3, 9);
+    CHECK(fk_txn_begin(os, 0) == 0 && fk_txn_write_owned(os, 0, d3) == 0, "a page handed over in a transaction that is then aborted");
+    fk_txn_abort(os); /* frees d3: the address sanitizer reports a leak or a double free here if it does not */
+    CHECK(has(os, 0, 0, 7), "the abort left the committed page alone");
+    fk_close(os); fk_file_close(&oio);
+    unlink(po);
+  }
   printf("== CRC-32C: portable and hardware implementations agree with a bit-by-bit reference and with each other\n");
   {
     xs_state = 88172645463325252ull;
