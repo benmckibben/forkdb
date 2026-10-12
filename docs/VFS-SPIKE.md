@@ -86,7 +86,7 @@ Needs gcc, curl, sha256sum and python3. Run the benchmark on the disk you care a
 
 ## Suggested next steps (for you to pick from)
 
-1. Drop batch-atomic from the design (DESIGN.md consequence 1) and say so in the README.
+1. ~~Drop batch-atomic from the design (DESIGN.md consequence 1) and say so in the README.~~ Done, in the follow-up docs PR.
 2. A store call to read a page of the open transaction, so the VFS stops staging (finding 5). A small store change with its own tests.
 3. Run the same benchmark on a real SSD or NVMe.
 4. The session extension on top of the VFS: diff, promote and undo on a branch.
