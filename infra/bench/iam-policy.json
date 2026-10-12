@@ -1,0 +1,123 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RunBenchInstanceOnlyTaggedAndOnlyTheseTypes",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:us-east-1:ACCOUNT_ID:instance/*",
+      "Condition": {
+        "StringEquals": { "aws:RequestTag/Project": "forkdb-bench" },
+        "ForAllValues:StringEquals": { "ec2:InstanceType": ["i4i.large", "i3.large"] }
+      }
+    },
+    {
+      "Sid": "RunBenchVolumesAndNics",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": [
+        "arn:aws:ec2:us-east-1:ACCOUNT_ID:volume/*",
+        "arn:aws:ec2:us-east-1:ACCOUNT_ID:network-interface/*"
+      ],
+      "Condition": { "StringEquals": { "aws:RequestTag/Project": "forkdb-bench" } }
+    },
+    {
+      "Sid": "RunInstancesSupportingResources",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": [
+        "arn:aws:ec2:us-east-1::image/*",
+        "arn:aws:ec2:us-east-1:ACCOUNT_ID:subnet/*"
+      ]
+    },
+    {
+      "Sid": "RunInstancesWithTheBenchSecurityGroup",
+      "Effect": "Allow",
+      "Action": "ec2:RunInstances",
+      "Resource": "arn:aws:ec2:us-east-1:ACCOUNT_ID:security-group/*",
+      "Condition": { "StringEquals": { "ec2:ResourceTag/Project": "forkdb-bench" } }
+    },
+    {
+      "Sid": "TagOnCreateOnly",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "arn:aws:ec2:us-east-1:ACCOUNT_ID:*/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": ["RunInstances", "CreateSecurityGroup"],
+          "aws:RequestTag/Project": "forkdb-bench"
+        }
+      }
+    },
+    {
+      "Sid": "CreateTheBenchSecurityGroup",
+      "Effect": "Allow",
+      "Action": "ec2:CreateSecurityGroup",
+      "Resource": "arn:aws:ec2:us-east-1:ACCOUNT_ID:security-group/*",
+      "Condition": { "StringEquals": { "aws:RequestTag/Project": "forkdb-bench" } }
+    },
+    {
+      "Sid": "CreateSecurityGroupInTheDefaultVpc",
+      "Effect": "Allow",
+      "Action": "ec2:CreateSecurityGroup",
+      "Resource": "arn:aws:ec2:us-east-1:ACCOUNT_ID:vpc/*"
+    },
+    {
+      "Sid": "ManageAndDeleteOnlyTheBenchSecurityGroup",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:DeleteSecurityGroup"
+      ],
+      "Resource": "arn:aws:ec2:us-east-1:ACCOUNT_ID:security-group/*",
+      "Condition": { "StringEquals": { "ec2:ResourceTag/Project": "forkdb-bench" } }
+    },
+    {
+      "Sid": "TerminateAndReadConsoleOfBenchInstancesOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:TerminateInstances",
+        "ec2:GetConsoleOutput"
+      ],
+      "Resource": "arn:aws:ec2:us-east-1:ACCOUNT_ID:instance/*",
+      "Condition": { "StringEquals": { "ec2:ResourceTag/Project": "forkdb-bench" } }
+    },
+    {
+      "Sid": "ReadOnlyDescribe",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeAccountAttributes",
+        "ec2:DescribeAvailabilityZones",
+        "ec2:DescribeImages",
+        "ec2:DescribeInstanceAttribute",
+        "ec2:DescribeInstanceCreditSpecifications",
+        "ec2:DescribeInstanceStatus",
+        "ec2:DescribeInstanceTypeOfferings",
+        "ec2:DescribeInstanceTypes",
+        "ec2:DescribeInstances",
+        "ec2:DescribeNetworkInterfaces",
+        "ec2:DescribeSecurityGroupRules",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeTags",
+        "ec2:DescribeVolumes",
+        "ec2:DescribeVpcs"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "StateAndSourceBucketListOnlyThisPrefix",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::benmckibben-openclaw-infra",
+      "Condition": { "StringLike": { "s3:prefix": ["forkdb/bench/*", "forkdb/bench"] } }
+    },
+    {
+      "Sid": "StateAndSourceObjectsOnlyThisPrefix",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::benmckibben-openclaw-infra/forkdb/bench/*"
+    }
+  ]
+}
