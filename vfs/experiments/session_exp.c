@@ -238,7 +238,9 @@ static void x6(void) {
   apply(dp, n, p, "disjoint"); printf("    parent: %s -> %s\n", before, qs(dp, "SELECT count(*)||':'||sum(length(v)) FROM t1"));
   printf("  (b) undo: invert the changeset and apply\n");
   int ni = 0; void *pi = 0; sqlite3changeset_invert(n, p, &ni, &pi);
-  apply(dp, ni, pi, "inverse"); printf("    parent back to: %s (id=10 v=%s, id=500 present=%lld)\n", qs(dp, "SELECT count(*)||':'||sum(length(v)) FROM t1"), "x", q1(dp, "SELECT count(*) FROM t1 WHERE id=500"));
+  apply(dp, ni, pi, "inverse");
+  snprintf(before, sizeof before, "%s", qs(dp, "SELECT v FROM t1 WHERE id=10"));
+  printf("    parent back to: %s (id=10 v=%s, id=500 present=%lld)\n", qs(dp, "SELECT count(*)||':'||sum(length(v)) FROM t1"), before, q1(dp, "SELECT count(*) FROM t1 WHERE id=500"));
   printf("  (c) parent changed a row F also changed: replay must abort and leave the parent untouched\n");
   sqlite3 *d2 = openb(f2); ex(d2, "UPDATE t1 SET v='P2' WHERE id=20; UPDATE t1 SET v='P2' WHERE id=60");
   snprintf(before, sizeof before, "%s", qs(d2, "SELECT group_concat(v) FROM (SELECT v FROM t1 WHERE id IN (10,20,60) ORDER BY id)"));

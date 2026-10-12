@@ -87,7 +87,7 @@
     parent: 100:290 -> 100:287
   (b) undo: invert the changeset and apply
   apply[inverse]: rc=0 (not an error), conflicts DATA=0 NOTFOUND=0 CONFLICT=0 CONSTRAINT=0 FK=0, log msgs=0
-    parent back to: 100:290 (id=10 v=x, id=500 present=0)
+    parent back to: 100:290 (id=10 v=v10, id=500 present=0)
   (c) parent changed a row F also changed: replay must abort and leave the parent untouched
     conflict callback: DATA
   apply[same row changed on both sides]: rc=4 (query aborted), conflicts DATA=1 NOTFOUND=0 CONFLICT=0 CONSTRAINT=0 FK=0, log msgs=0
