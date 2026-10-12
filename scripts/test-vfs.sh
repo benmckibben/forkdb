@@ -62,6 +62,7 @@ mutant 'a failed sync is reported as OK' $'  int rc = publish(f, 1);\n  if (rc =
 mutant 'the WAL pragma is not refused' 'sqlite3_stricmp(a[1], "journal_mode") == 0 && sqlite3_stricmp(a[2], "wal") == 0' '0'
 mutant 'synchronous=OFF is not refused' 'sqlite3_stricmp(a[1], "synchronous") == 0 && (' '0 && ('
 mutant 'a truncate keeps the staged pages beyond it' 'stage_drop_from(&f->st, pages);' '(void)pages;'
+mutant 'a no-op publish leaves its staging in place' 'if (rc == SQLITE_OK) discard(f);' 'if (rc == SQLITE_OK && !dirty(f)) discard(f);'
 mutant 'a branch id is not checked' 'if (parse_branch(zName, &b) != 0 || !fk_branch_alive(v->s, b)) return SQLITE_CANTOPEN;' 'if (parse_branch(zName, &b) != 0) return SQLITE_CANTOPEN;'
 echo "   $caught of $total mutants caught"
 [ "$caught" = "$total" ] || { echo "harness gap: a mutant survived"; exit 1; }
