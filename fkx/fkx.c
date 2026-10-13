@@ -17,16 +17,10 @@
 #define MAGIC2 'X'
 #define MAGIC3 '1'
 
-typedef struct {
-  fkx_kind kind;
-  int ro;
-  unsigned nlen, nundo;
-  uint64_t uid, origin, base, owner;
-  char name[FKX_NAME_MAX + 1];
-  uint64_t undo[FKX_UNDO_KEEP_MAX][2]; /* newest first: before, after */
-} Meta;
+typedef struct Trk { void *h; void (*fn)(void *); struct Trk *next; } Trk; /* an open handle fkx_close has to abort */
 
 struct fkx {
+  Trk *trk;
   fk_io io;
   int own_file, own_prealloc;
   fk_store *s;
@@ -319,6 +313,7 @@ int fkx_open(const char *path, const fkx_options *o, fkx **out) {
 
 void fkx_close(fkx *x) {
   if (!x) return;
+  while (x->trk) { Trk *t = x->trk; x->trk = t->next; void *h = t->h; void (*fn)(void *) = t->fn; free(t); fn(h); } /* a replay or diff handle the host forgot is rolled back */
   fkvfs_unregister(x->vfs);
   fk_close(x->s);
   if (x->own_prealloc) fk_prealloc_close(&x->io);
@@ -576,6 +571,35 @@ static int undo_snapshot(fkx *x, uint32_t t, const Meta *tm, uint64_t *uid, uint
   return rc;
 }
 
+/* 1 of a promote: the snapshot of the target as it is (ub = 0 when retention is 0) */
+static int undo_before(fkx *x, uint32_t pid, const Meta *pm, uint64_t *ub) {
+  uint32_t idb;
+  *ub = 0;
+  if (!x->undo_keep) return FKX_OK;
+  if (alive_count(x) + 2 > FK_MAX_BRANCHES) return failf(x, FKX_ELIMIT, "a promote records an undo point (two store branches) and %u of %u are in use", alive_count(x), (unsigned)FK_MAX_BRANCHES);
+  return undo_snapshot(x, pid, pm, ub, &idb);
+}
+
+/* 3 and 4 of a promote: the snapshot of the target as the promote left it, then the list in the target's metadata (newest first, oldest dropped) */
+static int undo_after(fkx *x, uint32_t pid, const Meta *pm, uint64_t ub, int *recorded) {
+  unsigned keep = x->undo_keep;
+  uint64_t ua = 0;
+  uint32_t ida;
+  int rc;
+  if (!keep) return FKX_OK;
+  if ((rc = undo_snapshot(x, pid, pm, &ua, &ida))) return rc;
+  Meta np = *pm;
+  uint64_t dropped[FKX_UNDO_KEEP_MAX + 1][2];
+  unsigned nd = 0;
+  if (np.nundo >= keep) { for (unsigned e = keep - 1; e < np.nundo; e++) { dropped[nd][0] = np.undo[e][0]; dropped[nd][1] = np.undo[e][1]; nd++; } np.nundo = keep - 1; }
+  for (unsigned e = np.nundo; e > 0; e--) { np.undo[e][0] = np.undo[e - 1][0]; np.undo[e][1] = np.undo[e - 1][1]; }
+  np.undo[0][0] = ub; np.undo[0][1] = ua; np.nundo++;
+  if ((rc = meta_store(x, pid, &np))) return rc;
+  *recorded = 1;
+  for (unsigned i = 0; i < nd; i++) for (int k = 0; k < 2; k++) if ((rc = discard_uid(x, dropped[i][k]))) return rc;
+  return FKX_OK;
+}
+
 int fkx_promote(fkx *x, const char *name, const fkx_promote_opts *o, fkx_promote_result *out) {
   fkx_promote_result local;
   if (!out) out = &local;
@@ -600,38 +624,27 @@ int fkx_promote(fkx *x, const char *name, const fkx_promote_opts *o, fkx_promote
 #ifdef FKX_BUG_FF_WITHOUT_STATE_CHECK
   sp = sb; /* mutant: the target is taken to be where the fork started, whatever it holds */
 #endif
-  if (sp != sb) {
-    out->method = FKX_METHOD_REPLAY;
-    return failf(x, FKX_ENOSESSION, "'%s' has moved since '%s' was forked: this build can only fast-forward, and replaying needs the session extension", pm.name, name);
+  if (sp != sb || refs(x, pid)) {
+    /* the target has moved, or a connection is open on it (a reset would leave that connection's cache stale): replay the fork's work in one
+     * SQLite transaction on the target, which needs the session driver */
+    int rrc = fkx_i_replay_promote(x, fid, &fm, pid, &pm, bid, out);
+    if (sp != sb || (rrc != FKX_ENOSESSION && rrc != FKX_EREFUSED)) return rrc;
+    char why[256];
+    snprintf(why, sizeof why, "%s", x->err);
+    out->method = FKX_METHOD_FAST_FORWARD;
+    return failf(x, FKX_EBUSY, "%u connection(s) are open on '%s': close them first (a fast-forward resets it, and a connection's cache would go stale; a replay was not possible: %s)", refs(x, pid), pm.name, why);
   }
   out->method = FKX_METHOD_FAST_FORWARD;
-  if (refs(x, pid)) return failf(x, FKX_EBUSY, "%u connection(s) are open on '%s': close them first (a fast-forward resets it, and a connection's cache would go stale)", refs(x, pid), pm.name);
   if (out->dry_run) return FKX_OK;
-  unsigned keep = x->undo_keep;
-  uint64_t ub = 0, ua = 0;
-  uint32_t idb, ida;
-  if (keep) {
-    if (alive_count(x) + 2 > FK_MAX_BRANCHES) return failf(x, FKX_ELIMIT, "a promote records an undo point (two store branches) and %u of %u are in use", alive_count(x), (unsigned)FK_MAX_BRANCHES);
+  uint64_t ub = 0;
 #ifndef FKX_BUG_RESET_BEFORE_UNDO_SNAPSHOT
-    if ((rc = undo_snapshot(x, pid, &pm, &ub, &idb))) return rc;      /* 1: the state before */
+  if ((rc = undo_before(x, pid, &pm, &ub))) return rc;                 /* 1: the state before */
 #endif
-  }
   if ((rc = fk_reset(x->s, pid, fid)) != FK_OK) return store_fail(x, rc, "resetting the target");   /* 2: the promote itself */
-  if (!keep) return FKX_OK;
 #ifdef FKX_BUG_RESET_BEFORE_UNDO_SNAPSHOT
-  if ((rc = undo_snapshot(x, pid, &pm, &ub, &idb))) return rc;        /* mutant: the "before" is taken after the reset */
+  if ((rc = undo_before(x, pid, &pm, &ub))) return rc;                 /* mutant: the "before" is taken after the reset */
 #endif
-  if ((rc = undo_snapshot(x, pid, &pm, &ua, &ida))) return rc;        /* 3: the state after */
-  Meta np = pm;                                                         /* 4: list them, newest first */
-  uint64_t dropped[FKX_UNDO_KEEP_MAX + 1][2];
-  unsigned nd = 0;
-  if (np.nundo >= keep) { for (unsigned e = keep - 1; e < np.nundo; e++) { dropped[nd][0] = np.undo[e][0]; dropped[nd][1] = np.undo[e][1]; nd++; } np.nundo = keep - 1; }
-  for (unsigned e = np.nundo; e > 0; e--) { np.undo[e][0] = np.undo[e - 1][0]; np.undo[e][1] = np.undo[e - 1][1]; }
-  np.undo[0][0] = ub; np.undo[0][1] = ua; np.nundo++;
-  if ((rc = meta_store(x, pid, &np))) return rc;
-  out->undo_recorded = 1;
-  for (unsigned i = 0; i < nd; i++) for (int k = 0; k < 2; k++) if ((rc = discard_uid(x, dropped[i][k]))) return rc;
-  return FKX_OK;
+  return undo_after(x, pid, &pm, ub, &out->undo_recorded);              /* 3 and 4: the state after, and the list */
 }
 
 int fkx_undo(fkx *x, const char *name, fkx_promote_result *out) {
@@ -654,10 +667,45 @@ int fkx_undo(fkx *x, const char *name, fkx_promote_result *out) {
 #ifdef FKX_BUG_UNDO_WITHOUT_STATE_CHECK
     saf = sp; /* mutant: the target is taken to be where the promote left it */
 #endif
-    if (sp != saf) return failf(x, FKX_ENOSESSION, "'%s' has changed since the promote: this build can only undo exactly, and undoing by replay needs the session extension", name);
-    if (refs(x, pid)) return failf(x, FKX_EBUSY, "%u connection(s) are open on '%s': close them first", refs(x, pid), name);
-    if ((rc = fk_reset(x->s, pid, idb)) != FK_OK) return store_fail(x, rc, "resetting the target");
-    out->method = FKX_METHOD_FAST_FORWARD;
+    if (sp != saf || refs(x, pid)) {
+      /* the target has changed since the promote (its later work is kept), or a connection is open on it: undo by replaying the inverse */
+      /* A dry run first, so that a conflict or a refusal is reported with nothing changed. Then the entry is removed BEFORE the replay: a cut
+       * between the two leaves a promote that was not undone (and no way to undo it), which is safe; the other order would leave a promote that
+       * was undone and an entry that can never be applied again (its replay would conflict with what is already there). */
+      out->dry_run = 1;
+      int rrc = fkx_i_replay_undo(x, pid, &pm, out);
+      out->dry_run = 0;
+      if (rrc != FKX_OK) {
+        if (sp == saf && (rrc == FKX_ENOSESSION || rrc == FKX_EREFUSED)) {
+          char why[256];
+          snprintf(why, sizeof why, "%s", x->err);
+          return failf(x, FKX_EBUSY, "%u connection(s) are open on '%s': close them first (an undo by reset would leave their caches stale; an undo by replay was not possible: %s)", refs(x, pid), name, why);
+        }
+        return rrc;
+      }
+      uint64_t r0 = pm.undo[0][0], r1 = pm.undo[0][1];
+      Meta rp = pm;
+      for (unsigned e = 1; e < rp.nundo; e++) { rp.undo[e - 1][0] = rp.undo[e][0]; rp.undo[e - 1][1] = rp.undo[e][1]; }
+      rp.nundo--;
+#ifndef FKX_BUG_UNDO_ENTRY_AFTER_REPLAY
+      if ((rc = meta_store(x, pid, &rp))) return rc;
+#endif
+      rrc = fkx_i_replay_undo(x, pid, &pm, out);
+      if (rrc != FKX_OK) {
+#ifndef FKX_BUG_UNDO_ENTRY_AFTER_REPLAY
+        (void)meta_store(x, pid, &pm); /* unexpected after a clean dry run: put the entry back */
+#endif
+        return rrc;
+      }
+#ifdef FKX_BUG_UNDO_ENTRY_AFTER_REPLAY
+      if ((rc = meta_store(x, pid, &rp))) return rc; /* mutant: the entry is removed after the replay: a cut leaves a promote undone and an entry that can never be applied */
+#endif
+      if ((rc = discard_uid(x, r0)) || (rc = discard_uid(x, r1))) return rc;
+      return FKX_OK;
+    } else {
+      if ((rc = fk_reset(x->s, pid, idb)) != FK_OK) return store_fail(x, rc, "resetting the target");
+      out->method = FKX_METHOD_FAST_FORWARD;
+    }
   }
   uint64_t u0 = pm.undo[0][0], u1 = pm.undo[0][1];
   Meta np = pm;
@@ -666,4 +714,47 @@ int fkx_undo(fkx *x, const char *name, fkx_promote_result *out) {
   if ((rc = meta_store(x, pid, &np))) return rc;
   if ((rc = discard_uid(x, u0)) || (rc = discard_uid(x, u1))) return rc;
   return FKX_OK;
+}
+
+/* ---------- for the session driver (fkx_session.c) and its stand-in ---------- */
+int fkx_i_fail(fkx *x, int code, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(x->err, sizeof x->err, fmt, ap);
+  va_end(ap);
+  return code;
+}
+int fkx_i_resolve(fkx *x, const char *ref, uint32_t *id, Meta *m) { return resolve(x, ref, id, m); }
+int fkx_i_find_uid(fkx *x, uint64_t uid, uint32_t *id, Meta *m) { return find_uid(x, uid, id, m); }
+uint32_t fkx_i_refs(fkx *x, uint32_t id) { return refs(x, id); }
+int fkx_i_undo_before(fkx *x, uint32_t pid, const Meta *pm, uint64_t *ub) { return undo_before(x, pid, pm, ub); }
+int fkx_i_undo_after(fkx *x, uint32_t pid, const Meta *pm, uint64_t ub, int *recorded) { return undo_after(x, pid, pm, ub, recorded); }
+int fkx_i_discard_uid(fkx *x, uint64_t uid) { return discard_uid(x, uid); }
+unsigned fkx_i_undo_keep(const fkx *x) { return x->undo_keep; }
+void fkx_i_ref(uint64_t uid, char out[24]) { snprintf(out, 24, "#%016llx", (unsigned long long)uid); }
+int fkx_i_track(fkx *x, void *h, void (*fn)(void *)) {
+  Trk *t = malloc(sizeof *t);
+  if (!t) return FKX_ENOMEM;
+  t->h = h; t->fn = fn; t->next = x->trk; x->trk = t;
+  return FKX_OK;
+}
+void fkx_i_untrack(fkx *x, void *h) {
+  for (Trk **p = &x->trk; *p; p = &(*p)->next)
+    if ((*p)->h == h) { Trk *t = *p; *p = t->next; free(t); return; }
+}
+
+/* ---------- result structures (shared by the session driver and its stand-in) ---------- */
+void fkx_diff_result_free(fkx_diff_result *r) {
+  if (!r) return;
+  for (size_t i = 0; i < r->ntables; i++) free(r->tables[i].name);
+  free(r->tables);
+  free(r->changeset);
+  memset(r, 0, sizeof *r);
+}
+void fkx_promote_result_free(fkx_promote_result *r) {
+  if (!r) return;
+  for (size_t i = 0; i < r->nconflicts; i++) { free(r->conflicts[i].table); free(r->conflicts[i].key); }
+  free(r->conflicts);
+  free(r->refusal);
+  memset(r, 0, sizeof *r);
 }
