@@ -143,6 +143,22 @@ int fk_prealloc_wrap(fk_io *io, uint64_t chunk) {
 
 static int is_wrapped(const fk_io *io) { return io->ctx && io->pwrite == pa_pwrite; }
 
+/* Zero-fill one chunk ahead of the current log end, when no transaction is open.
+ * Call between commits to keep preallocated blocks ahead of the writer, so commits
+ * write data into blocks that already exist without pausing to extend the file.
+ * Returns 0 on success, -1 if an extension failed (disk full or refused).
+ * Idempotent and safe to call on unwrapped I/O. */
+int fk_prealloc_background(fk_io *io) {
+  if (!is_wrapped(io)) return 0;
+  PA *p = io->ctx;
+  if (p->off) return -1;
+  uint64_t end = p->hi + p->chunk;
+  if (end <= p->alloc) return 0;
+  if (pa_extend(p, end) != 0) { (void)p->in.truncate(p->in.ctx, p->alloc); p->off = 1; return -1; }
+  p->alloc = (end + p->chunk - 1) / p->chunk * p->chunk;
+  return 0;
+}
+
 void fk_prealloc_trim(const fk_io *io) {
   if (!is_wrapped(io)) return;
   PA *p = io->ctx;

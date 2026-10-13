@@ -64,6 +64,10 @@ int fk_prealloc_wrap(fk_io *io, uint64_t chunk);
 void fk_prealloc_trim(const fk_io *io);     /* cut the file back to the end of what was written (no-op if io is not wrapped) */
 void fk_prealloc_release(fk_io *io);        /* free the layer, no trim; io is the underlying io again */
 void fk_prealloc_close(fk_io *io);          /* trim, then release */
+/* Call between commits: zero-fill one chunk ahead so the next commit writes into
+ * blocks that exist without pausing to extend the file. Returns 0 on success,
+ * -1 if an extension failed. Safe on unwrapped I/O (returns 0). */
+int fk_prealloc_background(fk_io *io);
 
 typedef struct fk_store fk_store;
 
