@@ -22,7 +22,7 @@ Changesets are held in memory during diff, promote, and undo. SQLite's session A
 
 ## Concurrency
 
-- **One process, one thread.** The store is not thread-safe. Multiple threads sharing a store will corrupt it.
+- **Single-writer.** One writer transaction at a time, across all branches, enforced by the VFS refusing the super-journal. Reads from separate connections on different branches are fine. The store is not thread-safe.
 - **One writer per branch.** The VFS enforces this: a transaction on one branch and another on a different branch in the same connection opens a super-journal, which the VFS refuses (with a reason logged). Separate connections each on their own branch, reading, is fine.
 
 ## File system requirements
