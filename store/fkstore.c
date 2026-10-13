@@ -15,6 +15,7 @@
 #define NONE UINT32_MAX
 #define FK_MARK_EVERY 32u /* durable-end marker: refresh after this many committed units (and on close) */
 #define FK_MAX_SNAP (1u << 30)
+#define FK_CHECKPOINT_MIN_BYTES ((uint64_t)16 << 20)
 
 enum { T_PAGE = 1, T_COMMIT = 2, T_FORK = 3, T_DISCARD = 4, T_CPAGE = 5, T_SNAP = 6, T_SNAPEND = 7, T_FORKM = 8, T_RESET = 9, T_META = 10 };
 
@@ -688,10 +689,11 @@ static uint32_t header_ver(const uint8_t *h) {
   return v;
 }
 
-static int scan(fk_store *s, int64_t fsize, uint32_t version) {
+static int scan(fk_store *s, int64_t fsize, uint32_t version, int *had_snapshot) {
   uint64_t off = HDR_SZ, c_end = HDR_SZ, seq = 1, c_seq = 1;
   uint32_t last = 0, c_last = 0, npend = 0, cpend = 0, pbranch = 0;
   PendPage *pend = NULL, *cp = NULL;
+  if (had_snapshot) *had_snapshot = 0;
   uint32_t ncp = 0, ccp = 0;
   uint8_t *stream = NULL;
   size_t slen = 0, scap = 0;
@@ -814,6 +816,7 @@ static int scan(fk_store *s, int64_t fsize, uint32_t version) {
       int r2 = snap_load(s, stream, slen, cp, ncp, version);
       if (r2 == FK_ECORRUPT) break;
       if (r2 != FK_OK) { rc = r2; break; }
+      if (had_snapshot) *had_snapshot = 1;
       ncp = 0;
       slen = 0;
       unit = 1;
@@ -879,7 +882,14 @@ int fk_open(const fk_io *io, fk_store **out) {
   set_head(s, 0, main_layer);
   s->br[0].alive = 1;
   s->nb = 1;
-  if ((rc = scan(s, size, version)) != FK_OK) { fk_close(s); return rc; }
+  int had_snapshot = 0;
+  if ((rc = scan(s, size, version, &had_snapshot)) != FK_OK) { fk_close(s); return rc; }
+  /* Open-time checkpoint: if the log was replayed from records (not a snapshot),
+   * compact to make the next open fast. Best-effort: never fails the open. */
+  if (!had_snapshot && io->sibling_create && io->sibling_rename) {
+    int did = 0;
+    fk_compact_if_needed(s, FK_CHECKPOINT_MIN_BYTES, &did);
+  }
   *out = s;
   return FK_OK;
 }

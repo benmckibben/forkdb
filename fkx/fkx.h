@@ -128,6 +128,10 @@ int fkx_gc(fkx *x, fkx_gc_report *report);
 /* fk_compact_if_needed on the store. FKX_EBUSY while a store transaction is open. */
 int fkx_compact_if_needed(fkx *x, uint64_t min_bytes, int *did);
 
+/* Open-time checkpoint threshold (from the store). A store opened from a log (not a
+ * snapshot) and larger than this is compacted to make the next open fast. */
+#define FKX_CHECKPOINT_MIN_BYTES ((uint64_t)16 << 20)
+
 /* ---- diff, promote, undo: the session driver. Everything below returns FKX_ENOSESSION where fkx_have_session() is 0. ---- */
 
 /* 1 if this build has the driver (it was compiled against a SQLite with SQLITE_ENABLE_SESSION and SQLITE_ENABLE_PREUPDATE_HOOK). */
