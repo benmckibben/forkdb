@@ -142,14 +142,14 @@ The roughness that remains: the failure comes at `COMMIT`, not at the first writ
 - **Recording while attached is a real cost on a CPU-bound load** (about 32 percent on the bulk insert), which is why diff compares after the fact and does not record all the time.
 - **The commit loop shows no difference**: it is dominated by the sync, about 3.9 ms a commit on this machine. A real-disk figure was not taken.
 
-## Build plan
+### Build plan
 
 Each step is its own PR, reviewed before the next.
 
 1. **Session build, the host survey and the VFS contract. Done.** `vfs/build.sh` has the `session` variant and extracts the header; the VFS gate runs on it (T15); the super-journal is refused, with a reason logged and a counter, and with journal modes MEMORY and OFF refused so that the refusal cannot be bypassed (T14, T6, the power-loss workload attempts a cross-branch write at every step and checks that nothing leaks; two new mutants); the survey above. The in-memory-main limit is recorded, not closed.
 2. **Store format v4. Done** (see [DURABLE-STORE.md](DURABLE-STORE.md), State ids, metadata and reset): `RESET`, metadata (`FORKM` and `META` records), state ids, upgrade by compaction (a version 3 file refuses the new calls with `FK_EVERSION` until it is compacted). Differences from this note: a reset copies the source's state id instead of replacing it (equal ids have to mean equal content); there is no `fk_branch_parent`; the read-only flag is not enforced by the store (the layer enforces it, from the metadata). The power-loss harness's model got the new operations and a check that state ids are equal exactly when the content is; nine new mutants, each caught.
 3. **The branch layer (`fkx`):** fork with base, diff, promote (fast-forward and replay with the policy), undo, garbage collection, retention. Tests include crash sequences across the several records of one operation, and every refusal in the policy table. **Design written: [FKX-DESIGN.md](FKX-DESIGN.md) and [fkx/fkx.h](../fkx/fkx.h); split into the core (3b) and the session driver (3c), both implemented.**
-4. **SQL functions and the CLI.**
+4. **SQL functions and the CLI. Done** (this PR). [ext/forkdb_ext.c](../ext/forkdb_ext.c) is a loadable SQLite extension that exposes every fkx operation as a `forkdb_*` SQL function, with a `forkdb_info` virtual table that reports whether the host has the session API. [cli/forkdb.c](../cli/forkdb.c) is a standalone CLI built with its own session-variant SQLite, with subcommands for every operation and a `shell` subcommand that opens an interactive SQLite shell on a store. The CLI works offline on a store no application has open.
 
 ## Not covered
 
