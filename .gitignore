@@ -22,3 +22,8 @@ vfs/build/
 
 # fkx test build output
 fkx/build/
+
+# Step 4 CLI and extension build output
+build/
+*.o
+
