@@ -1,40 +1,99 @@
 # forkdb
 
-Instant-branching, copy-on-write SQLite databases for local development, testing and agent sandboxing: fork a database without copying it, let a test or an agent do anything to the fork, then look at the diff and promote it or throw it away.
+A branchable, snapshot-based SQLite page store with a library, a loadable extension, and a CLI.
 
-**Status: just started.** The form factor is decided, a feasibility spike has validated the core mechanics, and the durable page store underneath is built and power-loss tested on its own. A second spike ([vfs/](vfs)) connects the store to SQLite through a VFS and passes the same kind of power-loss tests. It is single-process, has no WAL and no diff or promote yet: nothing here is installable.
+On top of an append-only log with power-loss recovery, forkdb layers branching (fork, snapshot, diff, promote, undo), garbage collection, and an open-time checkpoint so frequent opens stay fast. Applications connect through a [SQLite VFS](docs/VFS-SPIKE.md) that enforces one-writer-per-branch.
 
-## The idea
+## What you need
 
-- A **branch** is an immutable base plus a small overlay of changed pages, exposed to SQLite through a custom VFS. Forking does not copy any pages: it costs one small log record and one small in-memory layer however large the database is (the spike measured about 48 bytes and 14-18 ns for the in-memory prototype; the durable store adds an fsync per fork).
-- A **logical layer** (SQLite's session extension) records what a branch changed as a changeset, which gives diff, promote ("fast-forward or replay with conflict report") and undo.
-- Target uses: an agent that gets a throwaway copy to try a risky migration or destructive task in; one database per test in milliseconds; "what would this change do?" with a reviewable diff.
+forkdb is a C library that requires:
 
-## Where things are
+- A host with the **SQLite session API** (`SQLITE_ENABLE_SESSION`, `SQLITE_ENABLE_PREUPDATE_HOOK`) for diff/promote/undo. The extension detects this at load time and reports it through `forkdb_info`. Without it, the VFS and branch operations still work.
+- A file system that supports **rename over an open file** for compaction (otherwise the store works without it).
+- **Single-writer.** One writer transaction at a time, across all branches, enforced by the VFS. Reads from separate connections on different branches are fine.
 
-| | |
-|---|---|
-| [docs/DESIGN.md](docs/DESIGN.md) | Why SQLite VFS (and not an embedded KV store or a proxy over Postgres/MySQL), the planned v0.1 scope, what is deliberately left out |
-| [docs/SPIKE-FINDINGS.md](docs/SPIKE-FINDINGS.md) | What the spike proved, measured, and what it did not show |
-| [spike/](spike/README.md) | The throwaway spike: one C file, build and run instructions, recorded results |
-| [docs/VFS-SPIKE.md](docs/VFS-SPIKE.md) | SQLite running on the durable store through a VFS ([vfs/](vfs)): what was built, the tests and mutant check, the measurements, and what it changed in the plan |
-| [docs/DURABLE-STORE.md](docs/DURABLE-STORE.md) | The durable, branchable page store ([store/](store)): format, recovery, the power-loss test harness and what it does not cover; and an opt-in layer that preallocates the log (about 3 times cheaper commits on real disks); format version 4: branch metadata, reset and state ids for the layer above |
-| [docs/SESSION-DESIGN.md](docs/SESSION-DESIGN.md) | Design note for diff, promote and undo on the VFS through SQLite's session extension: what was measured, the store changes it needs, the schema policy, packaging. Design only, no code yet |
-| [docs/FKX-DESIGN.md](docs/FKX-DESIGN.md) | The branch layer: names, fork with a base, snapshot, reset, discard, promote (fast-forward or replay), undo, diff, the schema policy, garbage collection, the metadata format. Implemented in [fkx/](fkx/) (the core, and the session driver for diff and replay). Tests: [scripts/test-fkx.sh](scripts/test-fkx.sh) |
-
-## Reproduce the spike
+## Quick start
 
 ```sh
-spike/build.sh batch && spike/build/spike-batch
+# Build the CLI (offline, for inspecting stores no app has open)
+./scripts/build-step4.sh cli        # produces build/forkdb
+
+# Build the extension (for loading into a host app)
+./scripts/build-step4.sh ext        # produces build/forkdb.so
+
+# Build both plus the test suite
+./scripts/build-step4.sh test
 ```
 
-Needs gcc, curl, sha256sum and python3 (the first build downloads and compiles a pinned SQLite, which takes a few minutes).
+The CLI binary is self-contained: it links against its own SQLite. Use it on a store no application has open (single-writer).
 
-## Known facts that shape the project
+## CLI
 
-- Batch-atomic writes need a **custom SQLite build**, and forkdb does not use them: the VFS spike measured the same commit cost with and without ([docs/VFS-SPIKE.md](docs/VFS-SPIKE.md)), so they are out of the design.
-- In WAL mode a fork must carry the WAL or checkpoint first.
-- Changesets do **not** capture tables without a PRIMARY KEY or schema changes, so promote must check the schema itself.
+```
+forkdb init <path> [branch]         create a store, default branch "main"
+forkdb fork <path> <name> [--from]  branch off another branch
+forkdb snapshot <path> <name>       create a named snapshot
+forkdb list <path>                  list branches
+forkdb info <path> [branch]         show branch metadata and state
+forkdb diff <path> <branch>         show changes relative to the base
+forkdb promote <path> <branch>      promote a branch into its base (fast-forward or replay)
+forkdb undo <path> <branch>         undo the last promote
+forkdb discard <path> <branch>      remove a branch
+forkdb reset <path> <branch> <to>   reset a branch's content to another
+forkdb gc <path>                    garbage-collect unreachable undo points
+forkdb compact <path>               compact the log to a clean snapshot
+forkdb sql <path> <branch> [sql]    run SQL on a branch (--write for writes)
+forkdb shell <path> <branch>        open an interactive SQLite shell
+```
+
+All commands accept `--json` for machine-readable output.
+
+## Extension
+
+```sql
+.load forkdb
+
+-- Check if the host has the session API
+SELECT * FROM forkdb_info;
+
+-- Create a store and branch off
+SELECT forkdb_init('/tmp/mine.fk', 'main');
+SELECT forkdb_fork('/tmp/mine.fk', 'feat-x');
+
+-- Open a database handle and work with it
+SELECT forkdb_open_db('/tmp/mine.fk', 'feat-x');  -- returns a VFS URI
+ATTACH '<the URI>' AS featx;
+-- ... do work on featx ...
+SELECT forkdb_close('/tmp/mine.fk');
+```
+
+Every [fkx](docs/FKX-DESIGN.md) operation is available as a `forkdb_*` SQL function: init, fork, snapshot, list, info, diff, promote, undo, discard, reset, gc, compact, close.
+
+## How it works
+
+The store is an **append-only log** (see [DURABLE-STORE.md](docs/DURABLE-STORE.md)). Recovery truncates a torn tail, replays the committed prefix, and rebuids an in-memory index. On open, if the log exceeds 16 MiB, the store compacts it to a clean snapshot — the next open loads instantly.
+
+The **branch layer** ([FKX-DESIGN.md](docs/FKX-DESIGN.md)) keeps branches in a tree of layers. A fork copies nothing — it creates an empty child layer that reads through to the parent. Discard folds the smaller layer into the survivor, keeping reads fast. Promote replays or fast-forwards a branch's changes into its base, recording an undo point. GC collects unreachable undo points.
+
+The **session driver** ([SESSION-DESIGN.md](docs/SESSION-DESIGN.md)) uses SQLite's session extension for diff, conflict detection, replay, and undo. Schema changes and tables without a PRIMARY KEY are detected and reported; the policy controls whether they block the promote.
+
+## Known limitations
+
+See [KNOWN-LIMITS.md](KNOWN-LIMITS.md). The short version:
+
+- Tables without a PRIMARY KEY are not compared (diff reports them, promote refuses them with FKX_TABLE_NO_PK)
+- DDL changes are detected but not replayed
+- Virtual tables and FTS shadow tables are not compared
+- Large changesets are held in memory (a streaming interface exists but is not exposed to callers yet)
+- Single-writer (one writer at a time, reads from separate connections are fine)
+
+## Documentation
+
+- [DURABLE-STORE.md](docs/DURABLE-STORE.md) — the append-only log, recovery, snapshots, branch ids, state ids, compaction
+- [FKX-DESIGN.md](docs/FKX-DESIGN.md) — the branch layer: forks, layers, diff, promote, undo, garbage collection
+- [SESSION-DESIGN.md](docs/SESSION-DESIGN.md) — session driver design and build plan
+- [VFS-SPIKE.md](docs/VFS-SPIKE.md) — VFS contract, one-branch-write enforcement, NVMe cost analysis
+- [SPIKE-FINDINGS.md](docs/SPIKE-FINDINGS.md) — early investigation notes
 
 ## License
 
