@@ -16,7 +16,7 @@ The store holds the pages of many database branches in **one append-only log fil
 ## File format
 
 ```
-[ 0 .. 4096)   file header: "FORKDBST", version (3), page size, crc;  two 32-byte marker slots at 512 and 1024
+[ 0 .. 4096)   file header: "FORKDBST", version (4), page size, crc;  two 32-byte marker slots at 512 and 1024
 [ 4096 .. )    records, back to back
 ```
 
@@ -33,8 +33,11 @@ Record = 32-byte header + payload. Header: magic `FKR1`, type, **sequence number
 | CPAGE | a page copied by compaction: same layout as PAGE, branch field unused |
 | SNAP | one chunk (up to 4 KiB) of the snapshot byte stream |
 | SNAPEND | length and checksum of the snapshot byte stream |
+| FORKM | (version 4) like FORK, plus the new branch's metadata: source, new id, length, bytes |
+| RESET | (version 4) destination branch, source branch |
+| META | (version 4) branch, length, bytes: replaces the branch's metadata |
 
-A transaction is `PAGE* COMMIT`. A fork or discard is a single record. All of them end with **one fsync**. A compacted file starts with one `CPAGE* SNAP* SNAPEND` unit (see Compaction). Version 1 files (before compaction existed) still open; a snapshot inside one is refused. Version 2 files (before ids could be reused) still open and keep their rules until they are compacted; a file with a version this program does not know is refused with `FK_ECORRUPT` and nothing in it is touched.
+A transaction is `PAGE* COMMIT`. A fork or discard is a single record. All of them end with **one fsync**. A compacted file starts with one `CPAGE* SNAP* SNAPEND` unit (see Compaction). Version 1 files (before compaction existed) still open; a snapshot inside one is refused. Version 2 files (before ids could be reused) still open and keep their rules until they are compacted; Version 3 files (before metadata, reset and state ids) still open and work as before, and the calls that write the version 4 records return `FK_EVERSION` on them until `fk_compact` rewrites the file in the current format (see State ids, metadata and reset). A file with a version this program does not know is refused with `FK_ECORRUPT` and nothing in it is touched.
 
 ## Recovery
 
@@ -102,6 +105,20 @@ The rule depends only on the alive flags and a cursor (the id of the latest fork
 
 I considered the alternative of never reusing ids and lifting the limit instead (ids up to 2^32, 16 bytes in memory and 5 bytes in every snapshot for each id ever used). It has no stale-handle problem at all, but a store that has seen a million forks carries a million dead entries forever. Reuse with next fit keeps the table at its fixed size; if the stale-handle risk turns out to matter in practice (the layer above will keep names, not ids), the generation-number version of this is the next step.
 
+## State ids, metadata and reset (format version 4)
+
+Three things the layer above needs and could not build on the store as it was (see [SESSION-DESIGN.md](SESSION-DESIGN.md) for why).
+
+**State ids** (`fk_state`). A number per live branch that says which content it holds. A commit gives the branch the next number from a store-wide counter; a fork or a reset gives the branch the number of its source. So two live branches hold the same content exactly when their ids are equal, as far as the store is concerned: an id is only ever given to one content, so equal ids mean equal content. The converse does not hold: a commit that writes back the bytes that were there gets a new id. The design note said a reset *replaces* the id; it *copies* the source's, because the id has to say "same content" and after a reset it is the same content. A counter is used, not the record's sequence number, because sequence numbers start again at 1 after a compaction. The counter and the ids are kept by recovery and by compaction. They mean nothing across stores, and a snapshot written by version 3 has none: when such a file is first compacted every live branch gets an id of its own (so equal content in two branches is no longer recognised, which only loses a fast path).
+
+**Metadata** (`fk_meta_set`, `fk_meta_get`, `fk_fork_meta`). Up to `FK_META_MAX` (512) bytes per branch for the layer above to keep a name, a kind, an origin in. Replaced whole (length 0 clears it), one record and one fsync. `fk_fork_meta` forks and sets it in the same record, so there is no state in which the new branch exists without its label. Kept by recovery and by compaction (the snapshot carries it), and dropped with the branch, so a branch that later gets the same id starts without. A plain fork starts without metadata, whatever its source has. There is no parent pointer: ids are reused (see Branch ids), so a stored parent id could silently name a different branch later; the layer above records the origin in the metadata, together with whatever it needs to recognise the branch.
+
+**Reset** (`fk_reset(dst, src)`). `dst` takes the content, the size and the state id of `src`, which stays as it is; `dst`'s metadata is kept; `dst` may be branch 0 (that is the fast-forward promote). One record and one fsync, O(1): the same two steps as a fork, but the new head layer goes to an existing branch, and the layers `dst` was on are released the way a discard releases them (freed, or folded into their only child). What `dst` held before is garbage for the next compaction. Like fork and discard it needs no open transaction (`FK_EBUSY` otherwise). **The store cannot know whether anything above still caches the old pages of `dst`**: the caller has to make sure of that (the VFS will refuse a reset while a connection is open on `dst`, because SQLite decides whether its page cache is stale from a counter that can repeat after a reset; that is reasoned from how SQLite works, not tested).
+
+**Records.** `FORKM` (source, new id, length, metadata), `RESET` (destination, source) and `META` (branch, length, metadata) are one record each. A FORKM follows the id rule of FORK. A record that breaks its rules (a dead branch, a length over the limit) ends the valid prefix like any other bad record, and none of the three is accepted in a file below version 4. The snapshot of a version 4 file ends with the state counter and, for every branch id, its state id and metadata (zero and nothing for a dead id).
+
+**Versions.** A new file is version 4. A version 3 file opens and works as before; `fk_version` says which the open file is; `fk_state` and `fk_meta_get` work on it too (ids as the replay of its log gives them, no metadata); `fk_reset`, `fk_meta_set` and `fk_fork_meta` return `FK_EVERSION` and change nothing. `fk_compact` writes the current format, so a file is upgraded by the same crash-safe rename as any compaction, and from then on an older program refuses it (`FK_ECORRUPT`, nothing touched), as it refuses any version it does not know.
+
 ## Compaction
 
 **What is garbage.** A page record is live only if it is the visible version of some page in some live branch: walk each live branch's layer chain, newer layers hiding older ones, shared layers counted once. Discarded branches, overwritten pages, pages hidden by a shrink and the uncommitted tail fall out of that. Layers get flattened too: a frozen layer that has exactly one child and no branch of its own is folded into the child, which is what remains after one side of a fork is discarded. Tombstones are only kept where there is a layer below for them to hide.
@@ -118,7 +135,7 @@ I considered the alternative of never reusing ids and lifting the limit instead 
 - Before it, the old file is untouched. A leftover temporary file is deleted at the next open.
 - After it, the new file is complete (it was synced before the rename).
 - The directory fsync makes the rename durable. Until it returns, a power cut may bring back either file, and both hold the same data; the compaction is not acknowledged before then, and nothing is written to the new file before then.
-- Recovery treats a snapshot as "replace the index with this". A snapshot is only accepted as the first unit of a version 2 or 3 file (a version 3 snapshot ends with the allocation cursor, see Branch ids), every offset in it must point at a CPAGE of that unit for the right page, and its checksum must match. The new file's record chain starts again at sequence 1.
+- Recovery treats a snapshot as "replace the index with this". A snapshot is only accepted as the first unit of a version 2, 3 or 4 file (a version 3 snapshot ends with the allocation cursor, see Branch ids; a version 4 snapshot goes on with the state counter and each branch's state id and metadata), every offset in it must point at a CPAGE of that unit for the right page, and its checksum must match. The new file's record chain starts again at sequence 1.
 
 **Errors.** Before the rename, any error (cannot create the temporary file, a write fails because the disk is full, an fsync fails) deletes the temporary file and returns the error; the store's file is untouched and the store stays usable. After the rename, an error is fail-stop like everywhere else: close and reopen.
 
@@ -143,6 +160,8 @@ The point of this work was to test the claim "nothing partial after a power cut"
 Cutting the power before every I/O event of a compaction (creating the file, each page, each snapshot chunk, the marker, the fsync, the rename, the directory sync) is part of 1-4: the oracle does not change across a compaction, so the recovered state must be the same either way, whichever file survived.
 
 The power cuts are expensive, so only about one workload in a few contains a compaction. A second, cheap pass therefore runs thousands of **longer workloads with several compactions each and no power cut**, checking the oracle after every operation and again after a close and reopen. It is what exercises layer folding and tombstone handling at volume.
+
+The oracle also tracks, per branch, which content it holds (a class that a commit makes new and a fork or reset copies) and its metadata, and the workloads include resets, metadata changes and forks with metadata. After every operation and every recovery the store's state ids must be equal for exactly the pairs of branches the oracle says hold the same content, and the metadata must match byte for byte. [test/file_test.c](../test/file_test.c) opens a real version 3 file written by the previous store (`test/data/v3-compacted.fk`, with a snapshot and records after it), shows the refusals, upgrades it by compaction and checks that nothing was lost; exercises the three new calls and their errors on a version 4 store, across a close, a recovery and a compaction; and cuts the last three bytes off each of the three new records, written by a process that dies without closing, to show that recovery drops the torn record and the store is as it was before it.
 
 Results are recorded in the test output; the numbers for the last full run are in the pull request that added this.
 
@@ -177,6 +196,15 @@ A test that has never failed proves little, so the store has compile-time bugs (
 | layers: discard never frees layers | **catches** (the layer-count check, with the logic pass) | | **catches** |
 | layers: discard never folds single-child layers | **catches** (the layer-count check, with the logic pass) | | **catches** |
 | hardware CRC32C leaves out the last bytes of a buffer | no | no | **catches** (the CRC test; the store still works with itself, so nothing else notices) |
+| v4: a commit leaves the state id as it was | **catches** | **catches** | **catches** |
+| v4: a fork gets a state id of its own | **catches** | **catches** | **catches** |
+| v4: a reset leaves the branch with its old content | no | **catches** | **catches** |
+| v4: a reset gives the branch a state id of its own | **catches** | **catches** | **catches** |
+| v4: the state counter is not restored from a snapshot (an id can be handed out twice) | **catches** | **catches** | **catches** |
+| v4: a version 3 snapshot gives every branch the same state id | no | no | **catches** (only the real version 3 file shows it) |
+| v4: a discarded branch leaves its metadata to the next one that gets its id | no | **catches** (ids are reused all the time) | no |
+| v4: recovery forgets the metadata a fork was given | **catches** | **catches** | **catches** |
+| v4: compaction leaves the metadata out | **catches** | **catches** | **catches** |
 
 Which test catches which is not what I expected in two places, and I would rather say so than let the table suggest more than it shows:
 - I expected the power-loss harness to catch the torn-tail and record-chain mutants too (stale records resurfacing after a torn tail); it did not, including a run of about 330 workloads of 12 operations (about 273,000 crash images). A stale record has to line up exactly with the new tail, which random workloads almost never produce. The two mechanisms also protect the same property, so either alone is enough in practice. The deterministic file tests are what show each one is needed.

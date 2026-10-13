@@ -19,9 +19,14 @@
 #define MAXPG 20 /* enough distinct pages for a layer's index table to grow several times */
 #define MAXOPS 16
 
-typedef struct { int alive; uint32_t size; uint8_t has[MAXPG]; uint8_t pg[MAXPG][FK_PAGE]; } MB;
-typedef struct { uint32_t nb, last; MB b[MAXBR]; } Model; /* nb: one more than the highest id used; last: id of the latest fork */
-typedef struct { int kind; /* 0 commit, 1 fork, 2 discard, 3 compact (changes nothing the oracle can see) */ uint32_t br, np, pgno[3], new_size, expect_dst; uint64_t key; } Op;
+#define MAXMETA 40
+/* cls: which content the branch holds; two live branches have equal state ids in the store exactly when their cls are equal */
+typedef struct { int alive; uint32_t size; uint8_t has[MAXPG]; uint8_t pg[MAXPG][FK_PAGE]; uint32_t cls; uint8_t nmeta; uint8_t meta[MAXMETA]; } MB;
+typedef struct { uint32_t nb, last, ctr; MB b[MAXBR]; } Model; /* nb: one more than the highest id used; last: id of the latest fork */
+/* kinds: 0 commit, 1 fork, 2 discard, 3 compact (changes nothing the oracle can see), 4 reset (br takes the content of pgno[0]), 5 set the
+ * metadata of br (np bytes derived from key), 6 fork with metadata (np bytes from key) */
+typedef struct { int kind; uint32_t br, np, pgno[3], new_size, expect_dst; uint64_t key; } Op;
+static void meta_bytes(uint64_t key, uint32_t n, uint8_t *out) { for (uint32_t i = 0; i < n; i++) out[i] = (uint8_t)(key * 31 + i * 7 + 1); }
 
 static void gen_page(uint64_t key, uint8_t *buf) {
   Rng r;
@@ -33,11 +38,20 @@ static void model_commit(Model *M, const Op *o) {
   for (uint32_t pg = o->new_size; pg < m->size && pg < MAXPG; pg++) m->has[pg] = 0;
   for (uint32_t j = 0; j < o->np; j++) { gen_page(o->key + j, m->pg[o->pgno[j]]); m->has[o->pgno[j]] = 1; }
   m->size = o->new_size;
+  m->cls = ++M->ctr;
 }
 static void model_apply(Model *M, const Op *o) {
   if (o->kind == 0) model_commit(M, o);
-  else if (o->kind == 1) { M->b[o->expect_dst] = M->b[o->br]; M->last = o->expect_dst; if (o->expect_dst >= M->nb) M->nb = o->expect_dst + 1; }
-  else if (o->kind == 2) M->b[o->br].alive = 0;
+  else if (o->kind == 1 || o->kind == 6) {
+    M->b[o->expect_dst] = M->b[o->br]; /* same content, same cls */
+    M->b[o->expect_dst].nmeta = 0;
+    if (o->kind == 6) { M->b[o->expect_dst].nmeta = (uint8_t)o->np; meta_bytes(o->key, o->np, M->b[o->expect_dst].meta); }
+    M->last = o->expect_dst;
+    if (o->expect_dst >= M->nb) M->nb = o->expect_dst + 1;
+  }
+  else if (o->kind == 2) { M->b[o->br].alive = 0; M->b[o->br].nmeta = 0; }
+  else if (o->kind == 4) { MB keep = M->b[o->br]; M->b[o->br] = M->b[o->pgno[0]]; M->b[o->br].nmeta = keep.nmeta; memcpy(M->b[o->br].meta, keep.meta, MAXMETA); }
+  else if (o->kind == 5) { M->b[o->br].nmeta = (uint8_t)o->np; meta_bytes(o->key, o->np, M->b[o->br].meta); }
   /* kind 3: compaction preserves every branch, page and size */
 }
 /* The id the next fork must get, written out independently of the store: ids 1..MAXBR-1 form a ring; start just after the id of
@@ -67,6 +81,13 @@ static int gen_ops(uint64_t seed, int K, Op *ops, Model *states) {
     uint32_t next_id = 0;
     if (roll < 25 && model_next_id(M, &next_id)) { o.kind = 1; o.br = alive[rng_below(&r, na)]; o.expect_dst = next_id; }
     else if (roll >= 88) o.kind = 3;
+    else if (roll >= 40 && roll < 48 && na >= 2) { /* reset: dst takes the content of another live branch */
+      uint32_t d = rng_below(&r, na), sidx = rng_below(&r, na - 1);
+      if (sidx >= d) sidx++;
+      o.kind = 4; o.br = alive[d]; o.pgno[0] = alive[sidx];
+    }
+    else if (roll >= 48 && roll < 54) { o.kind = 5; o.br = alive[rng_below(&r, na)]; o.np = rng_below(&r, MAXMETA + 1); o.key = seed * 1000003ull + (uint64_t)i * 16 + 2; }
+    else if (roll >= 54 && roll < 60 && model_next_id(M, &next_id)) { o.kind = 6; o.br = alive[rng_below(&r, na)]; o.expect_dst = next_id; o.np = rng_below(&r, MAXMETA + 1); o.key = seed * 1000003ull + (uint64_t)i * 16 + 3; }
     else if (roll < 40) {
       uint32_t cand[MAXBR], nc = 0;
       for (uint32_t k = 0; k < na; k++) if (alive[k] != 0) cand[nc++] = alive[k];
@@ -116,6 +137,16 @@ static int run_op(fk_store *s, const Op *o) {
     return rc;
   }
   if (o->kind == 3) return fk_compact(s);
+  if (o->kind == 4) return fk_reset(s, o->br, o->pgno[0]);
+  if (o->kind == 5) { uint8_t mb[MAXMETA]; meta_bytes(o->key, o->np, mb); return fk_meta_set(s, o->br, mb, o->np); }
+  if (o->kind == 6) {
+    uint8_t mb[MAXMETA];
+    uint32_t dst = 0;
+    meta_bytes(o->key, o->np, mb);
+    int rc = fk_fork_meta(s, o->br, mb, o->np, &dst);
+    if (rc == 0 && dst != o->expect_dst) return -99;
+    return rc;
+  }
   return fk_discard(s, o->br);
 }
 
@@ -137,6 +168,19 @@ static int equal_state(fk_store *s, const Model *M) {
       if (memcmp(buf, M->b[b].has[pg] ? M->b[b].pg[pg] : zero, FK_PAGE)) { snprintf(why, sizeof why, "branch %u page %u content differs", b, pg); return 0; }
     }
     if (fk_read(s, b, sz, buf) != FK_ENOENT) { snprintf(why, sizeof why, "branch %u: page at size is readable", b); return 0; }
+    uint8_t mb[MAXMETA + 8];
+    size_t ml = 99;
+    if (fk_meta_get(s, b, mb, sizeof mb, &ml) != 0 || ml != M->b[b].nmeta || memcmp(mb, M->b[b].meta, ml)) { snprintf(why, sizeof why, "branch %u: metadata is %zu bytes, expected %u (or its bytes differ)", b, ml, M->b[b].nmeta); return 0; }
+  }
+  /* state ids: equal exactly when the model says the content is the same (a commit makes a new one, fork and reset copy) */
+  for (uint32_t i = 0; i < MAXBR; i++) {
+    if (!M->b[i].alive) continue;
+    for (uint32_t j = i + 1; j < MAXBR; j++) {
+      if (!M->b[j].alive) continue;
+      uint64_t si = 0, sj = 0;
+      if (fk_state(s, i, &si) != 0 || fk_state(s, j, &sj) != 0) { snprintf(why, sizeof why, "fk_state failed for %u or %u", i, j); return 0; }
+      if ((si == sj) != (M->b[i].cls == M->b[j].cls)) { snprintf(why, sizeof why, "state ids of branches %u and %u are %s, the model says the content is %s", i, j, si == sj ? "equal" : "different", M->b[i].cls == M->b[j].cls ? "the same" : "not the same"); return 0; }
+    }
   }
   /* The layer tree is as small as it can be: every layer has a live branch on it or at least two children (a leaf needs a branch,
    * and a layer without a branch that has one child would have been folded into it), so with n live branches there are at most

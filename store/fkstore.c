@@ -5,7 +5,7 @@
 #include <string.h>
 
 #define MAGIC 0x31524b46u /* "FKR1" little-endian */
-#define FK_VERSION 3u     /* 2 added snapshots (compaction); 3 lets fork reuse the ids of discarded branches and adds the allocation cursor to snapshots. Versions 1 and 2 are still read. */
+#define FK_VERSION 4u     /* 2 added snapshots (compaction); 3 lets fork reuse the ids of discarded branches and adds the allocation cursor to snapshots; 4 adds branch metadata, reset and state ids (FORKM, RESET, META records; the snapshot ends with the state counter and, per branch, its state id and metadata). Versions 1 to 3 are still read. */
 #define HDR_SZ FK_HEADER_SZ
 #define REC_HDR 32u
 #define PAGE_PAYLOAD (8u + FK_PAGE)
@@ -16,7 +16,7 @@
 #define FK_MARK_EVERY 32u /* durable-end marker: refresh after this many committed units (and on close) */
 #define FK_MAX_SNAP (1u << 30)
 
-enum { T_PAGE = 1, T_COMMIT = 2, T_FORK = 3, T_DISCARD = 4, T_CPAGE = 5, T_SNAP = 6, T_SNAPEND = 7 };
+enum { T_PAGE = 1, T_COMMIT = 2, T_FORK = 3, T_DISCARD = 4, T_CPAGE = 5, T_SNAP = 6, T_SNAPEND = 7, T_FORKM = 8, T_RESET = 9, T_META = 10 };
 
 /* ---------- checksums and encoding ---------- */
 /* CRC-32C (Castagnoli). Two implementations of the same function: a portable table loop, and the CPU's CRC32 instruction where the
@@ -125,7 +125,8 @@ typedef struct Layer {
   uint8_t seen;
 } Layer;
 
-typedef struct { Layer *head; int alive; } Branch;
+/* state: identifies the content of the branch (see fk_state); meta: the small blob the layer above keeps with the branch (see fk_meta_set) */
+typedef struct { Layer *head; int alive; uint64_t state; uint8_t *meta; uint16_t nmeta; } Branch;
 typedef struct { uint32_t pgno; uint64_t off; uint8_t *data; } PendPage;
 
 struct fk_store {
@@ -138,7 +139,8 @@ struct fk_store {
   Branch br[FK_MAX_BRANCHES];
   uint32_t nb;        /* one more than the highest branch id ever in use */
   uint32_t last_id;   /* the id the latest fork was given: the allocation cursor (see alloc_id) */
-  uint32_t version;   /* of the file: reuse of ids is only allowed from version 3 */
+  uint32_t version;   /* of the file: reuse of ids is only allowed from version 3, metadata, reset and state ids from version 4 */
+  uint64_t state_ctr; /* the last state id handed out: every commit takes the next one (a state id is never given to two different contents) */
   Layer **layers;
   size_t nlayers, caplayers;
   int txn_open;
@@ -354,10 +356,28 @@ static void layer_settle(fk_store *s, Layer *l) {
     }
   }
 }
-/* A branch is discarded: it no longer has a head. */
+/* Replace a branch's metadata (len 0 clears it). On failure nothing has changed. */
+static int meta_put(fk_store *s, uint32_t b, const uint8_t *m, uint32_t len) {
+  uint8_t *n = NULL;
+  if (len) {
+    n = malloc(len);
+    if (!n) return FK_ENOMEM;
+    memcpy(n, m, len);
+  }
+  free(s->br[b].meta);
+  s->br[b].meta = n;
+  s->br[b].nmeta = (uint16_t)len;
+  return FK_OK;
+}
+
+/* A branch is discarded: it no longer has a head. Its metadata goes with it, so that a later fork given the same id starts without any. */
 static void release_branch(fk_store *s, uint32_t b) {
   Layer *h = s->br[b].head;
   s->br[b].alive = 0;
+#ifndef FK_BUG_META_KEPT_ON_DISCARD
+  (void)meta_put(s, b, NULL, 0); /* mutant: the next branch to get this id inherits the metadata */
+#endif
+  s->br[b].state = 0;
   set_head(s, b, NULL);
 #ifdef FK_BUG_LAYER_NO_FREE
   return; /* mutant: nothing is freed or folded */
@@ -376,6 +396,9 @@ static int apply_commit(fk_store *s, uint32_t b, const PendPage *pp, uint32_t n,
   for (uint32_t i = 0; i < n; i++)
     if ((rc = layer_set(h, pp[i].pgno, pp[i].off)) != FK_OK) return rc;
   h->size = new_size;
+#ifndef FK_BUG_STATE_COMMIT_NOT_BUMPED
+  s->br[b].state = ++s->state_ctr; /* mutant: a commit leaves the state id as it was */
+#endif
   return FK_OK;
 }
 static int apply_fork(fk_store *s, uint32_t src, uint32_t dst) {
@@ -391,8 +414,40 @@ static int apply_fork(fk_store *s, uint32_t src, uint32_t dst) {
   if (!d) return FK_ENOMEM;
   set_head(s, dst, d);
   s->br[dst].alive = 1;
+#ifdef FK_BUG_STATE_FORK_NOT_COPIED
+  s->br[dst].state = ++s->state_ctr; /* mutant: a fork gets an id of its own although it holds the same content */
+#else
+  s->br[dst].state = s->br[src].state;
+#endif
   if (dst >= s->nb) s->nb = dst + 1;
   s->last_id = dst;
+  return FK_OK;
+}
+/* dst takes the content of src: the same two steps as a fork, but the new head goes to an existing branch, and the layers dst was on
+ * are released (folded or freed like after a discard). O(1). dst keeps its metadata. */
+static int apply_reset(fk_store *s, uint32_t dst, uint32_t src) {
+#ifdef FK_BUG_RESET_NO_EFFECT
+  (void)dst; (void)src;
+  return FK_OK; /* mutant: the branch keeps its content */
+#endif
+  Layer *f = s->br[src].head;
+  if (f->count == 0 && f->parent && f->size == f->parent->size) {
+    f = f->parent; /* nothing changed since the last fork: share the parent instead of stacking an empty layer */
+  } else {
+    Layer *nh = layer_new(s, f);
+    if (!nh) return FK_ENOMEM;
+    set_head(s, src, nh);
+  }
+  Layer *d = layer_new(s, f);
+  if (!d) return FK_ENOMEM;
+  Layer *old = s->br[dst].head;
+  set_head(s, dst, d);
+  if (old) layer_settle(s, old);
+#ifdef FK_BUG_STATE_RESET_NOT_COPIED
+  s->br[dst].state = ++s->state_ctr; /* mutant: after a reset the two branches hold the same content under different ids */
+#else
+  s->br[dst].state = s->br[src].state;
+#endif
   return FK_OK;
 }
 
@@ -560,10 +615,36 @@ static int snap_load(fk_store *s, const uint8_t *st, size_t n, const PendPage *c
     last = r_u32(&r);
     if (r.bad || last >= nb) rc = FK_ECORRUPT;
   }
+  uint64_t ctr = 0;
+  if (rc == FK_OK && version >= 4) {
+    /* version 4: the state counter, then per branch id its state id and metadata (dead ids: zero and nothing) */
+    ctr = r_u64(&r);
+    for (uint32_t b = 0; b < nb && rc == FK_OK; b++) {
+      uint64_t st = r_u64(&r);
+      uint32_t ml = r_u32(&r);
+      if (r.bad || ml > FK_META_MAX || n - r.i < ml || (!br[b].alive && (st || ml)) || st > ctr) { rc = FK_ECORRUPT; break; }
+      if (ml) {
+        br[b].meta = malloc(ml);
+        if (!br[b].meta) { rc = FK_ENOMEM; break; }
+        memcpy(br[b].meta, r.p + r.i, ml);
+        br[b].nmeta = (uint16_t)ml;
+      }
+      r.i += ml;
+      br[b].state = st;
+    }
+  } else if (rc == FK_OK) {
+    /* older snapshots know nothing of state ids: give every live branch an id of its own, so that no two are ever taken for equal */
+    for (uint32_t b = 0; b < nb; b++)
+      if (br[b].alive) br[b].state = ++ctr;
+#ifdef FK_BUG_V3_SNAP_STATES_EQUAL
+    for (uint32_t b = 0; b < nb; b++) br[b].state = 0; /* mutant: they all get the same one */
+#endif
+  }
   if (rc == FK_OK && r.i != n) rc = FK_ECORRUPT;
   for (uint32_t b = 0; b < nb && rc == FK_OK; b++)
     if (br[b].alive) br[b].head->nheads++; /* the new layers start with no heads: count them */
   if (rc != FK_OK) {
+    for (uint32_t b = 0; b < FK_MAX_BRANCHES; b++) free(br[b].meta);
     for (uint32_t i = 0; i < nl; i++) layer_free(L[i]);
     free(L);
     return rc;
@@ -572,7 +653,13 @@ static int snap_load(fk_store *s, const uint8_t *st, size_t n, const PendPage *c
   free(s->layers);
   s->layers = L;
   s->nlayers = s->caplayers = nl;
+  for (uint32_t b = 0; b < FK_MAX_BRANCHES; b++) free(s->br[b].meta);
   memcpy(s->br, br, sizeof br);
+#ifdef FK_BUG_STATE_CTR_NOT_RESTORED
+  s->state_ctr = 0; /* mutant: the counter starts again, so a state id can be handed out twice */
+#else
+  s->state_ctr = ctr;
+#endif
   s->nb = nb;
 #ifdef FK_BUG_ID_NO_CURSOR
   s->last_id = 0; /* mutant: the allocation cursor is not restored from a snapshot */
@@ -673,6 +760,29 @@ static int scan(fk_store *s, int64_t fsize, uint32_t version) {
       uint32_t b = get32(pay);
       if (b == 0 || b >= s->nb || !s->br[b].alive) break;
       release_branch(s, b);
+      unit = 1;
+    } else if (type == T_FORKM) {
+      if (version < 4 || len < 12 || npend) break;
+      uint32_t src = get32(pay), dst = get32(pay + 4), ml = get32(pay + 8);
+      if (ml > FK_META_MAX || len != 12 + ml) break;
+      if (src >= s->nb || !s->br[src].alive || dst >= FK_MAX_BRANCHES) break;
+      if (!(dst != 0 && (dst == s->nb || (dst < s->nb && !s->br[dst].alive)))) break;
+      if ((rc = apply_fork(s, src, dst)) != FK_OK) break;
+#ifndef FK_BUG_FORKM_REPLAY_NO_META
+      if ((rc = meta_put(s, dst, pay + 12, ml)) != FK_OK) break; /* mutant: recovery forgets the metadata a fork was given */
+#endif
+      unit = 1;
+    } else if (type == T_RESET) {
+      if (version < 4 || len != 8 || npend) break;
+      uint32_t dst = get32(pay), src = get32(pay + 4);
+      if (dst == src || dst >= s->nb || src >= s->nb || !s->br[dst].alive || !s->br[src].alive) break;
+      if ((rc = apply_reset(s, dst, src)) != FK_OK) break;
+      unit = 1;
+    } else if (type == T_META) {
+      if (version < 4 || len < 8 || npend) break;
+      uint32_t b = get32(pay), ml = get32(pay + 4);
+      if (ml > FK_META_MAX || len != 8 + ml || b >= s->nb || !s->br[b].alive) break;
+      if ((rc = meta_put(s, b, pay + 8, ml)) != FK_OK) break;
       unit = 1;
     } else if (type == T_CPAGE) {
       if (len != PAGE_PAYLOAD || slen || get32(pay) != NONE || get32(pay + 4) >= FK_MAX_PAGES) break;
@@ -779,6 +889,7 @@ void fk_close(fk_store *s) {
   if (!s->failed && s->end > s->mark_end) (void)write_marker(s, s->end, 1);
   for (size_t i = 0; i < s->nlayers; i++) layer_free(s->layers[i]);
   free(s->layers);
+  for (uint32_t i = 0; i < FK_MAX_BRANCHES; i++) free(s->br[i].meta);
   for (uint32_t i = 0; i < s->npp; i++) free(s->pp[i].data);
   free(s->pp);
   free(s);
@@ -895,6 +1006,82 @@ int fk_discard(fk_store *s, uint32_t b) {
   commit_tail(s, e, q, l);
   release_branch(s, b);
   maybe_mark(s);
+  return FK_OK;
+}
+
+/* ---------- version 4: state ids, metadata, reset ---------- */
+int fk_version(const fk_store *s) { return (int)s->version; }
+int fk_state(const fk_store *s, uint32_t b, uint64_t *st) {
+  if (s->failed) return FK_EFAILED;
+  if (!fk_branch_alive(s, b) || !st) return FK_ENOENT;
+  *st = s->br[b].state;
+  return FK_OK;
+}
+int fk_meta_get(const fk_store *s, uint32_t b, void *buf, size_t cap, size_t *len) {
+  if (s->failed) return FK_EFAILED;
+  if (!fk_branch_alive(s, b)) return FK_ENOENT;
+  size_t n = s->br[b].nmeta;
+  if (len) *len = n;
+  if (buf && cap && n) memcpy(buf, s->br[b].meta, n < cap ? n : cap);
+  return FK_OK;
+}
+/* One record, one fsync: the append that fork, discard, reset and meta all use. */
+static int append_unit(fk_store *s, uint16_t type, const uint8_t *pay, uint32_t len) {
+  uint64_t e = s->end, q = s->seq;
+  uint32_t l = s->last_crc;
+  int rc = put_rec(s, type, pay, len, &e, &q, &l, NULL);
+  if (rc == FK_OK) rc = do_sync(s);
+  if (rc != FK_OK) return rc;
+  commit_tail(s, e, q, l);
+  return FK_OK;
+}
+int fk_reset(fk_store *s, uint32_t dst, uint32_t src) {
+  if (s->failed) return FK_EFAILED;
+  if (s->txn_open) return FK_EBUSY;
+  if (s->version < 4) return FK_EVERSION;
+  if (dst == src || !fk_branch_alive(s, dst) || !fk_branch_alive(s, src)) return FK_EINVAL;
+  uint8_t pay[8];
+  put32(pay, dst);
+  put32(pay + 4, src);
+  int rc = append_unit(s, T_RESET, pay, 8);
+  if (rc != FK_OK) return rc;
+  if ((rc = apply_reset(s, dst, src)) != FK_OK) { s->failed = 1; return rc; }
+  maybe_mark(s);
+  return FK_OK;
+}
+int fk_meta_set(fk_store *s, uint32_t b, const void *meta, size_t len) {
+  if (s->failed) return FK_EFAILED;
+  if (s->txn_open) return FK_EBUSY;
+  if (s->version < 4) return FK_EVERSION;
+  if (!fk_branch_alive(s, b) || len > FK_META_MAX || (len && !meta)) return FK_EINVAL;
+  uint8_t pay[8 + FK_META_MAX];
+  put32(pay, b);
+  put32(pay + 4, (uint32_t)len);
+  if (len) memcpy(pay + 8, meta, len);
+  int rc = append_unit(s, T_META, pay, 8 + (uint32_t)len);
+  if (rc != FK_OK) return rc;
+  if ((rc = meta_put(s, b, pay + 8, (uint32_t)len)) != FK_OK) { s->failed = 1; return rc; }
+  maybe_mark(s);
+  return FK_OK;
+}
+int fk_fork_meta(fk_store *s, uint32_t src, const void *meta, size_t len, uint32_t *dst) {
+  if (s->failed) return FK_EFAILED;
+  if (s->txn_open) return FK_EBUSY;
+  if (s->version < 4) return FK_EVERSION;
+  if (!fk_branch_alive(s, src) || len > FK_META_MAX || (len && !meta)) return FK_EINVAL;
+  uint32_t id = 0;
+  int rc = alloc_id(s, &id);
+  if (rc != FK_OK) return rc;
+  uint8_t pay[12 + FK_META_MAX];
+  put32(pay, src);
+  put32(pay + 4, id);
+  put32(pay + 8, (uint32_t)len);
+  if (len) memcpy(pay + 12, meta, len);
+  if ((rc = append_unit(s, T_FORKM, pay, 12 + (uint32_t)len)) != FK_OK) return rc;
+  if ((rc = apply_fork(s, src, id)) != FK_OK) { s->failed = 1; return rc; }
+  if ((rc = meta_put(s, id, pay + 12, (uint32_t)len)) != FK_OK) { s->failed = 1; return rc; }
+  maybe_mark(s);
+  *dst = id;
   return FK_OK;
 }
 
@@ -1116,13 +1303,15 @@ static int new_off(const Plan *P, uint64_t old, uint64_t *out) {
   *out = HDR_SZ + (uint64_t)lo * REC_PAGE_SZ;
   return FK_OK;
 }
-static size_t plan_stream_len(const Plan *P, uint32_t nb) {
+static size_t plan_stream_len(const fk_store *s, const Plan *P, uint32_t nb) {
   size_t n = 8 + 5 * (size_t)nb + 4; /* header counts, one entry per branch id, the allocation cursor */
+  n += 8 + 12 * (size_t)nb;            /* version 4: the state counter, and per branch id a state id and a metadata length */
+  for (uint32_t i = 0; i < nb; i++) if (P->head[i] != NONE) n += s->br[i].nmeta;
   for (uint32_t i = 0; i < P->nl; i++) n += 12 + 12 * (size_t)P->l[i].n;
   return n;
 }
-static uint64_t plan_live_bytes(const Plan *P, uint32_t nb) {
-  size_t sl = plan_stream_len(P, nb);
+static uint64_t plan_live_bytes(const fk_store *s, const Plan *P, uint32_t nb) {
+  size_t sl = plan_stream_len(s, P, nb);
   size_t chunks = (sl + PAGE_PAYLOAD - 1) / PAGE_PAYLOAD;
   return HDR_SZ + (uint64_t)P->nu * REC_PAGE_SZ + sl + chunks * REC_HDR + REC_HDR + 12;
 }
@@ -1147,6 +1336,17 @@ static int plan_stream(const fk_store *s, const Plan *P, Buf *b) {
     b_u32(b, a ? P->head[i] : 0);
   }
   b_u32(b, s->last_id); /* version 3: the allocation cursor */
+  b_u64(b, s->state_ctr); /* version 4 */
+  for (uint32_t i = 0; i < s->nb; i++) {
+    int alive = P->head[i] != NONE;
+    uint32_t ml = alive ? s->br[i].nmeta : 0;
+#ifdef FK_BUG_META_LOST_COMPACT
+    ml = 0; /* mutant: compaction leaves the metadata out */
+#endif
+    b_u64(b, alive ? s->br[i].state : 0);
+    b_u32(b, ml);
+    if (ml) b_put(b, s->br[i].meta, ml);
+  }
   return b->err ? FK_ENOMEM : FK_OK;
 }
 
@@ -1227,7 +1427,7 @@ static int compact_core(fk_store *s, int force, uint64_t min_bytes, int *did) {
   if (!s->io.sibling_create || !s->io.sibling_rename || !s->io.sync_dir || !s->io.sibling_remove) return FK_EINVAL;
   Plan P;
   int rc = plan_build(s, &P);
-  if (rc == FK_OK && !force && (s->end < min_bytes || plan_live_bytes(&P, s->nb) * 2 >= s->end)) { plan_free(&P); return FK_OK; }
+  if (rc == FK_OK && !force && (s->end < min_bytes || plan_live_bytes(s, &P, s->nb) * 2 >= s->end)) { plan_free(&P); return FK_OK; }
   if (rc == FK_OK) rc = compact_exec(s, &P);
   plan_free(&P);
   if (rc == FK_OK && did) *did = 1;
@@ -1241,7 +1441,7 @@ int fk_stats(fk_store *s, uint64_t *file_bytes, uint64_t *live_bytes) {
   int rc = plan_build(s, &P);
   if (rc == FK_OK) {
     if (file_bytes) *file_bytes = s->end;
-    if (live_bytes) *live_bytes = plan_live_bytes(&P, s->nb);
+    if (live_bytes) *live_bytes = plan_live_bytes(s, &P, s->nb);
   }
   plan_free(&P);
   return rc;
