@@ -1,39 +1,54 @@
 already present: <repo>/spike/vendor/sqlite-amalgamation-3500000
 cached: sqlite3-stock.o
 cached: sqlite3-batch.o
+cached: sqlite3-session.o
 == SQLite build: batch (address and undefined-behaviour sanitizers on)
 built <repo>/vfs/build/vfs_test-batch-san
-SQLite 3.50.0, batch-atomic compiled in: yes
+SQLite 3.50.0, batch-atomic compiled in: yes, session extension compiled in: no
 T11 power loss under SQLite (batch advertised=1): 7 transactions on b0, a fork after the third, 4 on b1
    93 I/O events in the run; 189 crash or failure points, 6820 post-crash images checked, 0 violations
 T11 power loss under SQLite (batch advertised=0): 7 transactions on b0, a fork after the third, 4 on b1
    93 I/O events in the run; 189 crash or failure points, 6820 post-crash images checked, 0 violations
-checks=335 TOTAL FAILS=0
+T11 power loss under SQLite (batch advertised=0, behind the preallocation layer): 7 transactions on b0, a fork after the third, 4 on b1
+   125 I/O events in the run; 253 crash or failure points, 2092 post-crash images checked, 0 violations
+checks=454 TOTAL FAILS=0
 == SQLite build: stock (address and undefined-behaviour sanitizers on)
 built <repo>/vfs/build/vfs_test-stock-san
-SQLite 3.50.0, batch-atomic compiled in: no
+SQLite 3.50.0, batch-atomic compiled in: no, session extension compiled in: no
 T11 power loss under SQLite (batch advertised=0): 7 transactions on b0, a fork after the third, 4 on b1
    93 I/O events in the run; 189 crash or failure points, 6820 post-crash images checked, 0 violations
-checks=319 TOTAL FAILS=0
+T11 power loss under SQLite (batch advertised=0, behind the preallocation layer): 7 transactions on b0, a fork after the third, 4 on b1
+   125 I/O events in the run; 253 crash or failure points, 2092 post-crash images checked, 0 violations
+checks=437 TOTAL FAILS=0
+== SQLite build: session (address and undefined-behaviour sanitizers on)
+built <repo>/vfs/build/vfs_test-session-san
+SQLite 3.50.0, batch-atomic compiled in: no, session extension compiled in: yes
+T11 power loss under SQLite (batch advertised=0): 7 transactions on b0, a fork after the third, 4 on b1
+   93 I/O events in the run; 189 crash or failure points, 6820 post-crash images checked, 0 violations
+T11 power loss under SQLite (batch advertised=0, behind the preallocation layer): 7 transactions on b0, a fork after the third, 4 on b1
+   125 I/O events in the run; 253 crash or failure points, 2092 post-crash images checked, 0 violations
+checks=464 TOTAL FAILS=0
 == do the tests catch broken VFS code? (each mutant must make the tests fail)
-  caught:   an atomic commit that discards the pages and says OK  (75 failing lines)
-  caught:   a transaction published only half  (330 failing lines)
-  caught:   dedupe drops every page  (190 failing lines)
+  caught:   an atomic commit that discards the pages and says OK  (83 failing lines)
+  caught:   a transaction published only half  (551 failing lines)
+  caught:   dedupe drops every page  (379 failing lines)
   caught:   dedupe off (rollbacks cost a commit)  (3 failing lines)
   caught:   a shrink is forgotten  (3 failing lines)
   caught:   no read-your-writes  (3 failing lines)
   caught:   a writer is not held off by readers  (5 failing lines)
   caught:   a failed atomic commit is swallowed and its pages dropped  (418 failing lines)
-  caught:   a failed sync is reported as OK  (888 failing lines)
+  caught:   a failed sync is reported as OK  (1427 failing lines)
+  caught:   the super-journal is not refused (a transaction may write several attached branches)  (2220 failing lines)
+  caught:   journal_mode MEMORY and OFF are not refused (no super-journal is made in them)  (7 failing lines)
   caught:   the WAL pragma is not refused  (5 failing lines)
   caught:   synchronous=OFF is not refused  (4 failing lines)
   caught:   a truncate keeps the staged pages beyond it  (3 failing lines)
-scripts/test-vfs.sh: line 30: 323047 Segmentation fault      timeout "$limit" "$tmp/m/t" > "$tmp/m/out" 2>&1
+scripts/test-vfs.sh: line 31: 32639 Segmentation fault      timeout "$limit" "$tmp/m/t" > "$tmp/m/out" 2>&1
   caught:   a no-op publish leaves its staging in place  (0 failing lines)
-scripts/test-vfs.sh: line 30: 323071 Segmentation fault      timeout "$limit" "$tmp/m/t" > "$tmp/m/out" 2>&1
+scripts/test-vfs.sh: line 31: 32663 Segmentation fault      timeout "$limit" "$tmp/m/t" > "$tmp/m/out" 2>&1
   caught:   a failed commit keeps staging whose pages the store already took  (0 failing lines)
   caught:   the zero-fill pass overwrites pages already handed to the store  (3 failing lines)
   caught:   a branch id is not checked  (2 failing lines)
-   16 of 16 mutants caught
+   18 of 18 mutants caught
 all VFS tests passed
 END rc=0
