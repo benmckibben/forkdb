@@ -384,8 +384,9 @@ static int replay_begin_ex(fkx *x, const char *old_ref, const char *new_ref, con
     sqlite3_free(q);
     while (sqlite3_step(st) == SQLITE_ROW) {
       char *nm = strdup((const char *)sqlite3_column_text(st, 0)), *sq = strdup((const char *)sqlite3_column_text(st, 1));
+      if (!nm || !sq) { free(nm); free(sq); sqlite3_finalize(st); rc = FKX_ENOMEM; goto fail; }
       char **g = realloc(r->trig, (r->ntrig + 1) * sizeof *g);
-      if (!nm || !sq || !g) { free(nm); free(sq); sqlite3_finalize(st); rc = FKX_ENOMEM; goto fail; }
+      if (!g) { free(nm); free(sq); sqlite3_finalize(st); rc = FKX_ENOMEM; goto fail; }
       r->trig = g;
       r->trig[r->ntrig++] = sq;
 #ifndef FKX_BUG_REPLAY_KEEPS_TRIGGERS
