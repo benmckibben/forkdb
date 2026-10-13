@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <inttypes.h>
 
 /* sqlite3ext.h must be first */
@@ -48,14 +49,20 @@ __attribute__((unused)) __attribute__((unused)) static void repo_close_all(void)
 }
 
 static int repo_add(const char *path, fkx *x, sqlite3_context *ctx) {
-    if (nrepos >= MAX_REPOS) {
-        sqlite3_result_error(ctx, "too many open repositories", -1);
-        fkx_close(x);
-        return 0;
+    int slot = -1;
+    for (int i = 0; i < nrepos; i++) {
+        if (!repo_reg[i].path) { slot = i; break; }
     }
-    repo_reg[nrepos].path = strdup(path);
-    repo_reg[nrepos].x = x;
-    nrepos++;
+    if (slot < 0) {
+        if (nrepos >= MAX_REPOS) {
+            sqlite3_result_error(ctx, "too many open repositories", -1);
+            fkx_close(x);
+            return 0;
+        }
+        slot = nrepos++;
+    }
+    repo_reg[slot].path = strdup(path);
+    repo_reg[slot].x = x;
     return 1;
 }
 
@@ -239,6 +246,8 @@ static void fn_close(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
             free(repo_reg[i].path);
             repo_reg[i].path = NULL;
             repo_reg[i].x = NULL;
+            while (nrepos > 0 && !repo_reg[nrepos - 1].path)
+                nrepos--;
             sqlite3_result_null(ctx);
             return;
         }
@@ -297,6 +306,8 @@ static void fn_reset(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     if (!x) return;
     const char *name = argc >= 2 ? (const char *)sqlite3_value_text(argv[1]) : NULL;
     const char *to = argc >= 3 ? (const char *)sqlite3_value_text(argv[2]) : NULL;
+    if (!name) { sqlite3_result_error(ctx, "reset: need a name", -1); return; }
+    /* to == NULL is valid: fkx_reset treats it as "reset to this branch's base". */
 
     rc = fkx_reset(x, name, to);
     if (rc != FKX_OK) { sqlite3_result_error(ctx, fkx_errmsg(x), -1); return; }
@@ -323,6 +334,22 @@ static void fn_vfs_name(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
 
 /* ---- session-dependent functions ---- */
 
+/* Append formatted text that fits entirely. snprintf's return is the length that
+ * would have been written, so a truncated call must not advance the cursor.
+ * Returns the new offset, or -1 if the text does not fit (buffer restored). */
+static int append_fit(char *buf, int cap, int off, const char *fmt, ...) {
+    if (off < 0 || off >= cap) return -1;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + off, (size_t)(cap - off), fmt, ap);
+    va_end(ap);
+    if (n < 0 || n >= cap - off) {
+        buf[off] = '\0';
+        return -1;
+    }
+    return off + n;
+}
+
 static int check_session(sqlite3_context *ctx) {
     if (session_available()) return 1;
     sqlite3_result_error(ctx, "this host has no session API: diff, promote and undo are not available (see forkdb_info)", -1);
@@ -342,12 +369,13 @@ static void fn_diff(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     rc = fkx_diff(x, ref, against, &r);
     if (rc != FKX_OK) { sqlite3_result_error(ctx, fkx_errmsg(x), -1); return; }
 
-    /* return: a single row of columnar results using a subvalue approach.
-     * Easiest: serialize as a JSON-like string. */
+    /* JSON text. cap leaves room for the closing ]} and a NUL after the
+     * last table entry that fit completely. */
     char buf[4096];
-    int off = snprintf(buf, sizeof buf, "{\"schema_differs\":%s,\"nchangeset\":%d,\"tables\":[",
-                       r.schema_differs ? "true" : "false", r.nchangeset);
-    for (size_t i = 0; i < r.ntables && off < (int)sizeof(buf) - 200; i++) {
+    const int cap = (int)sizeof buf - 2;
+    int off = append_fit(buf, cap, 0, "{\"schema_differs\":%s,\"nchangeset\":%d,\"tables\":[",
+                         r.schema_differs ? "true" : "false", r.nchangeset);
+    for (size_t i = 0; i < r.ntables && off >= 0; i++) {
         fkx_table_diff *t = &r.tables[i];
         const char *st = "?";
         switch (t->status) {
@@ -358,20 +386,26 @@ static void fn_diff(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
             case FKX_TABLE_SCHEMA: st = "schema"; break;
             case FKX_TABLE_VIRTUAL: st = "virtual"; break;
         }
+        int next;
         if (t->status == FKX_TABLE_COMPARED)
-            off += snprintf(buf + off, (int)sizeof(buf) - off,
-                            "%s{\"name\":\"%s\",\"status\":\"%s\",\"inserts\":%" PRIu64 ",\"updates\":%" PRIu64 ",\"deletes\":%" PRIu64 "}",
-                            i > 0 ? "," : "", t->name, st, t->inserts, t->updates, t->deletes);
+            next = append_fit(buf, cap, off,
+                              "%s{\"name\":\"%s\",\"status\":\"%s\",\"inserts\":%" PRIu64 ",\"updates\":%" PRIu64 ",\"deletes\":%" PRIu64 "}",
+                              i > 0 ? "," : "", t->name, st, t->inserts, t->updates, t->deletes);
         else if (t->status == FKX_TABLE_NO_PK)
-            off += snprintf(buf + off, (int)sizeof(buf) - off,
-                            "%s{\"name\":\"%s\",\"status\":\"%s\",\"rows_differ\":%s}",
-                            i > 0 ? "," : "", t->name, st, t->rows_differ ? "true" : "false");
+            next = append_fit(buf, cap, off,
+                              "%s{\"name\":\"%s\",\"status\":\"%s\",\"rows_differ\":%s}",
+                              i > 0 ? "," : "", t->name, st, t->rows_differ ? "true" : "false");
         else
-            off += snprintf(buf + off, (int)sizeof(buf) - off,
-                            "%s{\"name\":\"%s\",\"status\":\"%s\"}",
-                            i > 0 ? "," : "", t->name, st);
+            next = append_fit(buf, cap, off,
+                              "%s{\"name\":\"%s\",\"status\":\"%s\"}",
+                              i > 0 ? "," : "", t->name, st);
+        if (next < 0) break;
+        off = next;
     }
-    snprintf(buf + off, sizeof buf - off, "]}");
+    if (off < 0 || off > cap - 1) off = off < 0 ? 0 : cap - 1;
+    buf[off] = ']';
+    buf[off + 1] = '}';
+    buf[off + 2] = '\0';
     sqlite3_result_text(ctx, buf, -1, SQLITE_TRANSIENT);
 
     /* also return changeset blob */

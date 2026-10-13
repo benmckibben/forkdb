@@ -2,9 +2,8 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
-main_root=/home/openclaw/projects/forkdb
-VENDOR=$main_root/spike/vendor/sqlite-amalgamation-3500000
-VFS_BUILD=$main_root/vfs/build
+VENDOR=$root/spike/vendor/sqlite-amalgamation-3500000
+VFS_BUILD=$root/vfs/build
 out=$root/build
 mkdir -p "$out"
 F="-Wall -Wextra -std=gnu11 -O1 -g"

@@ -204,8 +204,11 @@ static int cmd_init(int argc, char **argv) {
     rc = fkx_info_get(x, name, &info);
     if (rc != FKX_OK) { die_err("init", x, rc); fkx_close(x); return 1; }
 
-    if (json_output) printf("{\"status\":\"created\",\"branch\":\"%s\",\"uid\":\"%016" PRIx64 "\"}\n",
-                            name, info.uid);
+    if (json_output) {
+        printf("{\"status\":\"created\",\"branch\":");
+        json_str(stdout, name);
+        printf(",\"uid\":\"%016" PRIx64 "\"}\n", info.uid);
+    }
     else printf("created store \"%s\", branch \"%s\"\n", path, name);
 
     fkx_close(x);
@@ -321,8 +324,13 @@ static int cmd_fork(int argc, char **argv) {
     rc = fkx_info_get(x, argv[optind + 1], &info);
     if (rc != FKX_OK) { die_err("fork", x, rc); fkx_close(x); return 1; }
 
-    if (json_output) printf("{\"forked\":{\"name\":\"%s\",\"from\":\"%s\",\"uid\":\"%016" PRIx64 "\"}}\n",
-                            argv[optind + 1], from, info.uid);
+    if (json_output) {
+        printf("{\"forked\":{\"name\":");
+        json_str(stdout, argv[optind + 1]);
+        printf(",\"from\":");
+        json_str(stdout, from);
+        printf(",\"uid\":\"%016" PRIx64 "\"}}\n", info.uid);
+    }
     else printf("forked \"%s\" from \"%s\" (uid %016" PRIx64 ")\n",
                 argv[optind + 1], from, info.uid);
 
@@ -360,8 +368,13 @@ static int cmd_snapshot(int argc, char **argv) {
     rc = fkx_info_get(x, argv[optind + 1], &info);
     if (rc != FKX_OK) { die_err("snapshot", x, rc); fkx_close(x); return 1; }
 
-    if (json_output) printf("{\"snapshot\":{\"name\":\"%s\",\"from\":\"%s\",\"uid\":\"%016" PRIx64 "\"}}\n",
-                            argv[optind + 1], from, info.uid);
+    if (json_output) {
+        printf("{\"snapshot\":{\"name\":");
+        json_str(stdout, argv[optind + 1]);
+        printf(",\"from\":");
+        json_str(stdout, from);
+        printf(",\"uid\":\"%016" PRIx64 "\"}}\n", info.uid);
+    }
     else printf("snapshot \"%s\" from \"%s\" (uid %016" PRIx64 ")\n",
                 argv[optind + 1], from, info.uid);
 
@@ -675,8 +688,13 @@ static int cmd_reset(int argc, char **argv) {
     rc = fkx_reset(x, argv[optind + 1], argv[optind + 2]);
     if (rc != FKX_OK) { die_err("reset", x, rc); fkx_close(x); return 1; }
 
-    if (json_output) printf("{\"reset\":{\"name\":\"%s\",\"to\":\"%s\"}}\n",
-                            argv[optind + 1], argv[optind + 2]);
+    if (json_output) {
+        printf("{\"reset\":{\"name\":");
+        json_str(stdout, argv[optind + 1]);
+        printf(",\"to\":");
+        json_str(stdout, argv[optind + 2]);
+        printf("}}\n");
+    }
     else printf("reset \"%s\" to \"%s\"\n", argv[optind + 1], argv[optind + 2]);
 
     fkx_close(x);
@@ -754,6 +772,102 @@ static int cmd_compact(int argc, char **argv) {
     return 0;
 }
 
+struct sql_out {
+    int rows_in_set;
+    int ncol;
+    char **names;
+};
+
+static void sql_out_clear(struct sql_out *o) {
+    if (o->names) {
+        for (int i = 0; i < o->ncol; i++) free(o->names[i]);
+        free(o->names);
+    }
+    o->names = NULL;
+    o->ncol = 0;
+}
+
+static int sql_same_cols(const struct sql_out *o, int ncol, char **names) {
+    if (!o->names || o->ncol != ncol) return 0;
+    for (int i = 0; i < ncol; i++) {
+        const char *a = o->names[i] ? o->names[i] : "";
+        const char *b = (names && names[i]) ? names[i] : "";
+        if (strcmp(a, b) != 0) return 0;
+    }
+    return 1;
+}
+
+static int sql_save_cols(struct sql_out *o, int ncol, char **names) {
+    char **copy = calloc((size_t)ncol, sizeof *copy);
+    if (!copy) return 1;
+    for (int i = 0; i < ncol; i++) {
+        const char *n = (names && names[i]) ? names[i] : "";
+        copy[i] = strdup(n);
+        if (!copy[i]) {
+            for (int j = 0; j < i; j++) free(copy[j]);
+            free(copy);
+            return 1;
+        }
+    }
+    sql_out_clear(o);
+    o->names = copy;
+    o->ncol = ncol;
+    o->rows_in_set = 0;
+    return 0;
+}
+
+static int sql_print_row(void *ud, int ncol, char **vals, char **names) {
+    struct sql_out *o = ud;
+    int new_set = !sql_same_cols(o, ncol, names);
+    int had_rows = o->rows_in_set;
+    if (new_set && sql_save_cols(o, ncol, names)) return 1;
+
+    if (json_output) {
+        if (new_set && had_rows) fputs("]\n", stdout);
+        fputc(o->rows_in_set ? ',' : '[', stdout);
+        fputc('{', stdout);
+        for (int i = 0; i < ncol; i++) {
+            if (i) fputc(',', stdout);
+            json_str(stdout, (names && names[i]) ? names[i] : "");
+            fputc(':', stdout);
+            if (vals && vals[i]) json_str(stdout, vals[i]);
+            else fputs("null", stdout);
+        }
+        fputc('}', stdout);
+    } else if (new_set) {
+        if (had_rows) fputc('\n', stdout);
+        for (int i = 0; i < ncol; i++) {
+            if (i) fputc('\t', stdout);
+            fputs((names && names[i]) ? names[i] : "", stdout);
+        }
+        fputc('\n', stdout);
+    }
+    if (!json_output) {
+        for (int i = 0; i < ncol; i++) {
+            if (i) fputc('\t', stdout);
+            fputs((vals && vals[i]) ? vals[i] : "NULL", stdout);
+        }
+        fputc('\n', stdout);
+    }
+    o->rows_in_set++;
+    return 0;
+}
+
+static int sql_exec(sqlite3 *db, const char *sql) {
+    struct sql_out o;
+    memset(&o, 0, sizeof o);
+    char *err = NULL;
+    int rc = sqlite3_exec(db, sql, sql_print_row, &o, &err);
+    if (json_output && o.rows_in_set) fputs("]\n", stdout);
+    sql_out_clear(&o);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, PROGRAM ": sql: %s\n", err ? err : sqlite3_errmsg(db));
+        sqlite3_free(err);
+        return 1;
+    }
+    return 0;
+}
+
 static int cmd_sql(int argc, char **argv) {
     static struct option lopts[] = {
         {"write", no_argument, 0, 'w'},
@@ -786,23 +900,11 @@ static int cmd_sql(int argc, char **argv) {
     const char *sql = optind + 2 < argc ? argv[optind + 2] : NULL;
 
     if (sql) {
-        char *err = NULL;
-        rc = sqlite3_exec(db, sql, NULL, NULL, &err);
-        if (rc != SQLITE_OK) {
-            fprintf(stderr, PROGRAM ": sql: %s\n", err ? err : sqlite3_errmsg(db));
-            sqlite3_free(err);
-            ret = 1;
-        }
+        ret = sql_exec(db, sql);
     } else {
         char buf[4096];
         while (fgets(buf, (int)sizeof buf, stdin)) {
-            char *err = NULL;
-            rc = sqlite3_exec(db, buf, NULL, NULL, &err);
-            if (rc != SQLITE_OK) {
-                fprintf(stderr, PROGRAM ": sql: %s\n", err ? err : sqlite3_errmsg(db));
-                sqlite3_free(err);
-                ret = 1;
-            }
+            if (sql_exec(db, buf)) ret = 1;
         }
     }
 
