@@ -1,6 +1,7 @@
-/* fkx: the branch layer of forkdb (docs/FKX-DESIGN.md). The core (everything but the session driver) is implemented in fkx/fkx.c. In a build
- * without the session driver (fkx/fkx_nosession.c) fkx_diff, fkx_diff_open and fkx_replay_begin return FKX_ENOSESSION, fkx_promote and
- * fkx_undo only do what a fast-forward and a reset can (anything that would need a replay returns FKX_ENOSESSION and changes nothing).
+/* fkx: the branch layer of forkdb (docs/FKX-DESIGN.md). Implemented in fkx/fkx.c (the core) and fkx/fkx_session.c (diff, replay promote, undo by replay and
+ * the stepwise primitives, on SQLite's session extension). A build without the session driver links fkx/fkx_nosession.c instead: fkx_have_session() is 0,
+ * fkx_diff, fkx_diff_open and fkx_replay_begin return FKX_ENOSESSION, and fkx_promote and fkx_undo only do what a fast-forward and a reset can (anything
+ * that would need a replay returns FKX_ENOSESSION and changes nothing).
  *
  * fkx sits on the durable store (store/fkstore.h) and the SQLite VFS (vfs/fkvfs.h). It gives branches names, keeps what a fork was forked
  * from, and implements fork, snapshot, reset, discard, diff, promote and undo. It takes SQLite as given: it never links a second copy, and
