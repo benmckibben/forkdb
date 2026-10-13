@@ -10,6 +10,7 @@
 #ifndef FK_MAX_BRANCHES
 #define FK_MAX_BRANCHES 1024u /* branch ids are below this: at most this many branches alive at once (tests build with a smaller value) */
 #endif
+#define FK_META_MAX 512u /* the most bytes of metadata a branch can carry */
 #define FK_MAX_PAGES (1u << 28) /* page numbers and sizes are below this (1 TiB at 4 KiB pages) */
 
 enum {
@@ -21,7 +22,8 @@ enum {
   FK_EFAILED = -5,  /* an earlier I/O error: close and reopen (recovery) before using the store again */
   FK_ENOMEM = -6,
   FK_EBUSY = -7,    /* a transaction is open */
-  FK_ELIMIT = -8    /* fork: FK_MAX_BRANCHES branches are alive; discard one first */
+  FK_ELIMIT = -8,   /* fork: FK_MAX_BRANCHES branches are alive; discard one first */
+  FK_EVERSION = -9  /* the file is older than format version 4: compact it (fk_compact rewrites it in the current format) to use this */
 };
 
 /* The only way the store touches storage. Offsets are absolute file offsets. */
@@ -82,6 +84,28 @@ int fk_read(fk_store *s, uint32_t b, uint32_t pgno, void *buf);
 /* O(1) in the size of the data: one small record and one fsync. */
 int fk_fork(fk_store *s, uint32_t src, uint32_t *dst);
 int fk_discard(fk_store *s, uint32_t b);                 /* branch 0 cannot be discarded */
+
+/* Format version 4: state ids, metadata, reset. Files written by this version are version 4; an older file keeps opening and working
+ * as before, and the calls below that write return FK_EVERSION on it until it is compacted (fk_compact writes the current format).
+ * fk_version says which the open file is.
+ *
+ * State id: a number that says which content a branch holds. A commit gives the branch a new one that has never been used for any
+ * other content; fork and reset give the new branch the id of its source. So two live branches hold the same content when their ids
+ * are equal (and, as ids are never reused for different content, only then). Ids are kept across close, recovery and compaction, but
+ * they mean nothing across stores or after a file written by an older version is first compacted. Reads never fail on a v3 file. */
+int fk_version(const fk_store *s);
+int fk_state(const fk_store *s, uint32_t b, uint64_t *state);
+/* Metadata: up to FK_META_MAX bytes the layer above keeps with a branch (a name, what it is for). Replaced whole (length 0 clears it),
+ * one record and one fsync, kept across recovery and compaction, dropped when the branch is discarded (so a branch that later gets the
+ * same id starts without). A plain fork starts without metadata. fk_meta_get copies at most cap bytes and always sets *len to the full length. */
+int fk_meta_set(fk_store *s, uint32_t b, const void *meta, size_t len);
+int fk_meta_get(const fk_store *s, uint32_t b, void *buf, size_t cap, size_t *len);
+/* fork and give the new branch its metadata in the same record: there is no state in which the branch exists without it. */
+int fk_fork_meta(fk_store *s, uint32_t src, const void *meta, size_t len, uint32_t *dst);
+/* dst takes the content (and size, and state id) of src, which stays as it is; dst's metadata is kept. O(1): one small record and one
+ * fsync. The old content of dst is no longer reachable (compaction frees it). dst may be branch 0. Needs no open transaction.
+ * The caller must make sure nothing still holds the old content of dst in a cache (the VFS refuses while a connection is open on it). */
+int fk_reset(fk_store *s, uint32_t dst, uint32_t src);
 
 /* A transaction: pages written here become visible, all together, when commit returns FK_OK. */
 int fk_txn_begin(fk_store *s, uint32_t b);

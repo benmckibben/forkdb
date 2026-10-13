@@ -1,5 +1,21 @@
 # Test data
 
+`v3-compacted.fk` is a store in **format version 3** (before branch metadata, reset and state ids), with a snapshot from a compaction, written by the
+store as it was at commit `1e59d6c`. [file_test.c](../file_test.c) opens a copy of it with the current code, to show that version 3 files still open, read
+back correctly, refuse the version 4 write calls until they are compacted, and upgrade by compaction. Like the version 2 fixture it must never be
+regenerated with the current code.
+
+```sh
+d=$(mktemp -d)
+for f in fkstore.c fkstore.h io_file.c; do git show 1e59d6c:store/$f > "$d/$f"; done
+cp test/data/gen_v3.c "$d/"
+cc -O2 -std=gnu11 -I"$d" "$d/gen_v3.c" "$d/fkstore.c" "$d/io_file.c" -o "$d/gen_v3" && "$d/gen_v3" test/data/v3-compacted.fk
+```
+
+The history it contains is described at the top of [gen_v3.c](gen_v3.c).
+
+---
+
 `v2-compacted.fk` is a store in **format version 2** (before branch ids could be reused), with a snapshot from a compaction, written by the
 store as it was at commit `7008c1c`. [file_test.c](../file_test.c) opens a copy of it with the current code, to show that files written by the
 previous release still open, read back correctly, and keep working. It must never be regenerated with the current code: the point is that

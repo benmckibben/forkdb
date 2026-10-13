@@ -166,6 +166,23 @@ static int same_file(const char *a, const char *b) {
   return same;
 }
 
+static int same_meta(fk_store *s, uint32_t b, const char *m) {
+  uint8_t t[FK_META_MAX + 8];
+  size_t n = 99, want = strlen(m);
+  return fk_meta_get(s, b, t, sizeof t, &n) == 0 && n == want && !memcmp(t, m, n);
+}
+static int stid(fk_store *s, uint32_t b, uint64_t *v) { return fk_state(s, b, v) == 0; }
+static int same_state(fk_store *s, uint32_t a, uint32_t b) { uint64_t x = 0, y = 1; return stid(s, a, &x) && stid(s, b, &y) && x == y; }
+static uint32_t size_of(fk_store *s, uint32_t b) { uint32_t z = 0xffffffffu; fk_size(s, b, &z); return z; }
+/* the store the torn-tail tests start from: main (1, 2); branch 1 = (9, 2) with metadata "m1" */
+static void v4_base(const char *p) {
+  fk_io io; fk_store *s = NULL; uint32_t f = 0;
+  remove(p);
+  if (!open_path(p, &io, &s) || commit1(s, 0, 0, 1, 2) || commit1(s, 0, 1, 2, 2) || fk_fork(s, 0, &f) || commit1(s, f, 0, 9, 2) || fk_meta_set(s, f, "m1", 2)) exit(2);
+  fk_close(s);
+  fk_file_close(&io);
+}
+
 int main(void) {
   char dir[] = "/tmp/fkfileXXXXXX";
   if (!mkdtemp(dir)) return 2;
@@ -697,7 +714,7 @@ int main(void) {
     CHECK(s5 && fk_compact(s5) == 0, "compact it");
     if (s5) fk_close(s5);
     fk_file_close(&i5);
-    CHECK(file_version(p) == 3, "the compacted file is version 3");
+    CHECK(file_version(p) == 4, "the compacted file is version 4 (compaction writes the current format)");
     s5 = NULL;
     CHECK(open_path(p, &i5, &s5) && has(s5, 0, 0, 5) && has(s5, 2, 1, 33) && has(s5, 3, 0, 77) && fk_branch_alive(s5, 5) && !fk_branch_alive(s5, 4), "reopen: nothing lost");
     n = 0;
@@ -707,11 +724,151 @@ int main(void) {
     /* a version this program does not know is refused, and nothing is cut off */
     snprintf(p, sizeof p, "%s/future.fk", dir);
     CHECK(copy_file(src, p), "copy the fixture again");
-    patch_header_version(p, 4);
+    patch_header_version(p, 5);
     long before = fsz(p);
     s5 = NULL;
-    CHECK(fk_file_open(p, &i5) == 0 && fk_open(&i5, &s5) == FK_ECORRUPT && fsz(p) == before, "relabelled as version 4: refused with FK_ECORRUPT, the file is untouched");
+    CHECK(fk_file_open(p, &i5) == 0 && fk_open(&i5, &s5) == FK_ECORRUPT && fsz(p) == before, "relabelled as version 5: refused with FK_ECORRUPT, the file is untouched");
     fk_file_close(&i5);
+  }
+
+  printf("== format version 4: a version 3 file from the previous release\n");
+  {
+    char src[400], p[300];
+    snprintf(src, sizeof src, "%s/v3-compacted.fk", FK_TEST_DATA);
+    snprintf(p, sizeof p, "%s/v3copy.fk", dir);
+    fk_io i7; fk_store *s7 = NULL;
+    CHECK(copy_file(src, p) && file_version(p) == 3, "a version 3 store with a snapshot, written by the store as of commit 1e59d6c (test/data)");
+    CHECK(open_path(p, &i7, &s7) && fk_version(s7) == 3, "it opens, and says it is version 3");
+    CHECK(s7 && fk_branch_count(s7) == 5 && fk_branch_alive(s7, 0) && fk_branch_alive(s7, 1) && !fk_branch_alive(s7, 2) && fk_branch_alive(s7, 3) && fk_branch_alive(s7, 4), "branches 0, 1, 3, 4 are alive, 2 is not");
+    CHECK(s7 && has(s7, 0, 0, 5) && has(s7, 0, 1, 2) && has(s7, 1, 0, 9) && has(s7, 1, 1, 2) && has(s7, 3, 0, 9) && has(s7, 3, 1, 33) && has(s7, 4, 0, 77) && has(s7, 4, 1, 33), "every branch reads back what it held");
+    uint64_t a = 0, b = 0, c = 0, d = 0;
+    CHECK(s7 && stid(s7, 0, &a) && stid(s7, 1, &b) && stid(s7, 3, &c) && stid(s7, 4, &d) && a != b && a != c && a != d && b != c && b != d && c != d, "state ids can be read, and the four different contents have four different ones (a snapshot of the older format says nothing, so each branch got its own)");
+    size_t ml = 99;
+    CHECK(s7 && fk_meta_get(s7, 0, NULL, 0, &ml) == 0 && ml == 0, "no metadata");
+    long before = fsz(p);
+    uint32_t n = 99;
+    CHECK(s7 && fk_reset(s7, 0, 1) == FK_EVERSION && fk_meta_set(s7, 0, "x", 1) == FK_EVERSION && fk_fork_meta(s7, 0, "x", 1, &n) == FK_EVERSION && n == 99, "reset, metadata and fork with metadata are refused with FK_EVERSION");
+    CHECK(s7 && fsz(p) == before && has(s7, 0, 0, 5) && same_meta(s7, 0, ""), "and they changed nothing, not even the file");
+    CHECK(s7 && commit1(s7, 1, 0, 60, 2) == 0 && has(s7, 1, 0, 60) && stid(s7, 1, &b) && b != a && fk_fork(s7, 0, &n) == 0 && n == 5 && same_state(s7, 0, 5), "everything that worked before still works (a commit, a fork, which gets id 5), and a fork has its source's state id");
+    if (s7) fk_close(s7);
+    fk_file_close(&i7);
+    CHECK(file_version(p) == 3, "the file is still version 3 (an older program can still read it)");
+    s7 = NULL;
+    CHECK(open_path(p, &i7, &s7) && fk_version(s7) == 3 && has(s7, 1, 0, 60) && fk_branch_alive(s7, 5) && same_state(s7, 0, 5), "reopen: the same, with the state ids as the replay of the log gives them");
+    CHECK(s7 && fk_compact(s7) == 0 && fk_version(s7) == 4, "compact it: it is version 4 now");
+    uint64_t s0 = 0, s1 = 0, s3 = 0, s4 = 0;
+    CHECK(s7 && stid(s7, 0, &s0) && stid(s7, 1, &s1) && stid(s7, 3, &s3) && stid(s7, 4, &s4) && s0 != s1 && s0 != s3 && s0 != s4 && s1 != s3 && s1 != s4 && s3 != s4 && same_state(s7, 0, 5), "the state ids went through the compaction");
+    CHECK(s7 && has(s7, 0, 0, 5) && has(s7, 1, 0, 60) && has(s7, 3, 1, 33) && has(s7, 4, 0, 77), "and so did the contents");
+    CHECK(s7 && fk_meta_set(s7, 3, "three", 5) == 0 && fk_reset(s7, 4, 0) == 0 && has(s7, 4, 0, 5) && has(s7, 4, 1, 2) && same_state(s7, 4, 0) && fk_fork_meta(s7, 1, "kid", 3, &n) == 0 && n == 6, "the new calls work");
+    if (s7) fk_close(s7);
+    fk_file_close(&i7);
+    CHECK(file_version(p) == 4, "the file on disk is version 4 (an older program now refuses it)");
+    s7 = NULL;
+    CHECK(open_path(p, &i7, &s7) && fk_version(s7) == 4 && same_meta(s7, 3, "three") && same_meta(s7, 6, "kid") && same_meta(s7, 0, "") && has(s7, 4, 0, 5) && same_state(s7, 4, 0) && has(s7, 6, 0, 60), "reopen: contents, metadata and state ids are all there");
+    if (s7) fk_close(s7);
+    fk_file_close(&i7);
+  }
+
+  printf("== format version 4: state ids, metadata and reset\n");
+  {
+    char p[300];
+    snprintf(p, sizeof p, "%s/v4.fk", dir);
+    fk_io i8; fk_store *s8 = NULL;
+    uint64_t a = 0, b = 0, c = 0;
+    uint8_t mb[FK_META_MAX + 8];
+    size_t ml = 99;
+    uint32_t f1 = 0, f2 = 0, n = 0;
+    remove(p);
+    CHECK(open_path(p, &i8, &s8) && fk_version(s8) == 4 && file_version(p) == 4, "a new store is version 4");
+    CHECK(commit1(s8, 0, 0, 1, 2) == 0 && commit1(s8, 0, 1, 2, 2) == 0 && fk_fork(s8, 0, &f1) == 0, "main holds two pages, and has a fork (1)");
+    CHECK(stid(s8, 0, &a) && stid(s8, f1, &b) && a == b, "a fork has the state id of its source");
+    CHECK(commit1(s8, f1, 0, 9, 2) == 0 && stid(s8, f1, &b) && b != a && stid(s8, 0, &c) && c == a, "a commit gives the branch a new state id and leaves its source's alone");
+    CHECK(commit1(s8, f1, 0, 1, 2) == 0 && stid(s8, f1, &c) && c != a && c != b, "even when it writes back what the branch held before, the id is new: ids are never given to two contents, so equal ids always mean equal content");
+    CHECK(fk_state(s8, 99, &a) == FK_ENOENT && fk_state(s8, 2, &a) == FK_ENOENT, "the state of a branch that is not there");
+    CHECK(commit1(s8, f1, 0, 9, 2) == 0, "(branch 1 holds page 0 = 9 again)");
+
+    CHECK(same_meta(s8, 0, "") && same_meta(s8, f1, ""), "no metadata at first");
+    CHECK(fk_meta_set(s8, f1, "hello", 5) == 0 && same_meta(s8, f1, "hello") && same_meta(s8, 0, ""), "set and get, per branch");
+    CHECK(fk_meta_get(s8, f1, mb, 3, &ml) == 0 && ml == 5 && !memcmp(mb, "hel", 3), "get into a short buffer copies what fits and reports the full length");
+    uint8_t big[FK_META_MAX + 1];
+    memset(big, 7, sizeof big);
+    CHECK(fk_meta_set(s8, f1, big, FK_META_MAX) == 0 && fk_meta_get(s8, f1, mb, sizeof mb, &ml) == 0 && ml == FK_META_MAX && !memcmp(mb, big, ml), "the largest metadata is accepted");
+    CHECK(fk_meta_set(s8, f1, big, FK_META_MAX + 1) == FK_EINVAL && fk_meta_get(s8, f1, mb, sizeof mb, &ml) == 0 && ml == FK_META_MAX, "one byte more is refused and leaves it as it was");
+    CHECK(fk_meta_set(s8, f1, NULL, 0) == 0 && same_meta(s8, f1, ""), "length 0 clears it");
+    CHECK(fk_meta_set(s8, 77, "x", 1) == FK_EINVAL && fk_meta_set(s8, f1, NULL, 3) == FK_EINVAL, "a branch that is not there, or a length without bytes, is refused");
+    CHECK(fk_meta_set(s8, f1, "keep", 4) == 0, "(branch 1 is labelled keep)");
+
+    CHECK(fk_fork_meta(s8, 0, "child", 5, &f2) == 0 && f2 == 2 && same_meta(s8, f2, "child") && has(s8, f2, 0, 1) && same_state(s8, f2, 0), "a fork with metadata gets it, the content and the state id of its source");
+    CHECK(fk_fork_meta(s8, 99, "x", 1, &n) == FK_EINVAL && fk_fork_meta(s8, 0, big, FK_META_MAX + 1, &n) == FK_EINVAL && fk_fork_meta(s8, 0, NULL, 4, &n) == FK_EINVAL, "refused for a source that is not there, too much metadata, a length without bytes");
+    CHECK(fk_fork(s8, f1, &n) == 0 && n == 3 && same_meta(s8, 3, "") && same_meta(s8, f1, "keep") && fk_discard(s8, 3) == 0, "a plain fork starts without metadata, whatever its source has (and is discarded again)");
+
+    CHECK(fk_reset(s8, f1, 0) == 0, "reset branch 1 to main");
+    CHECK(has(s8, f1, 0, 1) && has(s8, f1, 1, 2) && has(s8, 0, 0, 1) && has(s8, 0, 1, 2) && same_state(s8, f1, 0), "branch 1 reads what main holds and has main's state id; main is as it was");
+    CHECK(same_meta(s8, f1, "keep"), "the metadata of the branch that was reset is kept");
+    CHECK(commit1(s8, f1, 0, 50, 3) == 0 && has(s8, f1, 0, 50) && has(s8, 0, 0, 1) && !same_state(s8, f1, 0), "the reset branch can be written without touching its source");
+    CHECK(commit1(s8, 0, 5, 8, 6) == 0 && fk_reset(s8, f1, 0) == 0 && size_of(s8, f1) == 6 && has(s8, f1, 5, 8) && has(s8, f1, 0, 1), "reset takes the size as well");
+    CHECK(fk_reset(s8, f1, f1) == FK_EINVAL && fk_reset(s8, f1, 99) == FK_EINVAL && fk_reset(s8, 99, 0) == FK_EINVAL && fk_reset(s8, f1, 7) == FK_EINVAL, "reset onto itself, or involving a branch that is not there, is refused");
+    CHECK(commit1(s8, f1, 1, 70, 6) == 0 && fk_reset(s8, 0, f1) == 0 && has(s8, 0, 1, 70) && has(s8, 0, 5, 8) && same_state(s8, 0, f1) && size_of(s8, 0) == 6, "branch 0 can be reset too: this is the fast-forward promote");
+    CHECK(fk_txn_begin(s8, 0) == 0 && fk_reset(s8, f1, 0) == FK_EBUSY && fk_meta_set(s8, 0, "x", 1) == FK_EBUSY && fk_fork_meta(s8, 0, "x", 1, &n) == FK_EBUSY, "with a transaction open, they report FK_EBUSY");
+    fk_txn_abort(s8);
+    CHECK(fk_fork_meta(s8, 0, "z", 1, &n) == 0 && n == 4 && fk_discard(s8, n) == 0, "and work again after it (the new branch gets 4, the id after the latest fork)");
+    CHECK(fk_reset(s8, f2, 0) == 0 && fk_reset(s8, 0, f2) == 0 && has(s8, 0, 1, 70), "resets in both directions between branches that already hold the same content change nothing that can be seen");
+
+    /* everything has to survive a close, a recovery and a compaction */
+    uint64_t sa = 0, sb = 0, sc = 0;
+    CHECK(fk_meta_set(s8, 0, "main-meta", 9) == 0 && stid(s8, 0, &sa) && stid(s8, f1, &sb) && stid(s8, f2, &sc) && sa == sb, "(main is labelled, and holds what branch 1 holds)");
+    for (int round = 0; round < 3; round++) {
+      if (round > 0) {
+        if (round == 2) CHECK(fk_compact(s8) == 0, "compact");
+        fk_close(s8);
+        fk_file_close(&i8);
+        s8 = NULL;
+        CHECK(open_path(p, &i8, &s8), "reopen");
+      }
+      uint64_t ta = 0, tb = 0, tc = 0;
+      CHECK(stid(s8, 0, &ta) && stid(s8, f1, &tb) && stid(s8, f2, &tc) && ta == sa && tb == sb && tc == sc, round == 0 ? "state ids before the close" : round == 1 ? "state ids after a recovery: the same" : "state ids after a compaction: the same");
+      CHECK(same_meta(s8, 0, "main-meta") && same_meta(s8, f1, "keep") && same_meta(s8, f2, "child"), round == 0 ? "metadata before the close" : round == 1 ? "metadata after a recovery: the same" : "metadata after a compaction: the same");
+      CHECK(has(s8, 0, 1, 70) && has(s8, f1, 1, 70) && has(s8, f2, 0, 1) && size_of(s8, 0) == 6, round == 0 ? "contents before the close" : round == 1 ? "contents after a recovery: the same" : "contents after a compaction: the same");
+    }
+    CHECK(commit1(s8, f2, 3, 40, 6) == 0 && stid(s8, f2, &c) && c != sa && c != sb && c != sc, "after a recovery and a compaction a commit still gets an id that was never used (the counter was kept)");
+    CHECK(fk_discard(s8, f2) == 0 && !fk_branch_alive(s8, f2), "discard one");
+    fk_close(s8);
+    fk_file_close(&i8);
+
+    /* the last record cut short by a power failure: a process writes it and dies without closing (so nothing says the file ends
+     * after it), its last three bytes are cut off, and the next open must drop it and be as it was before it */
+    for (int k = 0; k < 3; k++) {
+      snprintf(p, sizeof p, "%s/v4torn%d.fk", dir, k);
+      v4_base(p);
+      fk_io i9; fk_store *s9 = NULL;
+      uint32_t t = 0;
+      uint64_t sbefore = 0;
+      CHECK(open_path(p, &i9, &s9) && stid(s9, 1, &sbefore), "(the base store: main (1, 2), branch 1 (9, 2) labelled m1)");
+      if (s9) fk_close(s9);
+      fk_file_close(&i9);
+      pid_t pid = fork();
+      if (pid == 0) {
+        fk_io ic;
+        fk_store *sc = NULL;
+        uint32_t tc = 0;
+        int ok = open_path(p, &ic, &sc);
+        if (ok) ok = k == 0 ? fk_meta_set(sc, 1, "longer-label", 12) == 0 : k == 1 ? fk_reset(sc, 1, 0) == 0 : fk_fork_meta(sc, 0, "kid", 3, &tc) == 0;
+        _exit(ok ? 0 : 3);
+      }
+      int status = 0;
+      CHECK(pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0, k == 0 ? "one more record, written by a process that dies: a new label for branch 1" : k == 1 ? "one more record, written by a process that dies: reset branch 1 to main" : "one more record, written by a process that dies: a fork with metadata");
+      long sz1 = fsz(p);
+      CHECK(truncate(p, sz1 - 3) == 0, "cut its last three bytes off");
+      s9 = NULL;
+      uint64_t safter = 0;
+      CHECK(open_path(p, &i9, &s9) && fsz(p) < sz1 - 3, "reopen: the torn record is cut off");
+      CHECK(s9 && has(s9, 1, 0, 9) && has(s9, 0, 0, 1) && same_meta(s9, 1, "m1") && stid(s9, 1, &safter) && safter == sbefore && fk_branch_count(s9) == 2, "and the store is as it was before that record");
+      CHECK(s9 && fk_meta_set(s9, 1, "after", 5) == 0 && fk_fork_meta(s9, 0, "again", 5, &t) == 0 && t == 2, "it takes new records");
+      if (s9) fk_close(s9);
+      fk_file_close(&i9);
+    }
+    snprintf(p, sizeof p, "%s/v4.fk", dir);
+    unlink(p);
   }
 
   printf("== layers: dead layers are freed and single-child layers are folded\n");

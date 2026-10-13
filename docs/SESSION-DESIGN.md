@@ -1,6 +1,6 @@
 # Session extension on the VFS: design note
 
-Status: **design, decided by Ben on 2026-10-12; step 1 of the build plan (the session build, the one-branch-write contract and the host survey) is implemented, the rest is not.** What was measured is in [vfs/results/session-experiments.txt](../vfs/results/session-experiments.txt) (produced by [vfs/experiments/session-experiments.sh](../vfs/experiments/session-experiments.sh), a throwaway program that drives SQLite's session extension through the real VFS and a real file store). Where a statement below is reasoned and not measured, it says so.
+Status: **design, decided by Ben on 2026-10-12; steps 1 (the session build, the one-branch-write contract and the host survey) and 2 (store format v4) of the build plan are implemented, the rest is not.** What was measured is in [vfs/results/session-experiments.txt](../vfs/results/session-experiments.txt) (produced by [vfs/experiments/session-experiments.sh](../vfs/experiments/session-experiments.sh), a throwaway program that drives SQLite's session extension through the real VFS and a real file store). Where a statement below is reasoned and not measured, it says so.
 
 The goal ([DESIGN.md](DESIGN.md), v0.1 scope): **diff, promote and undo** for branches, through SQLite session changesets. Promote fast-forwards when the parent has not moved, and otherwise replays the changeset and reports conflicts. The three open questions were: what happens when a transaction touches two attached branches, what schema drift does to a replay, and how to get a SQLite with the session extension.
 
@@ -50,8 +50,8 @@ Base branches must be read-only, or one stray write corrupts every later diff. T
 |---|---|
 | `RESET dst src` record (O(1), one fsync) | Fast-forward promote (P becomes F), undo to a snapshot, and the *reset* operation of the v0.1 list. |
 | Per-branch metadata, at most a few hundred bytes, last writer wins, optionally part of the FORK record | Branch names, kind (fork, base, undo point), origin, ids of undo points. A fork and its label are one atomic record. Survives compaction. |
-| Per-branch **state id**: copied by fork, replaced by every commit and reset (the log sequence number) | "P has not moved since A was taken" is `state(P) == state(A)`. |
-| `fk_branch_parent` | Parent of a branch, for tools and tests. |
+| Per-branch **state id**: copied by fork **and by reset**, replaced by every commit (a store-wide counter, not the log sequence number, which starts again after a compaction) | "P has not moved since A was taken" is `state(P) == state(A)`. |
+| ~~`fk_branch_parent`~~ | **Not built.** Branch ids are reused, so a stored parent id could silently name a different branch later. The layer above records the origin in the metadata. |
 
 **Why not use SQLite's file change counter for the state id** (page 1, bytes 24 to 27, which every write transaction increments): it would need no format change. It is not safe once a branch can be reset: P reset to an older snapshot and then advanced reaches the same counter value with different content, and a fast-forward decided on equal counters would throw P's content away. This is reasoned from how the counter works, not tested.
 
@@ -147,7 +147,7 @@ The roughness that remains: the failure comes at `COMMIT`, not at the first writ
 Each step is its own PR, reviewed before the next.
 
 1. **Session build, the host survey and the VFS contract. Done.** `vfs/build.sh` has the `session` variant and extracts the header; the VFS gate runs on it (T15); the super-journal is refused, with a reason logged and a counter, and with journal modes MEMORY and OFF refused so that the refusal cannot be bypassed (T14, T6, the power-loss workload attempts a cross-branch write at every step and checks that nothing leaks; two new mutants); the survey above. The in-memory-main limit is recorded, not closed.
-2. **Store format v4:** `RESET`, metadata, state id, parent, read-only flag enforcement hook, upgrade by compaction. The power-loss harness's model gets the new records; mutants for each rule (a reset that keeps the old size, a state id not replaced by a commit, a fork that loses its metadata across compaction, ...).
+2. **Store format v4. Done** (see [DURABLE-STORE.md](DURABLE-STORE.md), State ids, metadata and reset): `RESET`, metadata (`FORKM` and `META` records), state ids, upgrade by compaction (a version 3 file refuses the new calls with `FK_EVERSION` until it is compacted). Differences from this note: a reset copies the source's state id instead of replacing it (equal ids have to mean equal content); there is no `fk_branch_parent`; the read-only flag is not enforced by the store (the layer enforces it, from the metadata). The power-loss harness's model got the new operations and a check that state ids are equal exactly when the content is; nine new mutants, each caught.
 3. **The branch layer (`fkx`):** fork with base, diff, promote (fast-forward and replay with the policy), undo, garbage collection, retention. Tests include crash sequences across the several records of one operation, and every refusal in the policy table.
 4. **SQL functions and the CLI.**
 
