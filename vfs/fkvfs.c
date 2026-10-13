@@ -118,6 +118,8 @@ typedef struct MemFile { /* a journal or temporary file: bytes in memory */
 } MemFile;
 
 struct FkVfs {
+  fkvfs_guard_fn guard;
+  void *guard_ctx;
   sqlite3_vfs vfs;
   sqlite3_vfs *base;
   fk_store *s;
@@ -569,6 +571,10 @@ static int vfs_open(sqlite3_vfs *pv, const char *zName, sqlite3_file *pf, int fl
   if (flags & SQLITE_OPEN_MAIN_DB) {
     uint32_t b;
     if (parse_branch(zName, &b) != 0 || !fk_branch_alive(v->s, b)) return SQLITE_CANTOPEN;
+    if (v->guard && !v->guard(v->guard_ctx, b, (flags & SQLITE_OPEN_READWRITE) != 0)) {
+      sqlite3_log(SQLITE_READONLY, "fkvfs: branch %u may not be opened for writing", (unsigned)b);
+      return SQLITE_READONLY; /* the layer above says this branch is read-only */
+    }
     FkFile *f = (FkFile *)pf;
     memset(f, 0, sizeof *f);
     Branch *br = v->branches;
@@ -704,6 +710,15 @@ int fkvfs_unregister(FkVfs *v) {
 
 void fkvfs_set_store(FkVfs *v, fk_store *s) { v->s = s; }
 void fkvfs_stats(const FkVfs *v, FkVfsStats *out) { *out = v->st; }
+uint32_t fkvfs_branch_refs(const FkVfs *v, uint32_t branch) {
+  for (const Branch *b = v->branches; b; b = b->next)
+    if (b->id == branch) return (uint32_t)b->nref;
+  return 0;
+}
+void fkvfs_set_guard(FkVfs *v, fkvfs_guard_fn fn, void *ctx) {
+  v->guard = fn;
+  v->guard_ctx = ctx;
+}
 void fkvfs_set_batch_atomic(FkVfs *v, int on) { v->batch = on; }
 void fkvfs_fail_commits(FkVfs *v, int n) { v->fail_commits = n; }
 void fkvfs_fail_publish_page(FkVfs *v, int n) { v->fail_page = n; }

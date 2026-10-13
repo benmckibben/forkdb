@@ -1,6 +1,14 @@
 # fkx: the branch layer. Design note
 
-Status: **design only; no implementation.** The proposed API is [fkx/fkx.h](../fkx/fkx.h) (it compiles as C with @-Wall -Wextra@; it was not checked as C++). This is step 3 of the plan in [SESSION-DESIGN.md](SESSION-DESIGN.md). Nothing below was measured except where it says so: it is design, reasoned from the store, the VFS and the experiments already in the repository.
+Status: **the core is implemented (step 3b); the session driver is not (step 3c).** The API is [fkx/fkx.h](../fkx/fkx.h), the core is [fkx/fkx.c](../fkx/fkx.c), and without the driver (`fkx/fkx_nosession.c`) diff, replay and everything that needs them return `FKX_ENOSESSION`. This is step 3 of the plan in [SESSION-DESIGN.md](SESSION-DESIGN.md). Where this note says something that was tested, the test is named; the rest is design, reasoned from the store, the VFS and the experiments already in the repository.
+
+**Implemented differently from what the note first said (3b):**
+
+- **No in-memory name index.** Every lookup scans the live branches' metadata (at most 1,024 small in-memory blobs, one `fk_meta_get` each). Nothing can go stale, so "a stale index after a discard" is not a failure mode. Revisit if a repository ever holds enough branches for the scan to show up.
+- **An undo that was cut after its reset finishes cleanly.** If the target already holds the "before" state, `fkx_undo` only removes the entry (the power-loss test cuts an undo at every I/O event and runs the undo again from each recovery).
+- **Promote and undo do only what a fast-forward and a reset can.** A promote into a target that has moved, and an undo of a target that has changed, return `FKX_ENOSESSION` with the reason and change nothing.
+- **A read-only branch opened for writing straight through the VFS fails** (the guard callback; tested through SQLite). The exact result code is whatever `sqlite3_open_v2` makes of the VFS's refusal; the test checks only that it is not `SQLITE_OK`.
+- **Two VFS additions, as planned:** `fkvfs_branch_refs` and `fkvfs_set_guard` ([vfs/fkvfs.h](../vfs/fkvfs.h)).
 
 fkx is a C library over the store and the VFS. It gives branches names, remembers what a fork was forked from, and implements the v0.1 operations: **init, fork, snapshot, diff, reset, discard, promote**, plus undo. The CLI and the SQL functions (step 4) are thin layers over it.
 

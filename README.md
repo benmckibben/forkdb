@@ -20,7 +20,7 @@ Instant-branching, copy-on-write SQLite databases for local development, testing
 | [docs/VFS-SPIKE.md](docs/VFS-SPIKE.md) | SQLite running on the durable store through a VFS ([vfs/](vfs)): what was built, the tests and mutant check, the measurements, and what it changed in the plan |
 | [docs/DURABLE-STORE.md](docs/DURABLE-STORE.md) | The durable, branchable page store ([store/](store)): format, recovery, the power-loss test harness and what it does not cover; and an opt-in layer that preallocates the log (about 3 times cheaper commits on real disks); format version 4: branch metadata, reset and state ids for the layer above |
 | [docs/SESSION-DESIGN.md](docs/SESSION-DESIGN.md) | Design note for diff, promote and undo on the VFS through SQLite's session extension: what was measured, the store changes it needs, the schema policy, packaging. Design only, no code yet |
-| [docs/FKX-DESIGN.md](docs/FKX-DESIGN.md) | Design note for the branch layer (names, fork with a base, snapshot, reset, discard, promote, undo, garbage collection, the metadata format) and its API header [fkx/fkx.h](fkx/fkx.h). Design only, no implementation yet |
+| [docs/FKX-DESIGN.md](docs/FKX-DESIGN.md) | The branch layer: names, fork with a base, snapshot, reset, discard, fast-forward promote, undo, garbage collection, the metadata format. Design and what is implemented (the core: [fkx/](fkx/); the session driver for diff and replay is not yet). Tests: [scripts/test-fkx.sh](scripts/test-fkx.sh) |
 
 ## Reproduce the spike
 
