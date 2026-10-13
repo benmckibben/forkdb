@@ -10,7 +10,7 @@ forkdb is a C library that requires:
 
 - A host with the **SQLite session API** (`SQLITE_ENABLE_SESSION`, `SQLITE_ENABLE_PREUPDATE_HOOK`) for diff/promote/undo. The extension detects this at load time and reports it through `forkdb_info`. Without it, the VFS and branch operations still work.
 - A file system that supports **rename over an open file** for compaction (otherwise the store works without it).
-- One process, one thread. The store is not thread-safe.
+- **Single-writer.** One writer transaction at a time, across all branches, enforced by the VFS. Reads from separate connections on different branches are fine.
 
 ## Quick start
 
