@@ -2,7 +2,8 @@
  *
  * A database is opened by the name "b<N>", N being a branch id of the store: sqlite3_open_v2("b3", &db, flags, "forkdb").
  * Only the main database file lives in the store. Journals and temporary files are in memory and die with the process.
- * Single process, not thread-safe (like fkstore). WAL is refused. The database page size must be a multiple of FK_PAGE (4096). */
+ * Single process, not thread-safe (like fkstore). WAL is refused. A transaction may write only one branch: a commit that would write
+ * several attached branches fails with SQLITE_CANTOPEN (and a sqlite3_log message saying why) before anything is published. The database page size must be a multiple of FK_PAGE (4096). */
 #ifndef FKVFS_H
 #define FKVFS_H
 
@@ -29,6 +30,7 @@ typedef struct {
   uint64_t pages_deduped;         /* staged pages dropped at publish because they equal the committed page */
   uint64_t journal_opens;         /* rollback journals opened */
   uint64_t discarded;             /* uncommitted staged state dropped at close */
+  uint64_t super_journal_refused;  /* super-journal files refused: a transaction tried to write more than one attached branch */
 } FkVfsStats;
 
 /* Register a VFS called name over store s. The store must outlive the VFS and every connection opened through it. */

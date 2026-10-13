@@ -414,16 +414,23 @@ static int fkf_fcntl(sqlite3_file *pf, int op, void *arg) {
   switch (op) {
     case SQLITE_FCNTL_PRAGMA: {
       /* arg is char *a[]: a[0] result or error message, a[1] the pragma, a[2] its value (NULL when it is only being read).
-       * Two settings would put a commit at risk, and are refused here, before SQLite acts on them:
+       * Three settings would put a commit at risk, and are refused here, before SQLite acts on them:
        *  - journal_mode=WAL: SQLite writes the WAL version into the database header and answers "wal" before it opens the -wal file,
        *    so refusing the file in xOpen is too late (in exclusive locking mode WAL needs no shared memory). The branch would be left
        *    claiming WAL while the VFS refuses WAL.
        *  - synchronous=OFF: there is then no xSync, so a commit on the journal path is published when the write lock is dropped, and
-       *    unlock has no way to report a failure. A transaction SQLite called committed could be lost. */
+       *    unlock has no way to report a failure. A transaction SQLite called committed could be lost.
+       *  - journal_mode=MEMORY and OFF: with either, SQLite creates no super-journal, so the refusal in xOpen that keeps a transaction
+       *    from writing several attached branches (they would commit one after the other) would not fire. The journal is already
+       *    kept in memory here, so these modes buy nothing. */
       char **a = arg;
       if (!a || !a[1] || !a[2]) return SQLITE_NOTFOUND;
       if (sqlite3_stricmp(a[1], "journal_mode") == 0 && sqlite3_stricmp(a[2], "wal") == 0) {
         a[0] = sqlite3_mprintf("forkdb: WAL is not supported");
+        return SQLITE_ERROR;
+      }
+      if (sqlite3_stricmp(a[1], "journal_mode") == 0 && (sqlite3_stricmp(a[2], "memory") == 0 || sqlite3_stricmp(a[2], "off") == 0)) {
+        a[0] = sqlite3_mprintf("forkdb: journal_mode=%s is not supported (a transaction must write only one branch, and in this mode SQLite cannot tell the VFS)", a[2]);
         return SQLITE_ERROR;
       }
       if (sqlite3_stricmp(a[1], "synchronous") == 0 && (sqlite3_stricmp(a[2], "off") == 0 || strcmp(a[2], "0") == 0 || sqlite3_stricmp(a[2], "no") == 0 || sqlite3_stricmp(a[2], "false") == 0)) {
@@ -550,6 +557,15 @@ static MemFile *memfile_find(FkVfs *v, const char *name) {
 static int vfs_open(sqlite3_vfs *pv, const char *zName, sqlite3_file *pf, int flags, int *pOut) {
   FkVfs *v = pv->pAppData;
   if (pOut) *pOut = flags;
+  if (flags & SQLITE_OPEN_SUPER_JOURNAL) {
+    /* SQLite creates a super-journal when one transaction writes more than one database file (ATTACHed branches). Each branch would
+     * then be published to the store by its own commit, one after the other, so a power cut between them leaves one branch changed
+     * and the other not. Refuse it: the COMMIT fails with SQLITE_CANTOPEN before anything is published and SQLite rolls the
+     * transaction back. The contract is one written branch per transaction (docs/SESSION-DESIGN.md). */
+    v->st.super_journal_refused++;
+    sqlite3_log(SQLITE_CANTOPEN, "fkvfs: a transaction may write only one branch; this one wrote several attached branches, so it was rolled back (reading several is fine)");
+    return SQLITE_CANTOPEN;
+  }
   if (flags & SQLITE_OPEN_MAIN_DB) {
     uint32_t b;
     if (parse_branch(zName, &b) != 0 || !fk_branch_alive(v->s, b)) return SQLITE_CANTOPEN;

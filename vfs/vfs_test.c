@@ -7,11 +7,24 @@
 
 #include "../test/simdisk.h"
 #include "fkvfs.h"
+#ifdef SQLITE_ENABLE_SESSION
+#include "sqlite3session.h"
+#endif
 
 static int fails, checks;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("  FAIL line %d: ", __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
 static int have_batch(void) { return sqlite3_compileoption_used("ENABLE_BATCH_ATOMIC_WRITE"); }
+static int have_session(void) { return sqlite3_compileoption_used("ENABLE_SESSION"); }
+
+/* the messages the VFS sends to sqlite3_log (set in main, before SQLite starts) */
+static char fklog[300];
+static int fklog_n;
+static void logcb(void *a, int rc, const char *m) {
+  (void)a;
+  (void)rc;
+  if (strncmp(m, "fkvfs:", 6) == 0) { fklog_n++; snprintf(fklog, sizeof fklog, "%s", m); }
+}
 
 static int sql(sqlite3 *db, const char *q) {
   char *e = NULL;
@@ -356,7 +369,7 @@ static void t_pagesize(void) {
 }
 
 static void t_modes(void) {
-  printf("T6 journal modes; WAL is refused\n");
+  printf("T6 journal modes; WAL, MEMORY and OFF are refused\n");
   char pp[400];
   Env e;
   CHECK(env_open(&e, P("t6.fk", pp, sizeof pp)) == 0, "open");
@@ -369,12 +382,13 @@ static void t_modes(void) {
     char q[64], g[64];
     snprintf(q, sizeof q, "PRAGMA journal_mode=%s", modes[i]);
     CHECK(text_is(db, q, NULL, g, sizeof g) || 1, "set mode");
-    CHECK(strcasecmp(g, modes[i]) == 0, "journal_mode=%s is accepted (got '%s')", modes[i], g);
+    if (i < 3) CHECK(strcasecmp(g, modes[i]) == 0, "journal_mode=%s is accepted (got '%s')", modes[i], g);
+    else CHECK(strcasecmp(g, modes[i]) != 0 && sql(db, q) != SQLITE_OK, "journal_mode=%s is refused: with it SQLite makes no super-journal, so a transaction that writes several attached branches would not be caught (got '%s')", modes[i], g);
     CHECK(sql(db, "CREATE TABLE t(id INTEGER PRIMARY KEY, v BLOB)") == 0, "create");
     CHECK(sql(db, "BEGIN") == 0, "begin");
     fill(db, "t", 300, 100);
     CHECK(sql(db, "COMMIT") == 0 && scalar(db, "SELECT count(*) FROM t") == 300 && integrity_ok(db), "mode %s", modes[i]);
-    if (i != 4) { /* rollback is undefined with journal_mode=OFF */
+    {
       CHECK(sql(db, "BEGIN") == 0 && sql(db, "DELETE FROM t") == 0 && sql(db, "ROLLBACK") == 0 && scalar(db, "SELECT count(*) FROM t") == 300, "rollback in %s", modes[i]);
     }
     sqlite3_close(db);
@@ -506,11 +520,176 @@ static void t_names(void) {
   unlink(pp);
 }
 
+static long long conn_count(sqlite3 *db, const char *q) { return scalar(db, q); }
+
+/* ---------------------------------------------------------------- one written branch per transaction */
+static void t_one_branch(int batch) {
+  printf("T14 a transaction may write only one branch (batch advertised=%d)\n", batch);
+  char pp[400], nm[32], q[200];
+  Env e;
+  CHECK(env_open(&e, P("t14.fk", pp, sizeof pp)) == 0, "open");
+  fkvfs_set_batch_atomic(e.v, batch);
+  sqlite3 *d0 = openb("forkdb", 0);
+  CHECK(sql(d0, "CREATE TABLE t(id INTEGER PRIMARY KEY, v)") == 0 && sql(d0, "INSERT INTO t VALUES(1, 'base')") == 0, "setup");
+  sqlite3_close(d0);
+  uint32_t b1 = 0, b2 = 0;
+  CHECK(fk_fork(e.s, 0, &b1) == FK_OK && fk_fork(e.s, 0, &b2) == FK_OK, "two forks");
+  fkvfs_branch_name(b2, nm, sizeof nm);
+  const char *modes[] = {"DELETE", "TRUNCATE", "PERSIST"};
+  for (int m = 0; m < 3; m++) {
+    sqlite3 *d = openb("forkdb", b1);
+    snprintf(q, sizeof q, "ATTACH '%s' AS o", nm);
+    CHECK(sql(d, q) == 0, "attach the second branch");
+    snprintf(q, sizeof q, "PRAGMA main.journal_mode=%s", modes[m]);
+    CHECK(sql(d, q) == 0, "main.journal_mode=%s", modes[m]);
+    snprintf(q, sizeof q, "PRAGMA o.journal_mode=%s", modes[m]);
+    CHECK(sql(d, q) == 0, "o.journal_mode=%s", modes[m]);
+    FkVfsStats a, b;
+    fkvfs_stats(e.v, &a);
+    int n0 = fklog_n;
+    CHECK(sql(d, "BEGIN") == 0 && sql(d, "INSERT INTO main.t VALUES(100, 'x')") == 0 && sql(d, "INSERT INTO o.t VALUES(200, 'y')") == 0, "both writes are accepted until the commit (%s)", modes[m]);
+    int rc = sql(d, "COMMIT");
+    fkvfs_stats(e.v, &b);
+    CHECK(rc == SQLITE_CANTOPEN, "the commit of a transaction that wrote two branches fails with SQLITE_CANTOPEN (rc=%d, %s)", rc, modes[m]);
+    CHECK(b.super_journal_refused == a.super_journal_refused + 1, "the super-journal was refused once (%s)", modes[m]);
+    CHECK(b.store_commits == a.store_commits, "nothing was published to the store (%llu commits, %s)", (unsigned long long)(b.store_commits - a.store_commits), modes[m]);
+    CHECK(sqlite3_get_autocommit(d), "SQLite rolled the transaction back (%s)", modes[m]);
+    CHECK(fklog_n == n0 + 1 && strstr(fklog, "only one branch") != NULL, "the reason was logged: '%s'", fklog);
+    CHECK(conn_count(d, "SELECT count(*) FROM main.t WHERE id=100") == 0 && conn_count(d, "SELECT count(*) FROM o.t WHERE id=200") == 0, "neither row is there (%s)", modes[m]);
+    CHECK(sql(d, "INSERT INTO main.t VALUES(100, 'x')") == 0 && sql(d, "DELETE FROM main.t WHERE id=100") == 0, "a write to the main branch alone works afterwards (%s)", modes[m]);
+    CHECK(sql(d, "INSERT INTO o.t VALUES(200, 'y')") == 0 && sql(d, "DELETE FROM o.t WHERE id=200") == 0, "a write to the attached branch alone works (%s)", modes[m]);
+    CHECK(sql(d, "BEGIN") == 0 && conn_count(d, "SELECT count(*) FROM main.t") == 1 && conn_count(d, "SELECT count(*) FROM o.t") == 1 && sql(d, "COMMIT") == 0, "reading both branches in one transaction works (%s)", modes[m]);
+    CHECK(sql(d, "CREATE TEMP TABLE IF NOT EXISTS tt(x)") == 0 && sql(d, "BEGIN") == 0 && sql(d, "INSERT INTO tt VALUES(1)") == 0 && sql(d, "INSERT INTO main.t VALUES(300, 't')") == 0 && sql(d, "COMMIT") == 0 && sql(d, "DELETE FROM main.t WHERE id=300") == 0, "a temp table and one branch in one transaction works (%s)", modes[m]);
+    sqlite3_close(d);
+  }
+  /* fresh connections: nothing from the refused transactions reached the store */
+  sqlite3 *c1 = openb("forkdb", b1), *c2 = openb("forkdb", b2);
+  CHECK(conn_count(c1, "SELECT count(*) FROM t") == 1 && conn_count(c2, "SELECT count(*) FROM t") == 1 && integrity_ok(c1) && integrity_ok(c2), "both branches still hold only the base row");
+  sqlite3_close(c1);
+  sqlite3_close(c2);
+  /* the modes in which SQLite makes no super-journal are refused, on the attached branch too */
+  sqlite3 *d = openb("forkdb", b1);
+  snprintf(q, sizeof q, "ATTACH '%s' AS o", nm);
+  CHECK(sql(d, q) == 0, "attach");
+  CHECK(sql(d, "PRAGMA o.journal_mode=OFF") != SQLITE_OK && sql(d, "PRAGMA o.journal_mode=MEMORY") != SQLITE_OK && sql(d, "PRAGMA main.journal_mode=memory") != SQLITE_OK, "journal_mode OFF and MEMORY are refused on either branch");
+  CHECK(strcasecmp(text_is(d, "PRAGMA o.journal_mode", NULL, q, sizeof q) ? "" : q, "delete") == 0, "and the mode is still DELETE ('%s')", q);
+  sqlite3_close(d);
+  /* A KNOWN LIMIT, pinned here so that the documentation stays true: when the connection's own main database is not a branch (in
+   * memory, or a temporary database), SQLite commits all the attached databases in one phase and makes no super-journal, so the VFS
+   * is never told, and a transaction that writes two branches commits as two store commits. Nothing a VFS can do catches it. */
+  sqlite3 *m = NULL;
+  CHECK(sqlite3_open_v2(":memory:", &m, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "forkdb") == SQLITE_OK, "open an in-memory main database");
+  char n1[32];
+  fkvfs_branch_name(b1, n1, sizeof n1);
+  snprintf(q, sizeof q, "ATTACH '%s' AS x", n1);
+  CHECK(sql(m, q) == 0, "attach");
+  snprintf(q, sizeof q, "ATTACH '%s' AS y", nm);
+  CHECK(sql(m, q) == 0, "attach");
+  FkVfsStats a, b;
+  fkvfs_stats(e.v, &a);
+  int rc = sql(m, "BEGIN") || sql(m, "INSERT INTO x.t VALUES(500, 'a')") || sql(m, "INSERT INTO y.t VALUES(600, 'b')") || sql(m, "COMMIT");
+  fkvfs_stats(e.v, &b);
+  printf("   known limit (main database in memory): two attached branches written in one transaction: rc=%d, %llu store commits, %llu refused\n", rc, (unsigned long long)(b.store_commits - a.store_commits), (unsigned long long)(b.super_journal_refused - a.super_journal_refused));
+  CHECK(rc == 0 && b.store_commits == a.store_commits + 2 && b.super_journal_refused == a.super_journal_refused, "KNOWN LIMIT: with an in-memory main database the VFS is not told, and the two branches commit separately");
+  sqlite3_close(m);
+  env_close(&e);
+  unlink(pp);
+}
+
+/* ---------------------------------------------------------------- the session extension on branches */
+#ifdef SQLITE_ENABLE_SESSION
+static int conflict_abort(void *x, int type, sqlite3_changeset_iter *it) { (void)x; (void)type; (void)it; return SQLITE_CHANGESET_ABORT; }
+
+/* rows that are in one table and not in the other, both ways (a and b are database names on the connection) */
+static long long table_diff(sqlite3 *db, const char *a, const char *b) {
+  char q[400];
+  snprintf(q, sizeof q, "SELECT (SELECT count(*) FROM (SELECT * FROM %s.t EXCEPT SELECT * FROM %s.t)) + (SELECT count(*) FROM (SELECT * FROM %s.t EXCEPT SELECT * FROM %s.t))", a, b, b, a);
+  return scalar(db, q);
+}
+
+static void t_session(void) {
+  printf("T15 the session extension on branches: diff through ATTACH, replay in one store commit, conflicts, undo by inversion\n");
+  char pp[400], q[200], n0[32], nf[32];
+  Env e;
+  CHECK(env_open(&e, P("t15.fk", pp, sizeof pp)) == 0, "open");
+  sqlite3 *d0 = openb("forkdb", 0);
+  CHECK(sql(d0, "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)") == 0 && sql(d0, "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<200) INSERT INTO t SELECT x, 'v'||x FROM c") == 0, "200 rows on branch 0");
+  sqlite3_close(d0);
+  uint32_t f = 0, t = 0;
+  CHECK(fk_fork(e.s, 0, &f) == FK_OK && fk_fork(e.s, 0, &t) == FK_OK, "a fork with work on it and a fork that will receive it");
+  fkvfs_branch_name(0, n0, sizeof n0);
+  fkvfs_branch_name(f, nf, sizeof nf);
+  sqlite3 *df = openb("forkdb", f);
+  CHECK(sql(df, "UPDATE t SET v='changed' WHERE id%20=0") == 0 && sql(df, "INSERT INTO t VALUES(1000, 'new')") == 0 && sql(df, "DELETE FROM t WHERE id IN (7, 8)") == 0, "work on the fork");
+  snprintf(q, sizeof q, "ATTACH '%s' AS base", n0);
+  CHECK(sql(df, q) == 0, "attach the fork's base");
+  sqlite3_session *ss = NULL;
+  CHECK(sqlite3session_create(df, "main", &ss) == SQLITE_OK && sqlite3session_attach(ss, "t") == SQLITE_OK, "a session on the fork");
+  char *err = NULL;
+  CHECK(sqlite3session_diff(ss, "base", "t", &err) == SQLITE_OK, "diff against the base through ATTACH (%s)", err ? err : "");
+  sqlite3_free(err);
+  int n = 0;
+  void *p = NULL;
+  CHECK(sqlite3session_changeset(ss, &n, &p) == SQLITE_OK && n > 0, "a changeset");
+  int ni = 0, nu = 0, nd = 0;
+  sqlite3_changeset_iter *it = NULL;
+  if (sqlite3changeset_start(&it, n, p) == SQLITE_OK) {
+    while (sqlite3changeset_next(it) == SQLITE_ROW) {
+      const char *tab;
+      int nc, op, ind;
+      sqlite3changeset_op(it, &tab, &nc, &op, &ind);
+      if (op == SQLITE_INSERT) ni++; else if (op == SQLITE_DELETE) nd++; else nu++;
+    }
+    sqlite3changeset_finalize(it);
+  }
+  CHECK(ni == 1 && nu == 10 && nd == 2, "the changeset holds exactly the work: 1 insert, 10 updates, 2 deletes (%d, %d, %d)", ni, nu, nd);
+  sqlite3session_delete(ss);
+  sqlite3_close(df);
+  sqlite3 *dt = openb("forkdb", t);
+  snprintf(q, sizeof q, "ATTACH '%s' AS base", n0);
+  CHECK(sql(dt, q) == 0, "attach");
+  snprintf(q, sizeof q, "ATTACH '%s' AS o", nf);
+  CHECK(sql(dt, q) == 0, "attach the fork to compare");
+  CHECK(table_diff(dt, "main", "o") > 0 && table_diff(dt, "main", "base") == 0, "the receiving branch starts as the base");
+  FkVfsStats a, b;
+  fkvfs_stats(e.v, &a);
+  int rc = sqlite3changeset_apply(dt, n, p, 0, conflict_abort, 0);
+  fkvfs_stats(e.v, &b);
+  CHECK(rc == SQLITE_OK, "the replay applies (rc=%d)", rc);
+  CHECK(b.store_commits == a.store_commits + 1, "a replay is exactly one store commit (%llu)", (unsigned long long)(b.store_commits - a.store_commits));
+  CHECK(table_diff(dt, "main", "o") == 0, "the receiving branch now equals the fork");
+  fkvfs_stats(e.v, &a);
+  rc = sqlite3changeset_apply(dt, n, p, 0, conflict_abort, 0);
+  fkvfs_stats(e.v, &b);
+  CHECK(rc == SQLITE_ABORT && b.store_commits == a.store_commits && table_diff(dt, "main", "o") == 0, "a second replay conflicts, is aborted, and publishes nothing (rc=%d)", rc);
+  int nv = 0;
+  void *pv = NULL;
+  CHECK(sqlite3changeset_invert(n, p, &nv, &pv) == SQLITE_OK, "invert");
+  fkvfs_stats(e.v, &a);
+  rc = sqlite3changeset_apply(dt, nv, pv, 0, conflict_abort, 0);
+  fkvfs_stats(e.v, &b);
+  CHECK(rc == SQLITE_OK && b.store_commits == a.store_commits + 1 && table_diff(dt, "main", "base") == 0, "the inverse restores the base in one store commit (rc=%d)", rc);
+  sqlite3_free(p);
+  sqlite3_free(pv);
+  CHECK(sql(dt, "UPDATE t SET v='after' WHERE id=1") == 0, "the receiving branch keeps working");
+  sqlite3_close(dt);
+  env_close(&e);
+  CHECK(env_open(&e, pp) == 0, "reopen the store");
+  dt = openb("forkdb", t);
+  CHECK(scalar(dt, "SELECT count(*) FROM t") == 200 && scalar(dt, "SELECT count(*) FROM t WHERE v='after'") == 1 && integrity_ok(dt), "after a reopen the receiving branch is intact (200 rows, the later write is there)");
+  sqlite3_close(dt);
+  env_close(&e);
+  unlink(pp);
+}
+#else
+static void t_session(void) { printf("T15 skipped: this SQLite build has no session extension\n"); }
+#endif
+
 /* ---------------------------------------------------------------- power loss: SQLite on the simulated disk */
 #define NT 7
 static int rows_for(int j) { return j % 3 == 0 ? 40 : 3; }
 
-typedef struct { int ack0, ack1, forked; } Ack;
+typedef struct { int ack0, ack1, forked, cross, leaked; } Ack;
 
 static int do_txn(sqlite3 *db, int branch, int i) {
   char q[600];
@@ -532,9 +711,21 @@ static fk_io mkio(SimDisk *d, uint64_t pa) {
   return io;
 }
 
+/* a transaction that writes two attached branches: it must be refused at COMMIT and leave nothing behind. 1 if it went through. */
+static int cross_attempt(sqlite3 *db, int *refused) {
+  if (sql(db, "BEGIN")) return 0;
+  if (sql(db, "INSERT INTO main.kv(txn, tag, pad) VALUES(99, 9, x'00')") || sql(db, "INSERT INTO p.kv(txn, tag, pad) VALUES(99, 9, x'00')")) { sql(db, "ROLLBACK"); return 0; }
+  int rc = sql(db, "COMMIT");
+  if (rc == 0) return 1;
+  if (rc == SQLITE_CANTOPEN) (*refused)++;
+  if (!sqlite3_get_autocommit(db)) sql(db, "ROLLBACK");
+  return 0;
+}
+
 static void workload(SimDisk *d, int batch, uint64_t pa, Ack *a) {
   a->ack0 = a->ack1 = -1;
   a->forked = 0;
+  a->cross = a->leaked = 0;
   fk_io io CLEANUP_IO = mkio(d, pa);
   fk_store *s = NULL;
   FkVfs *v = NULL;
@@ -556,8 +747,10 @@ static void workload(SimDisk *d, int batch, uint64_t pa, Ack *a) {
       a->ack1 = 3;
       db1 = openb("fkp", nb);
       if (!db1) goto out;
+      if (sql(db1, "ATTACH 'b0' AS p")) goto out;
     }
     if (i >= 4 && db1) {
+      a->leaked += cross_attempt(db1, &a->cross);
       if (do_txn(db1, 1, i)) goto out;
       a->ack1 = i;
     }
@@ -639,6 +832,7 @@ static void power_loss(int batch, uint64_t pa) {
   workload(&d, batch, pa, &a);
   long events = d.events;
   CHECK(a.ack0 == NT && a.ack1 == NT, "the uninterrupted run completes (acks %d, %d)", a.ack0, a.ack1);
+  CHECK(a.cross == NT - 3 && a.leaked == 0, "every attempt to write two attached branches in one transaction was refused (%d refused, %d went through)", a.cross, a.leaked);
   sim_free(&d);
   const char *se = getenv("VFS_STEP");
   long step = se ? atol(se) : 1;
@@ -673,11 +867,12 @@ static void power_loss(int batch, uint64_t pa) {
 
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IOLBF, 0);
+  sqlite3_config(SQLITE_CONFIG_LOG, logcb, NULL); /* before SQLite starts */
   int quick = argc > 1 && strcmp(argv[1], "quick") == 0;
   int only_power = argc > 1 && strcmp(argv[1], "power") == 0;
   snprintf(dir, sizeof dir, "/tmp/fkvfs-test-XXXXXX");
   if (!mkdtemp(dir)) { perror("mkdtemp"); return 2; }
-  printf("SQLite %s, batch-atomic compiled in: %s\n", sqlite3_libversion(), have_batch() ? "yes" : "no");
+  printf("SQLite %s, batch-atomic compiled in: %s, session extension compiled in: %s\n", sqlite3_libversion(), have_batch() ? "yes" : "no", have_session() ? "yes" : "no");
   if (!only_power) {
     t_basic(1, 0);
     t_basic(0, 0);
@@ -695,6 +890,9 @@ int main(int argc, char **argv) {
     t_vacuum();
     t_temp();
     t_names();
+    t_one_branch(1);
+    t_one_branch(0);
+    t_session();
   }
   if (!quick) {
     if (have_batch()) power_loss(1, 0);

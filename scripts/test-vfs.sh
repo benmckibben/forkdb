@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Build and run the VFS spike tests: SQLite on the durable store. Needs gcc, curl, sha256sum and python3 (the first run compiles
-# the pinned SQLite twice, which takes about a minute).
-#   scripts/test-vfs.sh          both SQLite builds under the sanitizers, then the harness self-check (mutants)
-#   scripts/test-vfs.sh quick    both builds, a sparse power-loss sweep, no mutants
+# Build and run the VFS tests: SQLite on the durable store. Needs gcc, curl, sha256sum and python3 (the first run compiles
+# the pinned SQLite three times, which takes about a minute).
+#   scripts/test-vfs.sh          the three SQLite builds (batch-atomic, stock, and stock plus the session extension) under the
+#                                sanitizers, then the harness self-check (mutants)
+#   scripts/test-vfs.sh quick    the three builds, a sparse power-loss sweep, no mutants
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -12,7 +13,7 @@ quick=0
 [ $quick = 1 ] && export VFS_STEP=7
 
 "$here/vfs/build.sh" sqlite
-for v in batch stock; do
+for v in batch stock session; do
   echo "== SQLite build: $v (address and undefined-behaviour sanitizers on)"
   SAN=1 "$here/vfs/build.sh" test "$v" | tail -1
   timeout "$limit" "$here/vfs/build/vfs_test-$v-san" | grep -E '^(SQLite|T11|   [0-9]+ I/O events|checks|  FAIL|  VIOLATION)'
@@ -59,6 +60,8 @@ mutant 'no read-your-writes' 'if (p) { memcpy(out, p, PG); return 0; }' 'if (0 &
 mutant 'a writer is not held off by readers' 'if (b->nshared > 1) return SQLITE_BUSY;' 'if (0) return SQLITE_BUSY;'
 mutant 'a failed atomic commit is swallowed and its pages dropped' 'if (rc != SQLITE_OK) { v->st.commit_failed++; return SQLITE_IOERR_COMMIT_ATOMIC; }' 'if (rc != SQLITE_OK) { v->st.commit_failed++; discard(f); return SQLITE_OK; }'
 mutant 'a failed sync is reported as OK' $'  int rc = publish(f, 1);\n  if (rc == SQLITE_OK) f->v->st.sync_publish++; else f->v->st.sync_publish_errors++;\n  return rc;' $'  int rc = publish(f, 1);\n  if (rc == SQLITE_OK) f->v->st.sync_publish++; else f->v->st.sync_publish_errors++;\n  return SQLITE_OK;'
+mutant 'the super-journal is not refused (a transaction may write several attached branches)' 'if (flags & SQLITE_OPEN_SUPER_JOURNAL) {' 'if (0 && (flags & SQLITE_OPEN_SUPER_JOURNAL)) {'
+mutant 'journal_mode MEMORY and OFF are not refused (no super-journal is made in them)' 'sqlite3_stricmp(a[1], "journal_mode") == 0 && (sqlite3_stricmp(a[2], "memory") == 0 || sqlite3_stricmp(a[2], "off") == 0)' '0'
 mutant 'the WAL pragma is not refused' 'sqlite3_stricmp(a[1], "journal_mode") == 0 && sqlite3_stricmp(a[2], "wal") == 0' '0'
 mutant 'synchronous=OFF is not refused' 'sqlite3_stricmp(a[1], "synchronous") == 0 && (' '0 && ('
 mutant 'a truncate keeps the staged pages beyond it' 'stage_drop_from(&f->st, pages);' '(void)pages;'
