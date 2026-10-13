@@ -19,3 +19,6 @@ spike/build/
 
 # VFS spike build output
 vfs/build/
+
+# fkx test build output
+fkx/build/

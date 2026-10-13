@@ -41,6 +41,13 @@ int fkvfs_unregister(FkVfs *v);
 void fkvfs_set_store(FkVfs *v, fk_store *s);
 
 void fkvfs_stats(const FkVfs *v, FkVfsStats *out);
+/* How many connections are open on a branch right now (a branch's database opened twice counts twice). */
+uint32_t fkvfs_branch_refs(const FkVfs *v, uint32_t branch);
+/* A callback the VFS asks, in xOpen, whether a branch may be opened (write is 1 when the open asks for read-write access). Return 0 to
+ * refuse: the open fails with SQLITE_READONLY and a message goes to sqlite3_log. fkx uses it to keep read-only branches (snapshots, bases,
+ * undo points) from being written even by an application that opens "b<N>" through the VFS directly. NULL (the default) allows all. */
+typedef int (*fkvfs_guard_fn)(void *ctx, uint32_t branch, int write);
+void fkvfs_set_guard(FkVfs *v, fkvfs_guard_fn fn, void *ctx);
 /* Advertise SQLITE_IOCAP_BATCH_ATOMIC (default on). It only does anything in a SQLite built with SQLITE_ENABLE_BATCH_ATOMIC_WRITE. */
 void fkvfs_set_batch_atomic(FkVfs *v, int on);
 /* Test hook: the next n atomic commits fail. */
