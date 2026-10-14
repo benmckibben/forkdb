@@ -12,8 +12,8 @@
 #include <string.h>
 #include "../store/fkstore.h"
 
-static int fails;
-#define CHECK(c, msg) do { int ok_ = !!(c); printf("  %s %s\n", ok_ ? "PASS" : "FAIL", msg); if (!ok_) fails++; } while (0)
+static int fails, checks;
+#define CHECK(c, msg) do { checks++; int ok_ = !!(c); printf("  %s %s\n", ok_ ? "PASS" : "FAIL", msg); if (!ok_) fails++; } while (0)
 
 int main(void) {
   const char *path = "smoke_test.fkdb";
@@ -90,6 +90,6 @@ int main(void) {
   fk_file_close(&io);
   remove(path);
 
-  printf("%d checks, TOTAL FAILS=%d\n", 15 - (15 - fails), fails);
+  printf("%d checks, TOTAL FAILS=%d\n", checks, fails);
   return fails ? 1 : 0;
 }

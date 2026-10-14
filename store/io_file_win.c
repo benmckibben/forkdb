@@ -201,10 +201,11 @@ static int w_sibling_rename(void *ctx, fk_io *tmp) {
     return -1;
 
   /* Close the old file handle and reopen using the new path.
-   * (The old handle still refers to the now-replaced file.) */
+   * (The old handle still refers to the now-replaced file.)
+   * Share mode must match fk_file_open: FILE_SHARE_READ keeps concurrent readers working. */
   CloseHandle(m->h);
-  m->h = CreateFileW(m->path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
-                     FILE_ATTRIBUTE_NORMAL, NULL);
+  m->h = CreateFileW(m->path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   if (m->h == INVALID_HANDLE_VALUE) return -1;
 
   free(t->path);
@@ -221,7 +222,10 @@ static void w_sibling_remove(void *ctx, fk_io *tmp) {
   WC *m = ctx;
   if (tmp && tmp->ctx) {
     WC *t = tmp->ctx;
-    CloseHandle(t->h);
+    /* Rename closes this handle first. A failed MoveFileExW leaves it NULL, and
+     * CloseHandle(NULL) raises STATUS_INVALID_HANDLE under a debugger. */
+    if (t->h != NULL && t->h != INVALID_HANDLE_VALUE)
+      CloseHandle(t->h);
     DeleteFileW(t->path);
     free(t->path);
     free(t);
