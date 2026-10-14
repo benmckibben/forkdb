@@ -240,7 +240,7 @@ check_locked() {
   # Build the command to run inside a flock-held subshell.
   # The lock is held on $path, so the CLI process will hit the exclusive flock conflict.
   set +e
-  timeout 30 flock -s "$path" env LC_ALL=C "$CLI" "$cmd" "$LOCKED" "$@" </dev/null >"$stdout_file" 2>"$stderr_file"
+  timeout 30 flock -s "$path" env LC_ALL=C "$CLI" "$cmd" "$path" "$@" </dev/null >"$stdout_file" 2>"$stderr_file"
   local rc=$?
   set -e
 
