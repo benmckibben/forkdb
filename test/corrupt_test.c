@@ -108,7 +108,6 @@ static void corrupt_and_check(const char *label, const char *file, uint64_t offs
   if (fk_file_open(file, &io) != 0) { free(buf); CHECK(0, "%s: file open failed", label); return; }
   fk_store *s = NULL;
   int rc = fk_open(&io, &s);
-  fk_file_close(&io);
 
   /* Recovery: FK_OK means tail was truncated cleanly. FK_ECORRUPT means
    * damage inside durable data — catastrophic but correctly detected. */
@@ -121,6 +120,7 @@ static void corrupt_and_check(const char *label, const char *file, uint64_t offs
     CHECK(alive > 0, "%s: no branches alive after recovery", label);
     fk_close(s);
   }
+  fk_file_close(&io);
 
   /* Restore original for next test */
   buf[offset] = orig;
@@ -205,27 +205,41 @@ static void test_truncated_file(void) {
   if (rc != 0) return;
 
   /* Truncate off the last byte — recovery should truncate tail cleanly */
-  if (fsize > FK_HEADER_SZ && ftruncate(open(P("corr_trunc"), O_RDWR), (off_t)(fsize - 1)) == 0) {
-    fk_io io;
-    if (fk_file_open(P("corr_trunc"), &io) == 0) {
-      fk_store *s = NULL;
-      rc = fk_open(&io, &s);
-      fk_file_close(&io);
-      CHECK(rc == FK_OK || rc == FK_ECORRUPT, "truncated -1 byte: %s (marker protection against silent loss)", e(rc));
-      if (rc == FK_OK) fk_close(s);
+  if (fsize > FK_HEADER_SZ) {
+    int fd = open(P("corr_trunc"), O_RDWR);
+    if (fd >= 0) {
+      int tr = ftruncate(fd, (off_t)(fsize - 1));
+      close(fd);
+      if (tr == 0) {
+        fk_io io;
+        if (fk_file_open(P("corr_trunc"), &io) == 0) {
+          fk_store *s = NULL;
+          rc = fk_open(&io, &s);
+          CHECK(rc == FK_OK || rc == FK_ECORRUPT, "truncated -1 byte: %s (marker protection against silent loss)", e(rc));
+          if (rc == FK_OK) fk_close(s);
+          fk_file_close(&io);
+        }
+      }
     }
   }
 
   /* Truncate to exactly header size (empty store) */
-  if (ftruncate(open(P("corr_trunc"), O_RDWR), (off_t)FK_HEADER_SZ) == 0) {
-    fk_io io;
-    if (fk_file_open(P("corr_trunc"), &io) == 0) {
-      fk_store *s = NULL;
-      rc = fk_open(&io, &s);
-      fk_file_close(&io);
-      /* FK_ECORRUPT is also acceptable here — the marker may point past this. */
-      CHECK(rc == FK_OK || rc == FK_ECORRUPT, "truncated to header: %s", e(rc));
-      if (rc == FK_OK) fk_close(s);
+  {
+    int fd = open(P("corr_trunc"), O_RDWR);
+    if (fd >= 0) {
+      int tr = ftruncate(fd, (off_t)FK_HEADER_SZ);
+      close(fd);
+      if (tr == 0) {
+        fk_io io;
+        if (fk_file_open(P("corr_trunc"), &io) == 0) {
+          fk_store *s = NULL;
+          rc = fk_open(&io, &s);
+          /* FK_ECORRUPT is also acceptable here — the marker may point past this. */
+          CHECK(rc == FK_OK || rc == FK_ECORRUPT, "truncated to header: %s", e(rc));
+          if (rc == FK_OK) fk_close(s);
+          fk_file_close(&io);
+        }
+      }
     }
   }
 
