@@ -333,6 +333,12 @@ static int guard(void *ctx, uint32_t branch, int write) {
 }
 static void fkx_install_guard(fkx *x) { fkvfs_set_guard(x->vfs, guard, x); }
 
+/* After a store write: zero-fill one chunk ahead of the log end,
+ * so the next commit writes into blocks that already exist on disk. */
+static void maybe_background_fill(fkx *x) {
+  (void)fk_prealloc_background(&x->io);
+}
+
 /* ---------- branch info ---------- */
 static void to_info(const fkx *x, uint32_t id, const Meta *m, fkx_info *o) {
   memset(o, 0, sizeof *o);
@@ -413,10 +419,12 @@ int fkx_fork(fkx *x, const char *from, const char *name) {
   if ((rc = new_branch_meta(x, src, &f, &idF))) return rc;
   if ((rc = new_branch_meta(x, src, &a, &idA))) return rc;
   (void)idA;
+  maybe_background_fill(x);
   return FKX_OK;
 #endif
   if ((rc = new_branch_meta(x, src, &a, &idA))) return rc;      /* 1: the base: a read-only copy of the source as it is now */
   if ((rc = new_branch_meta(x, idA, &f, &idF))) return rc;      /* 2: the fork, from the base */
+  maybe_background_fill(x);
   return FKX_OK;
 }
 
@@ -430,7 +438,9 @@ int fkx_snapshot(fkx *x, const char *from, const char *name) {
   if (alive_count(x) + 1 > FK_MAX_BRANCHES) return failf(x, FKX_ELIMIT, "no free store branch (%u of %u in use)", alive_count(x), (unsigned)FK_MAX_BRANCHES);
   memset(&s, 0, sizeof s);
   s.kind = FKX_SNAPSHOT; s.ro = 1; s.uid = new_uid(x); s.origin = sm.uid; s.nlen = (unsigned)strlen(name); memcpy(s.name, name, s.nlen + 1);
-  return new_branch_meta(x, src, &s, &id);
+  rc = new_branch_meta(x, src, &s, &id);
+  if (rc == FKX_OK) maybe_background_fill(x);
+  return rc;
 }
 
 int fkx_discard(fkx *x, const char *name) {
@@ -475,7 +485,8 @@ int fkx_reset(fkx *x, const char *name, const char *to) {
   if (refs(x, id)) return failf(x, FKX_EBUSY, "%u connection(s) are open on '%s': close them first (a connection's cache would go stale)", refs(x, id), name);
 #endif
   rc = fk_reset(x->s, id, tid);
-  return rc == FK_OK ? FKX_OK : store_fail(x, rc, "resetting");
+  if (rc == FK_OK) { maybe_background_fill(x); return FKX_OK; }
+  return store_fail(x, rc, "resetting");
 }
 
 /* ---------- open a database on a branch ---------- */
