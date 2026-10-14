@@ -51,9 +51,9 @@ int main(void) {
   memset(page, 'Y', sizeof page);
   rc = fk_txn_begin(s, kid);
   CHECK(rc == 0, "begin txn on fork");
-  rc = fk_txn_write(s, kid, 1, page);
+  rc = fk_txn_write(s, 1, page);
   CHECK(rc == 0, "write page 1 on fork");
-  rc = fk_txn_commit(s, kid, 2);
+  rc = fk_txn_commit(s, 2);
   CHECK(rc == 0, "commit on fork");
 
   /* Forked branch sees its own data */
