@@ -379,6 +379,63 @@ static void t_primitives(void) {
   }
 }
 
+static void t_virtual(void) {
+  printf("S7 virtual table replay\n");
+  fkx *x = open_x("s7.fk", 16);
+  if (!x) { CHECK(0, "open"); return; }
+  sql(x, "main", SETUP);
+
+  /* Fork with an FTS5 virtual table using external content (t1).
+   * The session extension captures row changes on t1 (a regular table).
+   * replay_virtual_ddl drops/recreates the FTS table, then rebuilds. */
+  fkx_fork(x, "main", "ft");
+  sql(x, "ft", "CREATE VIRTUAL TABLE ft1 USING fts5(a, b, content=t1, content_rowid='id')");
+  /* Insert rows into t1 (regular table — captured by session) then rebuild FTS */
+  sql(x, "ft", "INSERT INTO t1 VALUES(10, 'fts')");
+  sql(x, "ft", "INSERT INTO ft1(ft1) VALUES('rebuild')");
+  sql(x, "ft", "UPDATE t1 SET v='FTS' WHERE id=1");
+
+  /* Diff should list ft1 as VIRTUAL and t1 as COMPARED */
+  fkx_diff_result d;
+  CHECK(fkx_diff(x, "ft", NULL, &d) == 0, "diff");
+  const fkx_table_diff *vtab = NULL;
+  for (size_t i = 0; i < d.ntables; i++)
+    if (!strcmp(d.tables[i].name, "ft1")) { vtab = &d.tables[i]; break; }
+  /* A virtual table new in the fork is TABLE_ONLY_THERE (not yet on the base).
+   * FKX_TABLE_VIRTUAL only when both sides have it and it's virtual on at least one. */
+  /* FKX_TABLE_ONLY_HERE means the fork has it, the base doesn't.
+   * FKX_TABLE_VIRTUAL means both sides have it and it's virtual on at least one. */
+  CHECK(vtab && (vtab->status == FKX_TABLE_VIRTUAL || vtab->status == FKX_TABLE_ONLY_HERE),
+        "ft1 is VIRTUAL or ONLY_HERE (status=%d)", vtab ? vtab->status : -1);
+  int has_t1 = 0;
+  for (size_t i = 0; i < d.ntables; i++)
+    if (!strcmp(d.tables[i].name, "t1")) { has_t1 = 1; break; }
+  CHECK(has_t1, "t1 in diff (regular table, comparable)");
+  fkx_diff_result_free(&d);
+
+  /* Change main so the states diverge, forcing replay (not fast-forward).
+   * This exercises the virtual table drop/recreate/rebuild path.
+   * Must actually write a page; zero-row UPDATEs may not commit. */
+  sql(x, "main", "INSERT INTO t1 VALUES(99, 'force-replay')");
+
+  /* Promote: was refused before virtual table replay, now succeeds */
+  fkx_promote_result r;
+  int prc = fkx_promote(x, "ft", NULL, &r);
+  CHECK(prc == 0 && (r.method == FKX_METHOD_REPLAY || r.method == FKX_METHOD_FAST_FORWARD),
+        "promote with virtual table: prc=%d method=%d err=%s", prc, r.method, fkx_errmsg(x));
+  fkx_promote_result_free(&r);
+  if (prc != 0) { fkx_close(x); return; }
+
+  /* Verify regular table changes applied */
+  CHECK(same(rows(x, "main", "SELECT v FROM t1 WHERE id=1"), "FTS;"), "regular table change applied");
+  /* FTS table exists on main after promote */
+  int fts_exists = rows(x, "main", "SELECT name FROM sqlite_schema WHERE name='ft1'") != NULL;
+  CHECK(fts_exists, "ft1 exists after promote");
+
+  CHECK(consistent(x), "consistent");
+  fkx_close(x);
+}
+
 int main(void) {
   setvbuf(stdout, NULL, _IOLBF, 0);
   if (!mkdtemp(dir)) return 2;
@@ -388,6 +445,7 @@ int main(void) {
   t_policy();
   t_triggers_fk();
   t_primitives();
+  t_virtual();
   char cmd[400];
   snprintf(cmd, sizeof cmd, "rm -rf '%s'", dir);
   if (system(cmd)) {}

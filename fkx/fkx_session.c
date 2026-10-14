@@ -289,6 +289,8 @@ struct fkx_replay {
   int take_undo;
   char **trig;      /* the sql of the triggers dropped on the touched tables */
   size_t ntrig;
+  char **vtab;      /* names of virtual tables recreated by replay_virtual_ddl — rebuilt after changeset apply */
+  size_t nvtab;
   int recorded;
 };
 
@@ -296,6 +298,8 @@ static void replay_free(fkx_replay *r) {
   if (!r) return;
   for (size_t i = 0; i < r->ntrig; i++) free(r->trig[i]);
   free(r->trig);
+  for (size_t i = 0; i < r->nvtab; i++) free(r->vtab[i]);
+  free(r->vtab);
   free(r);
 }
 static void replay_abort_impl(fkx_replay *r) {
@@ -313,6 +317,44 @@ static int refuse(fkx *x, char **refusal, const char *fmt, const char *a, const 
   snprintf(buf, sizeof buf, fmt, a ? a : "", b ? b : "");
   if (refusal) *refusal = strdup(buf);
   return fkx_i_fail(x, FKX_EREFUSED, "%s", buf);
+}
+
+/* Replay virtual table DDL: for each virtual table in the fork that differs from the target,
+ * drop and re-create it on the target. Stores the names of recreated tables in r->vtab;
+ * replay_commit_ex rebuilds their FTS indexes after changeset apply.
+ * Tables that are unchanged on both sides are left alone. Called before replay_new_ddl. */
+static int replay_virtual_ddl(fkx *x, sqlite3 *db, fkx_replay *r) {
+  Objs sn, sm;
+  int rc = objs_load(db, "new", &sn);
+  if (rc != SQLITE_OK) return fkx_i_fail(x, FKX_ESQLITE, "reading fork schema for virtual replay: %s", sqlite3_errmsg(db));
+  rc = objs_load(db, "main", &sm);
+  if (rc != SQLITE_OK) { objs_free(&sn); return fkx_i_fail(x, FKX_ESQLITE, "reading target schema for virtual replay: %s", sqlite3_errmsg(db)); }
+  for (size_t i = 0; i < sn.n; i++) {
+    if (strcmp(sn.o[i].type, "table")) continue;
+    if (!is_virtual(&sn.o[i])) continue;
+    /* Find the same-named table on the target (may be regular or virtual) */
+    const Obj *tgt = objs_table(&sm, sn.o[i].name);
+    if (tgt && is_virtual(tgt) && !strcmp(sn.o[i].sql, tgt->sql)) continue; /* unchanged */
+    /* Drop and re-create the virtual table. DROP also removes its shadow tables. */
+    char *q = sqlite3_mprintf("DROP TABLE IF EXISTS main.\"%w\"", sn.o[i].name);
+    if (!q) { objs_free(&sn); objs_free(&sm); return FKX_ENOMEM; }
+    rc = sq_exec(db, q);
+    sqlite3_free(q);
+    if (rc != SQLITE_OK) { rc = fkx_i_fail(x, FKX_ESQLITE, "dropping virtual table '%s' failed: %s", sn.o[i].name, sqlite3_errmsg(db)); objs_free(&sn); objs_free(&sm); return rc; }
+    if (!sn.o[i].sql || !sn.o[i].sql[0]) { objs_free(&sn); objs_free(&sm); return fkx_i_fail(x, FKX_ESQLITE, "virtual table '%s' has no SQL to replay", sn.o[i].name); }
+    if (sq_exec(db, sn.o[i].sql) != SQLITE_OK) {
+      rc = fkx_i_fail(x, FKX_ESQLITE, "replaying virtual table '%s' failed: %s", sn.o[i].name, sqlite3_errmsg(db));
+      objs_free(&sn); objs_free(&sm);
+      return rc;
+    }
+    /* Record the name for index rebuild after changeset apply */
+    char **g = realloc(r->vtab, (r->nvtab + 1) * sizeof *g);
+    if (!g) { objs_free(&sn); objs_free(&sm); return FKX_ENOMEM; }
+    r->vtab = g;
+    r->vtab[r->nvtab++] = strdup(sn.o[i].name);
+  }
+  objs_free(&sn); objs_free(&sm);
+  return FKX_OK;
 }
 
 /* Replay CREATE TABLE/INDEX/TRIGGER for objects that exist in "new" (the fork)
@@ -371,8 +413,11 @@ static int check_policy(fkx *x, sqlite3 *db, const char *const *touched, size_t 
 #ifdef FKX_BUG_POLICY_IGNORES_NO_PK
     differs = 0; /* mutant: rows of a table without a primary key that changed are not noticed */
 #endif
-    if ((t[i].status == FKX_TABLE_NO_PK || t[i].status == FKX_TABLE_VIRTUAL) && differs)
-      rc = refuse(x, refusal, "table '%s' %s: its rows changed, and a changeset cannot carry that", t[i].name, t[i].status == FKX_TABLE_NO_PK ? "has no PRIMARY KEY" : "is a virtual table or belongs to one");
+    /* Virtual tables with changed rows are now handled: replay_virtual_ddl
+     * drops and re-creates them on the target before changeset apply.
+     * The changeset carries INSERTs into their content tables (regular tables). */
+    if (t[i].status == FKX_TABLE_NO_PK && differs)
+      rc = refuse(x, refusal, "table '%s' has no PRIMARY KEY and its rows changed: a changeset cannot carry that, and %s", t[i].name, NULL);
   }
   tables_free(t, n);
   if (rc != FKX_OK) return rc;
@@ -421,6 +466,7 @@ static int replay_begin_ex(fkx *x, const char *old_ref, const char *new_ref, con
   if ((rc = check_policy(x, r->db, touched, ntouched, pm.name[0] ? pm.name : target, refusal))) goto fail;
   /* Replay DDL: tables, indexes and triggers the fork created but the target does not have.
    * The changeset carries row changes for new tables, so the schema must exist first. */
+  if ((rc = replay_virtual_ddl(x, r->db, r))) goto fail;
   if ((rc = replay_new_ddl(x, r->db, &pm))) goto fail;
   /* the target's triggers on the touched tables: their effects are in the changeset, so they must not fire again */
   for (size_t i = 0; i < ntouched; i++) {
@@ -470,6 +516,10 @@ static int replay_commit_ex(fkx_replay *r, char **fk_table) {
 #endif
     if (sq_exec(r->db, r->trig[i]) != SQLITE_OK) { int rc = fkx_i_fail(x, FKX_ESQLITE, "re-creating a trigger failed: %s", sqlite3_errmsg(r->db)); replay_abort_impl(r); return rc; }
   }
+  /* Recreated virtual tables with external content (content=t1) are already
+   * populated at creation time — FTS5 reads the content table. The changeset
+   * carries content row changes, so the FTS index is correct after replay.
+   * No explicit rebuild needed. The names in r->vtab are freed by replay_free. */
 #ifndef FKX_BUG_REPLAY_NO_FK_CHECK
   {
     sqlite3_stmt *st = NULL;
