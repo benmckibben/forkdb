@@ -315,6 +315,34 @@ static int refuse(fkx *x, char **refusal, const char *fmt, const char *a, const 
   return fkx_i_fail(x, FKX_EREFUSED, "%s", buf);
 }
 
+/* Replay CREATE TABLE/INDEX/TRIGGER for objects that exist in "new" (the fork)
+ * but not in "main" (the target). Called inside the replay transaction
+ * after check_policy and before trigger-dropping. */
+static int replay_new_ddl(fkx *x, sqlite3 *db, const Meta *pm) {
+  (void)pm;
+  Objs sn, sm;
+  int rc = objs_load(db, "new", &sn);
+  if (rc != SQLITE_OK) return fkx_i_fail(x, FKX_ESQLITE, "reading fork schema failed: %s", sqlite3_errmsg(db));
+  rc = objs_load(db, "main", &sm);
+  if (rc != SQLITE_OK) { objs_free(&sn); return fkx_i_fail(x, FKX_ESQLITE, "reading target schema failed: %s", sqlite3_errmsg(db)); }
+  for (size_t i = 0; i < sn.n; i++) {
+    /* Skip objects that already exist in the target */
+    int exists = 0;
+    for (size_t j = 0; j < sm.n; j++) {
+      if (!strcmp(sn.o[i].type, sm.o[j].type) && !strcmp(sn.o[i].name, sm.o[j].name)) { exists = 1; break; }
+    }
+    if (exists) continue;
+    if (!sn.o[i].sql || !sn.o[i].sql[0]) continue;
+    if (sq_exec(db, sn.o[i].sql) != SQLITE_OK) {
+      rc = fkx_i_fail(x, FKX_ESQLITE, "replaying DDL '%s' failed: %s", sn.o[i].name, sqlite3_errmsg(db));
+      objs_free(&sn); objs_free(&sm);
+      return rc;
+    }
+  }
+  objs_free(&sn); objs_free(&sm);
+  return FKX_OK;
+}
+
 /* The schema policy (docs/SESSION-DESIGN.md): what a changeset cannot carry, or would carry wrongly, is refused before anything is applied. */
 static int check_policy(fkx *x, sqlite3 *db, const char *const *touched, size_t ntouched, const char *target_name, char **refusal) {
   fkx_table_diff *t = NULL;
@@ -322,7 +350,22 @@ static int check_policy(fkx *x, sqlite3 *db, const char *const *touched, size_t 
   int sd = 0;
   if (classify(db, "new", "old", &t, &n, &sd) != SQLITE_OK) return fkx_i_fail(x, FKX_ESQLITE, "reading the schemas failed: %s", sqlite3_errmsg(db));
   int rc = FKX_OK;
-  if (sd) rc = refuse(x, refusal, "the fork changed the schema (a table, index, view or trigger was created, altered or dropped): a changeset cannot carry that, and %s", "a fast-forward is the only way to promote it", NULL);
+  /* Schema differences: refuse only what replay_new_ddl cannot handle (altered or dropped objects).
+   * New tables, indexes and triggers in the fork are replayed by replay_new_ddl. */
+  if (sd) {
+    Objs sn, so;
+    if (objs_load(db, "new", &sn) != SQLITE_OK) return fkx_i_fail(x, FKX_ESQLITE, "reading fork schema failed: %s", sqlite3_errmsg(db));
+    if (objs_load(db, "old", &so) != SQLITE_OK) { objs_free(&sn); return fkx_i_fail(x, FKX_ESQLITE, "reading base schema failed: %s", sqlite3_errmsg(db)); }
+    int refused = 0;
+    for (size_t i = 0; i < so.n && !refused; i++) {
+      int found = 0;
+      for (size_t j = 0; j < sn.n; j++)
+        if (!strcmp(so.o[i].type, sn.o[j].type) && !strcmp(so.o[i].name, sn.o[j].name) && !strcmp(so.o[i].sql, sn.o[j].sql)) { found = 1; break; }
+      if (!found) refused = 1;
+    }
+    objs_free(&sn); objs_free(&so);
+    if (refused) rc = refuse(x, refusal, "the fork dropped or altered an object that existed in the base: a changeset cannot carry that, and %s", "a fast-forward is the only way to promote it", NULL);
+  }
   for (size_t i = 0; i < n && rc == FKX_OK; i++) {
     int differs = t[i].rows_differ;
 #ifdef FKX_BUG_POLICY_IGNORES_NO_PK
@@ -376,6 +419,9 @@ static int replay_begin_ex(fkx *x, const char *old_ref, const char *new_ref, con
     return rc;
   }
   if ((rc = check_policy(x, r->db, touched, ntouched, pm.name[0] ? pm.name : target, refusal))) goto fail;
+  /* Replay DDL: tables, indexes and triggers the fork created but the target does not have.
+   * The changeset carries row changes for new tables, so the schema must exist first. */
+  if ((rc = replay_new_ddl(x, r->db, &pm))) goto fail;
   /* the target's triggers on the touched tables: their effects are in the changeset, so they must not fire again */
   for (size_t i = 0; i < ntouched; i++) {
     char *q = sqlite3_mprintf("SELECT name, sql FROM main.sqlite_schema WHERE type='trigger' AND tbl_name='%q'", touched[i]);

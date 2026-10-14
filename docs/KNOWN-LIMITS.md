@@ -8,9 +8,9 @@ This is a v0.1.0 limitation. The workaround: add a `PRIMARY KEY` (including `row
 
 ## DDL changes
 
-Schema changes (added tables, columns, indexes) are detected but not replayed. A diff reports tables as `FKX_TABLE_SCHEMA` when their definitions differ. A promote by replay refuses schema changes unless `policy.schema` is set to `FKX_REPLAY`.
+When a fork creates new tables, indexes, or triggers, promote replays their DDL statements onto the target before applying the changeset. This handles the common case of a test branch or feature branch that adds new schema objects.
 
-The next step is replaying `CREATE TABLE` and `ALTER TABLE ADD COLUMN` — the data of a new table would need an empty base to diff against.
+Alterations to existing objects (`ALTER TABLE`, replaced triggers) and dropped objects are detected and refused with `FKX_EREFUSED`, with the reason named. A diff reports altered tables as `FKX_TABLE_SCHEMA` when their definitions differ.
 
 ## Virtual tables and FTS
 
@@ -56,4 +56,4 @@ The CLI bundles its own session-variant SQLite — it works offline on any store
 - The store and VFS each have power-loss test suites (10 seeds × 12+ operations with crash injection at every I/O event) plus over a dozen targeted mutants each.
 - The fkx layer has a logic pass (111 checks), a power-loss pass (session driver: 10 seeds × 20 operations covering both replay and fast-forward), and 20 mutants — 10 core, 10 session — each caught by at least one test variant.
 - The CLI and extension have smoke tests that exercise every operation end-to-end. The extension test loads via `sqlite3_load_extension`.
-- Untested: OOM injection, virtual table handling at the SQL level, DDL replay, Node.js host primitives, and the host survey (macOS, python.org SQLite, Windows).
+- Untested: OOM injection, virtual table handling at the SQL level, Node.js host primitives, and the host survey (macOS, python.org SQLite, Windows).

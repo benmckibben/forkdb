@@ -159,10 +159,10 @@ static void t_replay(void) {
   sqlite3_finalize(st);
   fkx_fork(x, "main", "m");
   sql(x, "m", "CREATE TABLE extra(id INTEGER PRIMARY KEY)");
-  CHECK(fkx_promote(x, "m", NULL, &r) == FKX_EBUSY && strstr(fkx_errmsg(x), "replay was not possible"), "a fork with DDL and a connection open on main: neither path is possible: busy, and it says why (%s)", fkx_errmsg(x));
+  CHECK(fkx_promote(x, "m", NULL, &r) == 0 && r.method == FKX_METHOD_REPLAY, "a fork with DDL and a connection open on main: replay now possible with DDL (%s)", fkx_errmsg(x));
   fkx_promote_result_free(&r);
   sqlite3_close(db);
-  CHECK(fkx_promote(x, "m", NULL, &r) == 0 && r.method == FKX_METHOD_FAST_FORWARD && !strcmp(rows(x, "main", "SELECT name FROM sqlite_schema WHERE name='extra'"), "extra;"), "with the connection closed the fast-forward carries the DDL");
+  CHECK(fkx_promote(x, "m", NULL, &r) == 0 && (r.method == FKX_METHOD_FAST_FORWARD || r.method == FKX_METHOD_REPLAY) && !strcmp(rows(x, "main", "SELECT name FROM sqlite_schema WHERE name='extra'"), "extra;"), "with the connection closed DDL carries (new tables fast-forward or replay)");
   fkx_promote_result_free(&r);
   CHECK(consistent(x), "consistent");
   fkx_close(x);
@@ -208,7 +208,7 @@ static void t_policy(void) {
   sql(x, "main", "UPDATE t1 SET v='M' WHERE id=3");
   uint64_t st0 = state_of(x, "main");
   size_t nl = nlist(x, 1);
-  CHECK(fkx_promote(x, "ddl", NULL, &r) == FKX_EREFUSED && r.refusal && strstr(r.refusal, "schema"), "a fork that changed the schema, main moved: refused, with the rule ('%s')", r.refusal ? r.refusal : "");
+  CHECK(fkx_promote(x, "ddl", NULL, &r) == FKX_EREFUSED && r.refusal && strstr(r.refusal, "dropped or altered"), "a fork that changed the schema, main moved: refused, with the rule ('%s')", r.refusal ? r.refusal : "");
   fkx_promote_result_free(&r);
   CHECK(state_of(x, "main") == st0 && nlist(x, 1) == nl && nundo(x, "main") == 0 && consistent(x), "nothing changed");
   /* (b) the fork changed rows of a table without a primary key */
@@ -335,7 +335,7 @@ static void t_primitives(void) {
   sqlite3 *rdb = NULL;
   char *refusal = NULL;
   size_t nl = nlist(x, 1);
-  CHECK(fkx_replay_begin(x, bref, fref, "main", touched, 1, &rp, &rdb, &refusal) == FKX_EREFUSED && refusal && strstr(refusal, "schema") && !rp, "replay_begin: the fork changed a trigger (a schema change): refused, no handle");
+  CHECK(fkx_replay_begin(x, bref, fref, "main", touched, 1, &rp, &rdb, &refusal) == FKX_EREFUSED && refusal && strstr(refusal, "dropped or altered") && !rp, "replay_begin: the fork changed a trigger (a schema change): refused, no handle");
   free(refusal);
   fkx_discard(x, "f");
   fkx_fork(x, "main", "f");
