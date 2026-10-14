@@ -70,8 +70,9 @@ jobs:
 
       - name: Build and run store smoke test
         run: |
-          gcc -Wall -Wextra -std=gnu11 -O2 -DFK_MAX_BRANCHES=64 -Istore -Itest test\file_test.c store\fkstore.c store\io_file.c store\io_file_win.c store\io_prealloc.c test\simdisk.c -o build\smoke_test.exe 2>&1
-          if exist build\smoke_test.exe (echo BUILD OK) else (echo BUILD FAILED)
+          if not exist build mkdir build
+          gcc -Wall -Wextra -std=gnu11 -O2 -Istore test\win_smoke.c store\fkstore.c store\io_file.c store\io_file_win.c store\io_prealloc.c -o build\smoke_test.exe
+          build\smoke_test.exe
 
   macos:
     name: macOS store tests
