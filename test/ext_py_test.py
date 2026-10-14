@@ -462,5 +462,135 @@ os._exit(9)
         self.death("open-transaction")
 
 
+class E_OneProcessAtATime(Base):
+    """The store file is exclusively locked; a second process is refused, the lock is released on close
+    or crash, and multiple racing openers see exactly one winner at a time."""
+
+    def test_second_process_is_refused(self):
+        c = self.load()
+        self.new_store(c)
+        db = self.open_branch(c)
+        db.execute("create table t(a)")
+        db.executemany("insert into t values (?)", [(i,) for i in range(3)])
+        db.commit()
+        # Keep the store OPEN in this process (do not forkdb_close).
+        # Run a subprocess that tries to open it; it must fail with 'open in another process'.
+        r = run_py("""
+c = load()
+try:
+    c.execute("select forkdb_open_db(?, 'main')", (P,)).fetchone()
+except sqlite3.OperationalError as e:
+    print('refused:', e)
+    sys.exit(0)
+print('NOT REFUSED')
+sys.exit(3)
+""", self.store)
+        self.assertEqual(r.returncode, 0, "rc=%s\n%s%s" % (r.returncode, r.stdout, r.stderr))
+        self.assertIn("open in another process", r.stdout)
+        # The parent process still reads its 3 rows.
+        self.assertEqual(db.execute("select count(*) from t").fetchone()[0], 3)
+        self.assertEqual(db.execute("pragma integrity_check").fetchall(), [("ok",)])
+
+    def test_second_open_in_the_same_process_is_allowed_by_registry(self):
+        # The extension keeps a process-global registry: loading the extension on a second
+        # connection and calling forkdb_open_db reuses the already-open store rather than
+        # re-opening the file.  The file lock therefore never conflicts.  A subprocess is
+        # needed to see the refusal, as tested above.
+        c = self.load()
+        self.new_store(c)
+        db = self.open_branch(c)
+        db.execute("create table t(a integer primary key)")
+        db.execute("insert into t values (1)")
+        db.commit()
+        c2 = self.load()
+        uri = self.one(c2, "select forkdb_open_db(?, 'main')", self.store)
+        db2 = sqlite3.connect(uri, uri=True)
+        self.addCleanup(db2.close)
+        self.assertEqual(db2.execute("select a from t").fetchone(), (1,))
+        # New-style cleanup after successful open (the task description mentions this pattern).
+        self.addCleanup(self.close_store, c2, self.store)
+
+    def test_lock_is_released_when_the_holder_dies(self):
+        # Forkdb_close the parent's store first so the subprocess is the only holder.
+        c = self.load()
+        self.new_store(c)
+        self.one(c, "select forkdb_close(?)", self.store)
+        path = self.store
+        r = run_py("""
+c = load()
+c.execute("select forkdb_init(?)", (P,)).fetchone()
+os._exit(9)
+""", path)
+        self.assertEqual(r.returncode, 9, r.stdout + r.stderr)
+        # Now the parent can open the store again.
+        uri = self.one(c, "select forkdb_open_db(?, 'main')", path)
+        self.addCleanup(self.close_store, c, path)
+        db = sqlite3.connect(uri, uri=True)
+        self.addCleanup(db.close)
+        db.execute("create table x(b)")
+        db.execute("insert into x values (42)")
+        db.commit()
+        self.assertEqual(db.execute("select b from x").fetchone()[0], 42)
+
+    def test_lock_is_released_by_forkdb_close(self):
+        c = self.load()
+        path = self.new_store(c)
+        self.one(c, "select forkdb_close(?)", path)
+        r = run_py("""
+c = load()
+c.execute("select forkdb_open_db(?, 'main')", (P,)).fetchone()
+print('ok')
+""", path)
+        self.assertEqual(r.returncode, 0, "rc=%s\n%s%s" % (r.returncode, r.stdout, r.stderr))
+        self.assertIn("ok", r.stdout)
+
+    def test_two_processes_racing(self):
+        import time
+        c = self.load()
+        path = self.new_store(c)
+        db = self.open_branch(c, path=path)
+        db.execute("create table t(a integer primary key)")
+        db.executemany("insert into t values (?)", [(i,) for i in range(10)])
+        db.commit()
+        db.close()
+        self.one(c, "select forkdb_close(?)", path)
+        # The store is now closed; 6 subprocesses race to open it.
+        RACE = """
+import time, sys
+try:
+    c = load()
+    c.execute("select forkdb_open_db(?, 'main')", (P,)).fetchone()
+    time.sleep(2)
+    print('held')
+except sqlite3.OperationalError as e:
+    print('refused:', e)
+"""
+        t0 = time.monotonic()
+        procs = [subprocess.Popen([sys.executable, "-c", PRELUDE + RACE, SO, path],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                 for _ in range(6)]
+        outputs = []
+        for p in procs:
+            out, err = p.communicate(timeout=10)
+            self.assertEqual(p.returncode, 0, "rc=%s out=%s err=%s" % (p.returncode, out, err))
+            outputs.append(out.strip())
+        dt = time.monotonic() - t0
+        self.assertLess(dt, 10, "race test took %.1fs (limit 10s)" % dt)
+        held = [o for o in outputs if o == "held"]
+        refused = [o for o in outputs if o.startswith("refused:")]
+        self.assertEqual(len(held) + len(refused), 6, "every process either held the store or was refused: %r" % outputs)
+        self.assertGreaterEqual(len(held), 1)
+        self.assertGreaterEqual(len(refused), 1)
+        for o in refused:
+            self.assertIn("open in another process", o)
+        # The store must be usable afterwards.
+        uri = self.one(c, "select forkdb_open_db(?, 'main')", path)
+        self.addCleanup(self.close_store, c, path)
+        db = sqlite3.connect(uri, uri=True)
+        self.addCleanup(db.close)
+        self.assertEqual(db.execute("select count(*) from t").fetchone()[0], 10)
+        self.assertEqual(db.execute("pragma integrity_check").fetchall(), [("ok",)])
+
+
 if __name__ == "__main__":
     unittest.main()
