@@ -22,7 +22,7 @@ Changesets are held in memory during diff, promote, and undo. SQLite's session A
 
 ## Concurrency
 
-- **Single-writer.** One writer transaction at a time, across all branches, enforced by the VFS refusing the super-journal. Reads from separate connections on different branches are fine. The store is not thread-safe.
+- **Single-writer.** One writer transaction at a time, across all branches, enforced by the VFS refusing the super-journal. Reads from separate connections on different branches are fine. The store is thread-safe only through the VFS and fkx, which take one mutex around everything: a connection per thread is fine, but threads on different branches take turns inside the VFS (a commit, a read of a page) rather than run in parallel. Used directly (fkstore.h) the store is not thread-safe.
 - **One process per store file.** The file is locked while open; a second process (the CLI while an application has the store open, two workers on one path) gets an error, not a damaged store. Not enforced on a filesystem that cannot lock (some network filesystems), and the Windows side relies on the share mode and is covered only by the smoke test.
 - **One writer per branch.** The VFS enforces this: a transaction on one branch and another on a different branch in the same connection opens a super-journal, which the VFS refuses (with a reason logged). Separate connections each on their own branch, reading, is fine.
 

@@ -191,9 +191,15 @@ static void diff_close_impl(fkx_diff_handle *h) {
   free(h);
 }
 static void diff_abort_cb(void *p) { diff_close_impl(p); }
-void fkx_diff_close(fkx_diff_handle *h) { diff_close_impl(h); }
+void fkx_diff_close(fkx_diff_handle *h) {
+  if (!h) return;
+  fkx *x = h->x;
+  fkx_i_lock(x);
+  diff_close_impl(h); /* frees h */
+  fkx_i_unlock(x);
+}
 
-int fkx_diff_open(fkx *x, const char *ref, const char *against, fkx_diff_handle **hout, sqlite3 **db, const fkx_table_diff **tables, size_t *ntables, int *schema_differs) {
+static int fkx_diff_open_u(fkx *x, const char *ref, const char *against, fkx_diff_handle **hout, sqlite3 **db, const fkx_table_diff **tables, size_t *ntables, int *schema_differs) {
   uint32_t id, oid;
   Meta m, om;
   int rc;
@@ -243,7 +249,7 @@ static int count_changes(int n, void *cs, fkx_table_diff *t, size_t nt) {
   return 0;
 }
 
-int fkx_diff(fkx *x, const char *ref, const char *against, fkx_diff_result *out) {
+static int fkx_diff_u(fkx *x, const char *ref, const char *against, fkx_diff_result *out) {
   fkx_diff_handle *h = NULL;
   memset(out, 0, sizeof *out);
   int rc = fkx_diff_open(x, ref, against, &h, NULL, NULL, NULL, NULL);
@@ -310,7 +316,13 @@ static void replay_abort_impl(fkx_replay *r) {
   replay_free(r);
 }
 static void replay_abort_cb(void *p) { replay_abort_impl(p); }
-void fkx_replay_abort(fkx_replay *r) { replay_abort_impl(r); }
+void fkx_replay_abort(fkx_replay *r) {
+  if (!r) return;
+  fkx *x = r->x;
+  fkx_i_lock(x);
+  replay_abort_impl(r); /* frees r */
+  fkx_i_unlock(x);
+}
 
 static int refuse(fkx *x, char **refusal, const char *fmt, const char *a, const char *b) {
   char buf[400];
@@ -504,7 +516,7 @@ fail:
   return rc;
 }
 
-int fkx_replay_begin(fkx *x, const char *old_ref, const char *new_ref, const char *target, const char *const *touched, size_t ntouched, fkx_replay **r, sqlite3 **db, char **refusal) {
+static int fkx_replay_begin_u(fkx *x, const char *old_ref, const char *new_ref, const char *target, const char *const *touched, size_t ntouched, fkx_replay **r, sqlite3 **db, char **refusal) {
   return replay_begin_ex(x, old_ref, new_ref, target, touched, ntouched, 1, r, db, refusal);
 }
 
@@ -666,7 +678,13 @@ static int replay_commit_ex(fkx_replay *r, char **fk_table) {
   replay_free(r);
   return rc;
 }
-int fkx_replay_commit(fkx_replay *r) { return replay_commit_ex(r, NULL); }
+int fkx_replay_commit(fkx_replay *r) {
+  fkx *x = r->x;
+  fkx_i_lock(x);
+  int rc = replay_commit_ex(r, NULL); /* consumes r */
+  fkx_i_unlock(x);
+  return rc;
+}
 
 /* ---------- applying a changeset, and promote / undo by replay ---------- */
 typedef struct {
@@ -822,4 +840,25 @@ int fkx_i_replay_undo(fkx *x, uint32_t pid, const Meta *pm, fkx_promote_result *
   out->method = FKX_METHOD_REPLAY;
   /* after -> before, onto the target as it is now: the work done on the target since is kept */
   return replay_change(x, aref, bref, tref, out->dry_run, 0, out);
+}
+
+int fkx_diff_open(fkx *x, const char *ref, const char *against, fkx_diff_handle **hout, sqlite3 **db, const fkx_table_diff **tables, size_t *ntables, int *schema_differs) {
+  fkx_i_lock(x);
+  int r = fkx_diff_open_u(x, ref, against, hout, db, tables, ntables, schema_differs);
+  fkx_i_unlock(x);
+  return r;
+}
+
+int fkx_diff(fkx *x, const char *ref, const char *against, fkx_diff_result *out) {
+  fkx_i_lock(x);
+  int r = fkx_diff_u(x, ref, against, out);
+  fkx_i_unlock(x);
+  return r;
+}
+
+int fkx_replay_begin(fkx *x, const char *old_ref, const char *new_ref, const char *target, const char *const *touched, size_t ntouched, fkx_replay **r, sqlite3 **db, char **refusal) {
+  fkx_i_lock(x);
+  int rc = fkx_replay_begin_u(x, old_ref, new_ref, target, touched, ntouched, r, db, refusal);
+  fkx_i_unlock(x);
+  return rc;
 }

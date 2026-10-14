@@ -2,6 +2,7 @@
 #include "fkstore.h"
 
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 #ifdef OOM_INJECT
 #include "oom_harness.h" /* after the system headers; shares oom_counter with the test */
@@ -27,17 +28,24 @@ enum { T_PAGE = 1, T_COMMIT = 2, T_FORK = 3, T_DISCARD = 4, T_CPAGE = 5, T_SNAP 
  * build and the CPU have it (x86-64 with SSE4.2, selected at run time; AArch64 when compiled with the CRC extension). The results are
  * identical, so files written with one are read with the other. */
 static uint32_t crc_tab[256];
-static int crc_ready;
+/* Built once, by whichever thread gets there first (0 = not built, 1 = being built, 2 = built); the others wait for it. Threads may call fk_crc32c at the
+ * same time, and the table is shared by every store in the process. */
+static atomic_int crc_state;
 static void crc_init(void) {
-  for (uint32_t i = 0; i < 256; i++) {
-    uint32_t c = i;
-    for (int k = 0; k < 8; k++) c = (c & 1) ? (c >> 1) ^ 0x82F63B78u : c >> 1;
-    crc_tab[i] = c;
+  int expect = 0;
+  if (atomic_compare_exchange_strong(&crc_state, &expect, 1)) {
+    for (uint32_t i = 0; i < 256; i++) {
+      uint32_t c = i;
+      for (int k = 0; k < 8; k++) c = (c & 1) ? (c >> 1) ^ 0x82F63B78u : c >> 1;
+      crc_tab[i] = c;
+    }
+    atomic_store_explicit(&crc_state, 2, memory_order_release);
+  } else {
+    while (atomic_load_explicit(&crc_state, memory_order_acquire) != 2) { /* another thread is building it: a few hundred operations */ }
   }
-  crc_ready = 1;
 }
 static uint32_t crc_sw(uint32_t crc, const void *p, size_t n) {
-  if (!crc_ready) crc_init();
+  if (atomic_load_explicit(&crc_state, memory_order_acquire) != 2) crc_init();
   const uint8_t *b = p;
   uint32_t c = ~crc;
   while (n--) c = crc_tab[(c ^ *b++) & 0xff] ^ (c >> 8);
@@ -87,20 +95,22 @@ static int crc_hw_usable(void) { return 1; }
 #endif
 
 typedef uint32_t (*crc_fn)(uint32_t, const void *, size_t);
-static crc_fn crc_impl; /* chosen on first use */
+static _Atomic(crc_fn) crc_impl; /* chosen on first use; every thread that races to choose chooses the same one */
 int fk_crc32c_select(int want_hw) {
-  crc_impl = crc_sw;
+  crc_fn f = crc_sw;
   int hw = 0;
 #ifdef FK_HAVE_HWCRC
-  if (want_hw && crc_hw_usable()) { crc_impl = crc_hw; hw = 1; }
+  if (want_hw && crc_hw_usable()) { f = crc_hw; hw = 1; }
 #else
   (void)want_hw;
 #endif
+  atomic_store_explicit(&crc_impl, f, memory_order_release);
   return hw;
 }
 uint32_t fk_crc32c(uint32_t crc, const void *p, size_t n) {
-  if (!crc_impl) fk_crc32c_select(1);
-  return crc_impl(crc, p, n);
+  crc_fn f = atomic_load_explicit(&crc_impl, memory_order_acquire);
+  if (!f) { fk_crc32c_select(1); f = atomic_load_explicit(&crc_impl, memory_order_acquire); }
+  return f(crc, p, n);
 }
 static void put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 static void put32(uint8_t *p, uint32_t v) { for (int i = 0; i < 4; i++) p[i] = (uint8_t)(v >> (8 * i)); }

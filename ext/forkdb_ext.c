@@ -353,7 +353,9 @@ static void fn_compact(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
 static void fn_vfs_name(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     int rc; fkx *x = repo_from_arg(ctx, argc, argv, &rc);
     if (!x) return;
-    sqlite3_result_text(ctx, fkx_vfs_name(x), -1, SQLITE_STATIC);
+    /* A copy: the name belongs to the store, and SQLite reads the result after this function (and the registry lock) is done, when another thread's
+     * forkdb_close may have freed it. */
+    sqlite3_result_text(ctx, fkx_vfs_name(x), -1, SQLITE_TRANSIENT);
 }
 
 /* ---- session-dependent functions ---- */
@@ -524,6 +526,25 @@ static void fn_open_db(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
 
 /* ---- registration ---- */
 
+/* The registry above, and the store behind each entry, are used by whichever thread calls a SQL function, and forkdb_close frees an entry another thread may be
+ * using, so every SQL function runs under one process-wide mutex, held for its whole body. (Connections made from forkdb_open_db do not take it: they go through
+ * the VFS, which has its own mutex.) Lock order: the caller's connection mutex, then this one, then the VFS's. */
+static sqlite3_mutex *reg_mu; /* a static mutex, the same for every connection in the process; NULL (a no-op) on a SQLite built without mutexes */
+#define FK_LOCKED(name) \
+    static void name##_l(sqlite3_context *c, int n, sqlite3_value **a) { sqlite3_mutex_enter(reg_mu); name(c, n, a); sqlite3_mutex_leave(reg_mu); }
+FK_LOCKED(fn_init)
+FK_LOCKED(fn_close)
+FK_LOCKED(fn_fork)
+FK_LOCKED(fn_snapshot)
+FK_LOCKED(fn_discard)
+FK_LOCKED(fn_reset)
+FK_LOCKED(fn_vfs_name)
+FK_LOCKED(fn_compact)
+FK_LOCKED(fn_diff)
+FK_LOCKED(fn_promote)
+FK_LOCKED(fn_undo)
+FK_LOCKED(fn_open_db)
+
 #ifdef _WIN32
 #define FK_EXPORT __declspec(dllexport)
 #else
@@ -556,26 +577,27 @@ int sqlite3_forkdb_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines
     }
 
     pin_library();
+    reg_mu = sqlite3_mutex_alloc(SQLITE_MUTEX_STATIC_APP1);
 
     /* virtual table: forkdb_info */
     sqlite3_create_module(db, "forkdb_info", &forkdb_info_module, NULL);
 
     /* branch operations (work everywhere) */
     int flags = SQLITE_UTF8 | SQLITE_DIRECTONLY;
-    sqlite3_create_function(db, "forkdb_init",     -1, flags, NULL, fn_init,     NULL, NULL);
-    sqlite3_create_function(db, "forkdb_close",    -1, flags, NULL, fn_close,    NULL, NULL);
-    sqlite3_create_function(db, "forkdb_fork",     -1, flags, NULL, fn_fork,     NULL, NULL);
-    sqlite3_create_function(db, "forkdb_snapshot", -1, flags, NULL, fn_snapshot, NULL, NULL);
-    sqlite3_create_function(db, "forkdb_discard",  -1, flags, NULL, fn_discard,  NULL, NULL);
-    sqlite3_create_function(db, "forkdb_reset",    -1, flags, NULL, fn_reset,    NULL, NULL);
-    sqlite3_create_function(db, "forkdb_vfs_name", -1, flags, NULL, fn_vfs_name, NULL, NULL);
-    sqlite3_create_function(db, "forkdb_compact",  -1, flags, NULL, fn_compact,  NULL, NULL);
+    sqlite3_create_function(db, "forkdb_init",     -1, flags, NULL, fn_init_l,     NULL, NULL);
+    sqlite3_create_function(db, "forkdb_close",    -1, flags, NULL, fn_close_l,    NULL, NULL);
+    sqlite3_create_function(db, "forkdb_fork",     -1, flags, NULL, fn_fork_l,     NULL, NULL);
+    sqlite3_create_function(db, "forkdb_snapshot", -1, flags, NULL, fn_snapshot_l, NULL, NULL);
+    sqlite3_create_function(db, "forkdb_discard",  -1, flags, NULL, fn_discard_l,  NULL, NULL);
+    sqlite3_create_function(db, "forkdb_reset",    -1, flags, NULL, fn_reset_l,    NULL, NULL);
+    sqlite3_create_function(db, "forkdb_vfs_name", -1, flags, NULL, fn_vfs_name_l, NULL, NULL);
+    sqlite3_create_function(db, "forkdb_compact",  -1, flags, NULL, fn_compact_l,  NULL, NULL);
 
     /* session-dependent operations */
-    sqlite3_create_function(db, "forkdb_diff",     -1, flags, NULL, fn_diff,     NULL, NULL);
-    sqlite3_create_function(db, "forkdb_promote",  -1, flags, NULL, fn_promote,  NULL, NULL);
-    sqlite3_create_function(db, "forkdb_undo",     -1, flags, NULL, fn_undo,     NULL, NULL);
-    sqlite3_create_function(db, "forkdb_open_db",  -1, flags, NULL, fn_open_db,  NULL, NULL);
+    sqlite3_create_function(db, "forkdb_diff",     -1, flags, NULL, fn_diff_l,     NULL, NULL);
+    sqlite3_create_function(db, "forkdb_promote",  -1, flags, NULL, fn_promote_l,  NULL, NULL);
+    sqlite3_create_function(db, "forkdb_undo",     -1, flags, NULL, fn_undo_l,     NULL, NULL);
+    sqlite3_create_function(db, "forkdb_open_db",  -1, flags, NULL, fn_open_db_l,  NULL, NULL);
 
     return SQLITE_OK;
 }

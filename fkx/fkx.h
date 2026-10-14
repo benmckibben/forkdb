@@ -8,7 +8,7 @@
  * the parts that need SQLite's session extension (diff, replay) are a separate, optional driver (fkx_session) behind the same API, with
  * stepwise primitives (fkx_diff_open, fkx_replay_begin) for hosts whose SQLite has the session API but cannot give it to C code.
  *
- * Single process, single thread (like the store and the VFS). A transaction writes one branch (see SESSION-DESIGN.md).
+ * Single process. A handle and the connections from fkx_open_db may be used from several threads: every operation holds the VFS's one mutex (see fkvfs.h, and the note at the end of fkx.c). A transaction writes one branch (see SESSION-DESIGN.md).
  *
  * Branches are named by a string: a user name ("main", "agent-17"), or "#" and 16 hex digits for the uid of any branch, which is how
  * the internal branches (bases, undo points) are addressed. Store branch ids are reused and are never part of this API except in
