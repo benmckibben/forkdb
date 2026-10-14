@@ -182,6 +182,21 @@ static sqlite3_module forkdb_info_module = {
 
 /* ---- helper: open a repo from a function argument ---- */
 
+/* fkx_open frees its handle when it fails and leaves *out NULL, so there is no fkx_errmsg to ask: say what happened from the code. (Asking
+ * fkx_errmsg(NULL) here crashed the host process.) */
+static void open_failed(sqlite3_context *ctx, const char *path, int rc) {
+    char msg[600]; /* sqlite3_result_error copies it */
+    switch (rc) {
+        case FKX_ENOENT:   snprintf(msg, sizeof msg, "no store at '%.400s'", path); break;
+        case FKX_ESTORE:   snprintf(msg, sizeof msg, "cannot open the store file '%.400s'", path); break;
+        case FKX_EVERSION: snprintf(msg, sizeof msg, "'%.400s' is a store older than format version 4: compact it with the forkdb CLI first", path); break;
+        case FKX_ECORRUPT: snprintf(msg, sizeof msg, "'%.400s' is damaged or is not a forkdb store", path); break;
+        case FKX_ENOMEM:   sqlite3_result_error_nomem(ctx); return;
+        default:           snprintf(msg, sizeof msg, "opening '%.400s' failed (code %d)", path, rc); break;
+    }
+    sqlite3_result_error(ctx, msg, -1);
+}
+
 static fkx *repo_from_arg(sqlite3_context *ctx, int argc, sqlite3_value **argv, int *out_rc) {
     if (argc < 1) {
         sqlite3_result_error(ctx, "need a store path", -1);
@@ -202,8 +217,7 @@ static fkx *repo_from_arg(sqlite3_context *ctx, int argc, sqlite3_value **argv, 
     o.create = 0;
     int rc = fkx_open(path, &o, &x);
     if (rc != FKX_OK) {
-        sqlite3_result_error(ctx, fkx_errmsg(x), -1);
-        fkx_close(x);
+        open_failed(ctx, path, rc);
         *out_rc = rc;
         return NULL;
     }
@@ -232,7 +246,7 @@ static void fn_init(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     o.create = 1;
     o.root_name = name;
     int rc = fkx_open(path, &o, &x);
-    if (rc != FKX_OK) { sqlite3_result_error(ctx, fkx_errmsg(x), -1); fkx_close(x); return; }
+    if (rc != FKX_OK) { open_failed(ctx, path, rc); return; }
     if (!repo_add(path, x, ctx)) return;
 
     sqlite3_result_null(ctx);
