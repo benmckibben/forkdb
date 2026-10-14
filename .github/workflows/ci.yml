@@ -121,3 +121,12 @@ jobs:
 
       - name: Build and test the CLI
         run: scripts/test-cli.sh
+
+  threads:
+    name: Thread tests (ThreadSanitizer)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run thread stress tests
+        run: scripts/test-threads.sh
