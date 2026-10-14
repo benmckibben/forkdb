@@ -7,14 +7,21 @@
  *   store/io_prealloc.c -o build/oom_test -lpthread -lm
  */
 #define _GNU_SOURCE
+#ifndef OOM_INJECT
 #define OOM_INJECT
+#endif
 #include "oom_harness.h"
 #include "../store/fkstore.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
+
+/* One copy for every translation unit that includes oom_harness.h. */
+volatile int oom_counter = -1;
+volatile int oom_total = 0;
 
 static int fails, checks;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("  FAIL: "); printf(__VA_ARGS__); printf("\n"); } } while (0)
@@ -112,6 +119,7 @@ static void test_open_oom(void) {
   int rc = make_store(P("open"));
   CHECK(rc == FK_OK, "setup: %s", e(rc));
   if (rc != FK_OK) return;
+  int saw_oom = 0, saw_ok = 0;
   for (int fail_after = 0; fail_after < 200; fail_after++) {
     fk_io io;
     if (fk_file_open(P("open"), &io) != 0) continue;
@@ -120,6 +128,8 @@ static void test_open_oom(void) {
     rc = fk_open(&io, &s);
     oom_reset();
     CHECK(rc == FK_OK || rc == FK_ENOMEM, "open(fail_at=%d) = %s", fail_after, e(rc));
+    if (rc == FK_ENOMEM) saw_oom = 1;
+    if (rc == FK_OK) saw_ok = 1;
     if (rc == FK_OK) {
       char buf[FK_PAGE];
       int rrc = fk_read(s, 0, 1, buf);
@@ -128,6 +138,8 @@ static void test_open_oom(void) {
     }
     fk_file_close(&io);
   }
+  CHECK(saw_oom, "open OOM was never injected");
+  CHECK(saw_ok, "open never succeeded with injection armed");
   unlink(P("open"));
 }
 
@@ -137,6 +149,7 @@ static void test_fork_oom(void) {
   int rc = make_store(P("fork"));
   CHECK(rc == FK_OK, "setup: %s", e(rc));
   if (rc != FK_OK) return;
+  int saw_oom = 0, saw_ok = 0;
   for (int fail_after = 0; fail_after < 100; fail_after++) {
     fk_io io;
     if (fk_file_open(P("fork"), &io) != 0) continue;
@@ -145,15 +158,28 @@ static void test_fork_oom(void) {
     rc = fk_open(&io, &s);
     oom_reset();
     if (rc != FK_OK) { fk_file_close(&io); continue; }
+    uint32_t layers = fk_layer_count(s), branches = fk_branch_count(s);
+    struct stat st_before;
+    if (stat(P("fork"), &st_before) != 0) { fk_close(s); fk_file_close(&io); continue; }
     oom_fail_after(fail_after);
     uint32_t kid;
     rc = fk_fork(s, 0, &kid);
     oom_reset();
-    if (rc == FK_ENOMEM)
+    if (rc == FK_ENOMEM) saw_oom = 1;
+    if (rc == FK_OK) saw_ok = 1;
+    if (rc == FK_ENOMEM) {
+      struct stat st_after;
       CHECK(!fk_is_failed(s), "fork OOM at %d fail-stopped", fail_after);
+      CHECK(fk_layer_count(s) == layers && fk_branch_count(s) == branches,
+            "fork OOM at %d changed the branch table", fail_after);
+      CHECK(stat(P("fork"), &st_after) == 0 && st_after.st_size == st_before.st_size,
+            "fork OOM at %d left a durable record", fail_after);
+    }
     fk_close(s);
     fk_file_close(&io);
   }
+  CHECK(saw_oom, "fork OOM was never injected");
+  CHECK(saw_ok, "fork never succeeded with injection armed");
   unlink(P("fork"));
 }
 
@@ -165,6 +191,7 @@ static void test_commit_oom(void) {
   if (rc != FK_OK) return;
   char page[FK_PAGE];
   memset(page, 'C', sizeof page);
+  int saw_oom = 0, saw_ok = 0;
   for (int fail_after = 0; fail_after < 20; fail_after++) {
     fk_io io;
     if (fk_file_open(P("commit"), &io) != 0) continue;
@@ -180,11 +207,17 @@ static void test_commit_oom(void) {
     oom_fail_after(fail_after);
     rrc = fk_txn_commit(s, 4);
     oom_reset();
+    if (rrc == FK_ENOMEM) saw_oom = 1;
+    if (rrc == FK_OK) saw_ok = 1;
     if (rrc == FK_ENOMEM)
       CHECK(!fk_is_failed(s), "commit OOM fail_after=%d fail-stopped", fail_after);
+    /* Commit leaves the transaction open on any error, including FK_ENOMEM. */
+    if (rrc != FK_OK) fk_txn_abort(s);
     fk_close(s);
     fk_file_close(&io);
   }
+  CHECK(saw_oom, "commit OOM was never injected");
+  CHECK(saw_ok, "commit never succeeded with injection armed");
   unlink(P("commit"));
 }
 
@@ -194,6 +227,7 @@ static void test_compact_oom(void) {
   int rc = build_layer_tree(P("compact"));
   CHECK(rc == FK_OK, "setup: %s", e(rc));
   if (rc != FK_OK) return;
+  int saw_oom = 0, saw_ok = 0;
   for (int fail_after = 0; fail_after < 200; fail_after++) {
     fk_io io;
     if (fk_file_open(P("compact"), &io) != 0) continue;
@@ -207,11 +241,15 @@ static void test_compact_oom(void) {
     rc = fk_stats(s, &file_bytes, &live_bytes);
     oom_reset();
     CHECK(rc == FK_OK || rc == FK_ENOMEM, "fk_stats(fail_at=%d) = %s", fail_after, e(rc));
+    if (rc == FK_ENOMEM) saw_oom = 1;
+    if (rc == FK_OK) saw_ok = 1;
     if (rc == FK_ENOMEM)
       CHECK(!fk_is_failed(s), "stats OOM at %d fail-stopped", fail_after);
     fk_close(s);
     fk_file_close(&io);
   }
+  CHECK(saw_oom, "compact OOM was never injected");
+  CHECK(saw_ok, "compact never succeeded with injection armed");
   unlink(P("compact"));
 }
 

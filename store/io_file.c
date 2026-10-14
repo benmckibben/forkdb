@@ -9,6 +9,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef OOM_INJECT
+#include "oom_harness.h" /* after the system headers; shares oom_counter with the test */
+#endif
 
 typedef struct { int fd; char *path; } FC;
 #define FD(ctx) (((FC *)(ctx))->fd)
