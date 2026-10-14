@@ -53,7 +53,7 @@ static wchar_t *tmp_wpath(const wchar_t *p) {
   size_t n = wcslen(p);
   wchar_t *t = malloc((n + 9) * sizeof(wchar_t));
   if (!t) return NULL;
-  wmemcpy(t, p, n);
+  memcpy(t, p, n * sizeof(wchar_t));
   wcscpy(t + n, L".compact");
   return t;
 }
@@ -130,6 +130,12 @@ static int w_truncate(void *ctx, uint64_t size) {
 static int w_fsync(void *ctx) {
   return FlushFileBuffers(H(ctx)) ? 0 : -1;
 }
+
+/* Forward declarations (called from fill() before they are defined) */
+static int w_sibling_create(void *ctx, fk_io *tmp);
+static int w_sibling_rename(void *ctx, fk_io *tmp);
+static int w_sync_dir(void *ctx);
+static void w_sibling_remove(void *ctx, fk_io *tmp);
 
 static int sync_dir_of(const wchar_t *path) {
   /* Get the parent directory path */
