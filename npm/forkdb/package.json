@@ -1,0 +1,33 @@
+{
+  "name": "forkdb",
+  "version": "0.1.0",
+  "description": "Node.js bindings for forkdb - a branchable, snapshot-based SQLite page store",
+  "main": "index.js",
+  "scripts": {
+    "install": "node-gyp configure && node-gyp build",
+    "build": "node-gyp build",
+    "clean": "node-gyp clean"
+  },
+  "keywords": [
+    "sqlite",
+    "database",
+    "branching",
+    "version-control",
+    "storage"
+  ],
+  "author": "Ben McKibben",
+  "license": "MIT OR Apache-2.0",
+  "gypfile": true,
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "files": [
+    "binding.gyp",
+    "index.js",
+    "src/*"
+  ],
+  "dependencies": {
+    "bindings": "^1.5.0",
+    "node-addon-api": "^8.9.2"
+  }
+}
