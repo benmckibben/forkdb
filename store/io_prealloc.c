@@ -23,6 +23,9 @@
 #include <string.h>
 
 #include "fkstore.h"
+#ifdef OOM_INJECT
+#include "oom_harness.h" /* after the system headers; shares oom_counter with the test */
+#endif
 
 #define ZBLOCK (1u << 20)
 

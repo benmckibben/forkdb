@@ -3,6 +3,9 @@
 
 #include <stdlib.h>
 #include <string.h>
+#ifdef OOM_INJECT
+#include "oom_harness.h" /* after the system headers; shares oom_counter with the test */
+#endif
 
 #define MAGIC 0x31524b46u /* "FKR1" little-endian */
 #define FK_VERSION 4u     /* 2 added snapshots (compaction); 3 lets fork reuse the ids of discarded branches and adds the allocation cursor to snapshots; 4 adds branch metadata, reset and state ids (FORKM, RESET, META records; the snapshot ends with the state counter and, per branch, its state id and metadata). Versions 1 to 3 are still read. */
@@ -404,15 +407,23 @@ static int apply_commit(fk_store *s, uint32_t b, const PendPage *pp, uint32_t n,
 }
 static int apply_fork(fk_store *s, uint32_t src, uint32_t dst) {
   Layer *f = s->br[src].head;
+  Layer *stacked = NULL; /* a new head for src, undone if the fork layer itself cannot be allocated */
   if (f->count == 0 && f->parent && f->size == f->parent->size) {
     f = f->parent; /* nothing changed since the last fork: share the parent instead of stacking an empty layer */
   } else {
-    Layer *nh = layer_new(s, f);
-    if (!nh) return FK_ENOMEM;
-    set_head(s, src, nh);
+    stacked = layer_new(s, f);
+    if (!stacked) return FK_ENOMEM;
+    set_head(s, src, stacked);
   }
   Layer *d = layer_new(s, f);
-  if (!d) return FK_ENOMEM;
+  if (!d) {
+    if (stacked) { /* the branch table is unchanged: src is back on the layer it had */
+      set_head(s, src, stacked->parent);
+      layer_unlink(stacked);
+      drop_layer(s, stacked);
+    }
+    return FK_ENOMEM;
+  }
   set_head(s, dst, d);
   s->br[dst].alive = 1;
 #ifdef FK_BUG_STATE_FORK_NOT_COPIED
@@ -990,13 +1001,24 @@ int fk_fork(fk_store *s, uint32_t src, uint32_t *dst) {
   uint8_t pay[8];
   put32(pay, src);
   put32(pay + 4, id);
-  uint64_t e = s->end, q = s->seq;
-  uint32_t l = s->last_crc;
+  uint64_t old_end = s->end, e = old_end, q = s->seq, old_seq = q;
+  uint32_t old_crc = s->last_crc, l = old_crc;
   int rc = put_rec(s, T_FORK, pay, 8, &e, &q, &l, NULL);
   if (rc == FK_OK) rc = do_sync(s);
   if (rc != FK_OK) return rc;
   commit_tail(s, e, q, l);
-  if ((rc = apply_fork(s, src, id)) != FK_OK) { s->failed = 1; return rc; }
+  if ((rc = apply_fork(s, src, id)) != FK_OK) {
+    /* The record is durable but the branch table was not changed (apply_fork undoes a partial layer).
+     * Cut the record off so a retry cannot collide with it. If the cut fails, memory and the log disagree. */
+    if (!s->io.truncate || s->io.truncate(s->io.ctx, old_end) != 0 || s->io.fsync(s->io.ctx) != 0) {
+      s->failed = 1;
+      return rc;
+    }
+    s->end = old_end;
+    s->seq = old_seq;
+    s->last_crc = old_crc;
+    return rc;
+  }
   maybe_mark(s);
   *dst = id;
   return FK_OK;
