@@ -103,3 +103,12 @@ jobs:
             test/simdisk.c test/file_test.c \
             -lsqlite3 -lpthread -lm -o build/pysqlite_file_test
           build/pysqlite_file_test
+
+  extension:
+    name: Extension tests (Python sqlite3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the loadable extension and test it from Python's sqlite3
+        run: scripts/test-ext.sh

@@ -8,7 +8,7 @@ On top of an append-only log with power-loss recovery, forkdb layers branching (
 
 forkdb is a C library that requires:
 
-- A host with the **SQLite session API** (`SQLITE_ENABLE_SESSION`, `SQLITE_ENABLE_PREUPDATE_HOOK`) for diff/promote/undo. The extension detects this at load time and reports it through `forkdb_info`. Without it, the VFS and branch operations still work.
+- A SQLite built with the **session API** (`SQLITE_ENABLE_SESSION`, `SQLITE_ENABLE_PREUPDATE_HOOK`) for diff/promote/undo. The CLI and the library are built with it. The portable loadable extension (`scripts/build-ext.sh`) is not: the session API is not in the table SQLite gives an extension, so its `diff`, `promote` and `undo` report that this host has none (`forkdb_info.session_api` is 0), and the VFS and branch operations work.
 - A file system that supports **rename over an open file** for compaction (otherwise the store works without it).
 - **Single-writer.** One writer transaction at a time, across all branches, enforced by the VFS. Reads from separate connections on different branches are fine.
 
@@ -18,8 +18,12 @@ forkdb is a C library that requires:
 # Build the CLI (offline, for inspecting stores no app has open)
 ./scripts/build-step4.sh cli        # produces build/forkdb
 
-# Build the extension (for loading into a host app)
+# Build the extension for the sqlite3 shell (needs the symbols of a host that exports SQLite)
 ./scripts/build-step4.sh ext        # produces build/forkdb.so
+
+# Build the portable extension: loads into any SQLite 3.24+ (Python's sqlite3, a Node addon), no session driver
+./scripts/build-ext.sh              # produces build/ext/forkdb.so
+./scripts/test-ext.sh               # builds it and runs test/ext_py_test.py through Python's sqlite3
 
 # Build both plus the test suite
 ./scripts/build-step4.sh test
@@ -56,18 +60,21 @@ All commands accept `--json` for machine-readable output.
 -- Check if the host has the session API
 SELECT * FROM forkdb_info;
 
--- Create a store and branch off
+-- Create a store and branch off (fork takes the store, the branch to fork from, and the new name)
 SELECT forkdb_init('/tmp/mine.fk', 'main');
-SELECT forkdb_fork('/tmp/mine.fk', 'feat-x');
+SELECT forkdb_fork('/tmp/mine.fk', 'main', 'feat-x');
 
--- Open a database handle and work with it
-SELECT forkdb_open_db('/tmp/mine.fk', 'feat-x');  -- returns a VFS URI
-ATTACH '<the URI>' AS featx;
--- ... do work on featx ...
+-- Get the URI of a branch and open it with a second connection
+SELECT forkdb_open_db('/tmp/mine.fk', 'feat-x');  -- file:b1?vfs=forkdb
+-- ... sqlite3.connect(uri, uri=True) in Python, sqlite3_open_v2 in C ...
 SELECT forkdb_close('/tmp/mine.fk');
 ```
 
-Every [fkx](docs/FKX-DESIGN.md) operation is available as a `forkdb_*` SQL function: init, fork, snapshot, list, info, diff, promote, undo, discard, reset, gc, compact, close.
+The URI names the branch by its store id (`b<N>`), which is only stable until the next fork, discard or reset on that store: open it right away.
+
+The SQL functions are `forkdb_init(path[, root])`, `forkdb_fork(path, from, name)`, `forkdb_snapshot(path, from, name)`, `forkdb_discard(path, name)`, `forkdb_reset(path, name[, to])`, `forkdb_compact(path)`, `forkdb_vfs_name(path)`, `forkdb_open_db(path[, ref])`, `forkdb_close(path)`, and `forkdb_diff`, `forkdb_promote` and `forkdb_undo` where the session API is present. The table `forkdb_info` reports the session API, the VFS name and the version. They are direct-only: a view or trigger cannot call them. A store that cannot be opened is an SQL error. The extension stays loaded for the life of the process (it registers a VFS).
+
+The other [fkx](docs/FKX-DESIGN.md) operations (list, info, gc) are in the CLI and the C library, not in SQL.
 
 ## How it works
 
