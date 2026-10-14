@@ -58,3 +58,17 @@ jobs:
 
       - name: Run fkx tests
         run: scripts/test-fkx.sh quick
+
+  windows:
+    name: Windows store tests
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: cmd
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run store file tests
+        run: |
+          gcc -Wall -Wextra -std=gnu11 -O2 -DFK_MAX_BRANCHES=64 -Istore -Itest test\file_test.c store\fkstore.c store\io_file.c store\io_file_win.c store\io_prealloc.c test\simdisk.c -o build\file_test.exe -lshlwapi
+          build\file_test.exe
