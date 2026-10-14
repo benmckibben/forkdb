@@ -31,6 +31,8 @@ $cc $warn -fsanitize=address,undefined -fno-sanitize-recover=undefined $crash_sr
 echo "== the same power-loss tests with every store behind the preallocation layer (16 KiB chunks, so the cuts include the zero fills)"
 CRASH_PREALLOC=16384 "$out/crash_test" "$seeds" "$ops" | grep -E "^(every store|logic pass|workloads|post-crash|append-after|TOTAL)"
 
+[ "${1:-}" = quick ] && { echo "all store tests passed (quick)"; exit 0; }
+
 echo "== do the tests catch broken stores? (each mutant must be caught by at least one test)"
 mutant() { # name, flags, [env for the power-loss run, e.g. CRASH_PREALLOC=16384]
   local name=$1 flags=$2 cenv=${3:-} c=no f=no
