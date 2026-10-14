@@ -15,7 +15,7 @@ mkdir -p "$out"
 gcc -Wall -Wextra -std=gnu11 -O2 -g -fPIC -shared -fvisibility=hidden \
   -include ext/fk_ext_shim.h -I"$src" -Istore -Ivfs -Ifkx \
   ext/forkdb_ext.c fkx/fkx.c fkx/fkx_nosession.c vfs/fkvfs.c store/fkstore.c store/io_file.c store/io_prealloc.c \
-  -o "$out/forkdb.so" -lpthread -lm
+  -o "$out/forkdb.so" -lpthread -lm -ldl
 # The checks that make it loadable anywhere: nothing from SQLite left to resolve at load time, and the entry points are exported.
 undef=$(nm -D --undefined-only "$out/forkdb.so" | grep -c 'sqlite3' || true)
 if [ "$undef" != 0 ]; then
@@ -23,7 +23,8 @@ if [ "$undef" != 0 ]; then
   nm -D --undefined-only "$out/forkdb.so" | grep sqlite3 >&2
   exit 1
 fi
+exported=$(nm -D --defined-only "$out/forkdb.so")
 for sym in sqlite3_forkdb_init sqlite3_extension_init; do
-  nm -D --defined-only "$out/forkdb.so" | grep -q " T $sym\$" || { echo "$sym is not exported" >&2; exit 1; }
+  grep -q " T $sym\$" <<< "$exported" || { echo "$sym is not exported" >&2; exit 1; }
 done
 echo "built $out/forkdb.so"

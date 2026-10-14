@@ -11,11 +11,17 @@
  * sqlite3_api_routines table, and links fkx_nosession.c (the session API is not in that table). fkx_have_session() is therefore decided
  * when the library is built, not when it is loaded: this build reports session_api = 0.
  */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* dladdr */
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <inttypes.h>
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
 
 /* sqlite3ext.h must be first */
 #include "sqlite3ext.h"
@@ -527,6 +533,18 @@ static void fn_open_db(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
  * than the host is safe for the members the host has. */
 #define FK_MIN_SQLITE 3024000
 
+/* This library registers a VFS and keeps a registry of open stores, so it must never be unloaded: when the connection that loaded it closes,
+ * SQLite dlcloses it, and every other connection using the VFS then jumps into unmapped code (measured: a segfault in Python when the loader
+ * connection is closed before a branch connection). SQLITE_OK_LOAD_PERMANENTLY would say so, but it needs SQLite 3.50; this works on any host.
+ * Pin the library with a second dlopen that survives dlclose. (Windows: not done here, see the PR.) */
+static void pin_library(void) {
+#ifndef _WIN32
+    Dl_info info;
+    if (dladdr((void *)&pin_library, &info) && info.dli_fname)
+        (void)dlopen(info.dli_fname, RTLD_NOW | RTLD_NODELETE);
+#endif
+}
+
 FK_EXPORT
 int sqlite3_forkdb_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi) {
     if (!pApi) return SQLITE_ERROR; /* not loaded through sqlite3_load_extension: no API table, and so no allocator for a message */
@@ -535,6 +553,8 @@ int sqlite3_forkdb_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines
         if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("forkdb needs SQLite 3.24 or later, this host has %s", sqlite3_libversion());
         return SQLITE_ERROR;
     }
+
+    pin_library();
 
     /* virtual table: forkdb_info */
     sqlite3_create_module(db, "forkdb_info", &forkdb_info_module, NULL);
