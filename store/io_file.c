@@ -1,6 +1,11 @@
-/* io_file.c: fk_io on a real file (pread/pwrite/fsync), with the sibling operations used by compaction. */
+/* io_file.c: fk_io on a real file (pread/pwrite/fsync), with the sibling operations used by compaction.
+ * On Windows (_WIN32) this delegates to io_file_win.c. */
 #define _GNU_SOURCE
 #include "fkstore.h"
+
+#ifdef _WIN32
+/* io_file_win.c provides fk_file_open and fk_file_close — nothing else needed here */
+#else
 
 #include <errno.h>
 #include <fcntl.h>
@@ -162,3 +167,4 @@ void fk_file_close(fk_io *io) {
     io->ctx = NULL;
   }
 }
+#endif /* _WIN32 */
