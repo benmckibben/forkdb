@@ -7,19 +7,28 @@
  * an error naming the missing piece. The VFS and branch operations work
  * everywhere.
  *
- * Built without a SQLite of its own (uses sqlite3ext.h).
+ * Built without a SQLite of its own: scripts/build-ext.sh force-includes ext/fk_ext_shim.h, so every SQLite call goes through the host's
+ * sqlite3_api_routines table, and links fkx_nosession.c (the session API is not in that table). fkx_have_session() is therefore decided
+ * when the library is built, not when it is loaded: this build reports session_api = 0.
  */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* dladdr */
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <inttypes.h>
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
 
 /* sqlite3ext.h must be first */
 #include "sqlite3ext.h"
 SQLITE_EXTENSION_INIT1
 
 #include "../fkx/fkx.h"
+#include "../vfs/fkvfs.h"
 
 /* ---- registry: path -> fkx* ---- */
 
@@ -139,7 +148,7 @@ static int info_column(sqlite3_vtab_cursor *cur, sqlite3_context *ctx, int i) {
             break;
         case 1:
             if (i == 0) sqlite3_result_text(ctx, "vfs", -1, SQLITE_STATIC);
-            else if (i == 1) sqlite3_result_text(ctx, "fkvfs", -1, SQLITE_STATIC);
+            else if (i == 1) sqlite3_result_text(ctx, "forkdb", -1, SQLITE_STATIC); /* the default VFS name, fkx_options.vfs_name */
             break;
         case 2:
             if (i == 0) sqlite3_result_text(ctx, "version", -1, SQLITE_STATIC);
@@ -179,6 +188,21 @@ static sqlite3_module forkdb_info_module = {
 
 /* ---- helper: open a repo from a function argument ---- */
 
+/* fkx_open frees its handle when it fails and leaves *out NULL, so there is no fkx_errmsg to ask: say what happened from the code. (Asking
+ * fkx_errmsg(NULL) here crashed the host process.) */
+static void open_failed(sqlite3_context *ctx, const char *path, int rc) {
+    char msg[600]; /* sqlite3_result_error copies it */
+    switch (rc) {
+        case FKX_ENOENT:   snprintf(msg, sizeof msg, "no store at '%.400s'", path); break;
+        case FKX_ESTORE:   snprintf(msg, sizeof msg, "cannot open the store file '%.400s'", path); break;
+        case FKX_EVERSION: snprintf(msg, sizeof msg, "'%.400s' is a store older than format version 4: compact it with the forkdb CLI first", path); break;
+        case FKX_ECORRUPT: snprintf(msg, sizeof msg, "'%.400s' is damaged or is not a forkdb store", path); break;
+        case FKX_ENOMEM:   sqlite3_result_error_nomem(ctx); return;
+        default:           snprintf(msg, sizeof msg, "opening '%.400s' failed (code %d)", path, rc); break;
+    }
+    sqlite3_result_error(ctx, msg, -1);
+}
+
 static fkx *repo_from_arg(sqlite3_context *ctx, int argc, sqlite3_value **argv, int *out_rc) {
     if (argc < 1) {
         sqlite3_result_error(ctx, "need a store path", -1);
@@ -199,8 +223,7 @@ static fkx *repo_from_arg(sqlite3_context *ctx, int argc, sqlite3_value **argv, 
     o.create = 0;
     int rc = fkx_open(path, &o, &x);
     if (rc != FKX_OK) {
-        sqlite3_result_error(ctx, fkx_errmsg(x), -1);
-        fkx_close(x);
+        open_failed(ctx, path, rc);
         *out_rc = rc;
         return NULL;
     }
@@ -229,7 +252,7 @@ static void fn_init(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     o.create = 1;
     o.root_name = name;
     int rc = fkx_open(path, &o, &x);
-    if (rc != FKX_OK) { sqlite3_result_error(ctx, fkx_errmsg(x), -1); fkx_close(x); return; }
+    if (rc != FKX_OK) { open_failed(ctx, path, rc); return; }
     if (!repo_add(path, x, ctx)) return;
 
     sqlite3_result_null(ctx);
@@ -483,22 +506,55 @@ static void fn_open_db(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     int rc; fkx *x = repo_from_arg(ctx, argc, argv, &rc);
     if (!x) return;
     const char *ref = argc >= 2 ? (const char *)sqlite3_value_text(argv[1]) : "main";
+    if (!ref) ref = "main";
 
-    /* We can't return a sqlite3* handle to the user at the SQL level.
-     * Instead provide the VFS URI as text so the user can ATTACH. */
+    /* We can't return a sqlite3* handle to the user at the SQL level. Instead return the URI to open with sqlite3_open_v2 / sqlite3.connect(uri=True).
+     * The VFS opens a branch by its store id ("b<N>"), not by name, and the id is only stable until the next call that changes the repository
+     * (a discard frees an id, a later fork reuses it): open the URI right away. */
+    fkx_info info;
+    rc = fkx_info_get(x, ref, &info);
+    if (rc != FKX_OK) { sqlite3_result_error(ctx, fkx_errmsg(x), -1); return; }
+    char bname[24];
+    fkvfs_branch_name(info.id, bname, sizeof bname);
     char uri[512];
-    snprintf(uri, sizeof uri, "file:%s?vfs=%s", ref, fkx_vfs_name(x));
+    snprintf(uri, sizeof uri, "file:%s?vfs=%s", bname, fkx_vfs_name(x));
     sqlite3_result_text(ctx, uri, -1, SQLITE_TRANSIENT);
 }
 
 /* ---- registration ---- */
 
 #ifdef _WIN32
-__declspec(dllexport)
+#define FK_EXPORT __declspec(dllexport)
+#else
+#define FK_EXPORT __attribute__((visibility("default")))
 #endif
+
+/* The oldest SQLite whose sqlite3_api_routines table has everything used here (sqlite3_str_*, 3.24). The table only grows, so a header newer
+ * than the host is safe for the members the host has. */
+#define FK_MIN_SQLITE 3024000
+
+/* This library registers a VFS and keeps a registry of open stores, so it must never be unloaded: when the connection that loaded it closes,
+ * SQLite dlcloses it, and every other connection using the VFS then jumps into unmapped code (measured: a segfault in Python when the loader
+ * connection is closed before a branch connection). SQLITE_OK_LOAD_PERMANENTLY would say so, but it needs SQLite 3.50; this works on any host.
+ * Pin the library with a second dlopen that survives dlclose. (Windows: not done here, see the PR.) */
+static void pin_library(void) {
+#ifndef _WIN32
+    Dl_info info;
+    if (dladdr((void *)&pin_library, &info) && info.dli_fname)
+        (void)dlopen(info.dli_fname, RTLD_NOW | RTLD_NODELETE);
+#endif
+}
+
+FK_EXPORT
 int sqlite3_forkdb_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi) {
-    (void)pzErrMsg;
-    if (pApi) SQLITE_EXTENSION_INIT2(pApi);
+    if (!pApi) return SQLITE_ERROR; /* not loaded through sqlite3_load_extension: no API table, and so no allocator for a message */
+    SQLITE_EXTENSION_INIT2(pApi);
+    if (sqlite3_libversion_number() < FK_MIN_SQLITE) {
+        if (pzErrMsg) *pzErrMsg = sqlite3_mprintf("forkdb needs SQLite 3.24 or later, this host has %s", sqlite3_libversion());
+        return SQLITE_ERROR;
+    }
+
+    pin_library();
 
     /* virtual table: forkdb_info */
     sqlite3_create_module(db, "forkdb_info", &forkdb_info_module, NULL);
@@ -523,9 +579,7 @@ int sqlite3_forkdb_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines
     return SQLITE_OK;
 }
 
-#ifdef _WIN32
-__declspec(dllexport)
-#endif
+FK_EXPORT
 int sqlite3_extension_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines *pApi) {
     return sqlite3_forkdb_init(db, pzErrMsg, pApi);
 }
