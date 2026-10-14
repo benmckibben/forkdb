@@ -246,7 +246,12 @@ int fk_file_open(const char *path, fk_io *io) {
   HANDLE h = CreateFileW(wp, GENERIC_READ | GENERIC_WRITE,
                          FILE_SHARE_READ, NULL,
                          creation, FILE_ATTRIBUTE_NORMAL, NULL);
-  if (h == INVALID_HANDLE_VALUE) { free(wp); return -1; }
+  if (h == INVALID_HANDLE_VALUE) {
+    /* The share mode (FILE_SHARE_READ only) is the lock: a second opener that asks for write access is refused by the system. */
+    int busy = GetLastError() == ERROR_SHARING_VIOLATION;
+    free(wp);
+    return busy ? FK_ELOCKED : -1;
+  }
 
   WC *c = malloc(sizeof *c);
   if (!c) { CloseHandle(h); free(wp); return -1; }

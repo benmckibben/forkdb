@@ -44,6 +44,7 @@ static void open_failed(const char *what, const char *path, int rc) {
         case FKX_ESTORE:   fprintf(stderr, "cannot open the store file '%s'", path); break;
         case FKX_EVERSION: fprintf(stderr, "'%s' is a store older than format version 4", path); break;
         case FKX_ECORRUPT: fprintf(stderr, "'%s' is damaged or is not a forkdb store", path); break;
+        case FKX_ELOCKED:  fprintf(stderr, "the store '%s' is open in another process (or already open here): one process at a time", path); break;
         case FKX_ENOMEM:   fprintf(stderr, "out of memory"); break;
         default:           fprintf(stderr, "opening '%s' failed (code %d)", path, rc); break;
     }

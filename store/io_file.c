@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #ifdef OOM_INJECT
@@ -148,6 +149,10 @@ int fk_file_open(const char *path, fk_io *io) {
   int existed = access(path, F_OK) == 0;
   int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
   if (fd < 0) return -1;
+#ifndef FK_BUG_NO_FILE_LOCK
+  /* See fk_file_open in fkstore.h. EWOULDBLOCK is a proven conflict; any other failure to lock (ENOLCK, EOPNOTSUPP) is not. */
+  if (flock(fd, LOCK_EX | LOCK_NB) != 0 && errno == EWOULDBLOCK) { close(fd); return FK_ELOCKED; }
+#endif
   FC *c = malloc(sizeof *c);
   char *p = strdup(path);
   if (!c || !p) { free(c); free(p); close(fd); return -1; }

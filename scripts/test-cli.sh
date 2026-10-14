@@ -224,6 +224,84 @@ for c in list info gc; do
 done
 cmp -s "$OLD" "$tmp/old-orig.fk" || fail "a refused version 2 store was modified"
 
+# ---- store-file lock -----------------------------------------------
+# Verify the CLI refuses to open a store that another process holds an exclusive flock on,
+# and that the file is not modified and the lock is released afterwards.
+
+check_locked() {
+  # $1=command-name  $2=path  $3..extra-args (like main "select 1")
+  local cmd=$1 path=$2
+  shift 2
+  checks=$((checks + 1))
+
+  local stderr_file=$tmp/stderr-locked-$cmd-$checks
+  local stdout_file=$tmp/stdout-locked-$cmd-$checks
+
+  # Build the command to run inside a flock-held subshell.
+  # The lock is held on $path, so the CLI process will hit the exclusive flock conflict.
+  set +e
+  timeout 30 flock -s "$path" env LC_ALL=C "$CLI" "$cmd" "$path" "$@" </dev/null >"$stdout_file" 2>"$stderr_file"
+  local rc=$?
+  set -e
+
+  # exit status must be exactly 1
+  if [ "$rc" -ne 1 ]; then
+    fail "flocked $cmd $path: exit status $rc (want 1)"
+    head -3 "$stderr_file" | while IFS= read -r line; do echo "  stderr: $line"; done
+    return
+  fi
+
+  local first_line
+  first_line=$(head -1 "$stderr_file")
+  case "$first_line" in
+    "forkdb: $cmd: "*)
+      # ok prefix
+      ;;
+    *)
+      fail "flocked $cmd $path: stderr line 1 does not match 'forkdb: $cmd: <message>': got '$first_line'"
+      return
+      ;;
+  esac
+  if ! grep -qF "$path" <<< "$first_line"; then
+    fail "flocked $cmd $path: stderr line 1 does not contain path '$path': '$first_line'"
+    return
+  fi
+  if ! grep -qF "open in another process" <<< "$first_line"; then
+    fail "flocked $cmd $path: stderr line 1 does not contain 'open in another process': '$first_line'"
+    return
+  fi
+
+  # stdout must be empty
+  if [ -s "$stdout_file" ]; then
+    fail "flocked $cmd $path: stdout is not empty"
+    head -3 "$stdout_file" | while IFS= read -r line; do echo "  stdout: $line"; done
+    return
+  fi
+}
+
+if ! command -v flock > /dev/null 2>&1; then
+  echo "fatal: flock(1) is not installed; cannot test store-file locking" >&2
+  exit 1
+fi
+
+LOCKED=$tmp/locked.fk
+"$CLI" init "$LOCKED" > /dev/null 2>&1
+cp "$LOCKED" "$tmp/locked-orig.fk"
+
+check_locked list "$LOCKED"
+check_locked info "$LOCKED"
+check_locked gc   "$LOCKED"
+check_locked sql  "$LOCKED" main "select 1"
+
+# assert the store file was not modified
+cmp -s "$LOCKED" "$tmp/locked-orig.fk" || fail "locked file was modified"
+
+# assert the lock is released after flock returns
+checks=$((checks + 1))
+if ! "$CLI" list "$LOCKED" > /dev/null 2>&1; then
+  fail "could not list $LOCKED after lock was released"
+fi
+
 # ---- happy-path sanity -----------------------------------------------
 SANITY=$tmp/sanity.fk
 

@@ -57,6 +57,7 @@ mutant "compaction: directory not synced after the rename" "-DFK_BUG_COMPACT_NO_
 mutant "compaction: tombstones dropped too early" "-DFK_BUG_COMPACT_DROP_TOMB"
 mutant "compaction: copies a damaged page without checking" "-DFK_BUG_COMPACT_NO_VERIFY"
 mutant "open: leftover compaction file is not deleted" "-DFK_BUG_COMPACT_NO_CLEANUP"
+mutant "file: two openers are not refused (no file lock)" "-DFK_BUG_NO_FILE_LOCK"
 mutant "hardware CRC32C leaves out the last bytes of a buffer" "-DFK_BUG_CRC_HW_TAIL"
 mutant "index: a rehash loses one entry" "-DFK_BUG_INDEX_GROW_DROP"
 mutant "index: a collision is treated as a miss" "-DFK_BUG_INDEX_NO_PROBE"

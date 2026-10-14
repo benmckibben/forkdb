@@ -29,7 +29,7 @@ forkdb is a C library that requires:
 ./scripts/build-step4.sh test
 ```
 
-The CLI binary is self-contained: it links against its own SQLite. Use it on a store no application has open (single-writer).
+The CLI binary is self-contained: it links against its own SQLite. Use it on a store no application has open: the store file is locked while it is open, so the CLI (or a second application) is refused with an error if another process holds it.
 
 ## CLI
 
