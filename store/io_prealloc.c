@@ -68,7 +68,7 @@ static int pa_pwrite(void *ctx, uint64_t off, const void *buf, size_t n) {
 #ifdef FK_BUG_PA_FILL_AFTER_WRITE
     int rc = p->in.pwrite(p->in.ctx, off, buf, n); /* mutant: the data goes in first and the zero fill then overwrites it */
     if (rc != 0) return rc;
-    (void)pa_extend(p, end);
+    (void)pa_extend(p, end, 1);
     if (end > p->hi) p->hi = end;
     if (end > p->alloc) p->alloc = end;
     return 0;
