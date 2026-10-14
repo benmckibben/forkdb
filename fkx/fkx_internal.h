@@ -18,6 +18,9 @@ int fkx_i_fail(fkx *x, int code, const char *fmt, ...);
 int fkx_i_resolve(fkx *x, const char *ref, uint32_t *id, Meta *m);
 int fkx_i_find_uid(fkx *x, uint64_t uid, uint32_t *id, Meta *m);
 uint32_t fkx_i_refs(fkx *x, uint32_t id);
+/* The handle's lock (the VFS's one mutex, recursive): held by every public operation for its whole duration. fkx_session.c wraps its own entry points with it. */
+void fkx_i_lock(fkx *x);
+void fkx_i_unlock(fkx *x);
 int fkx_i_undo_before(fkx *x, uint32_t pid, const Meta *pm, uint64_t *ub);
 int fkx_i_undo_after(fkx *x, uint32_t pid, const Meta *pm, uint64_t ub, int *recorded);
 int fkx_i_discard_uid(fkx *x, uint64_t uid);

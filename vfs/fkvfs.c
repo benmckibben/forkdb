@@ -127,6 +127,7 @@ struct FkVfs {
   MemFile *files;
   FkVfsStats st;
   int batch, fail_commits, fail_page, nopen;
+  sqlite3_mutex *mu; /* one recursive mutex for the store, the branch table, the in-memory files and every connection's staging: see fkvfs.h */
 };
 
 typedef struct {
@@ -271,7 +272,7 @@ static int page_get(FkFile *f, uint32_t pg, uint8_t *out) {
 
 static int unlock_to(FkFile *f, int lv);
 
-static int fkf_close(sqlite3_file *pf) {
+static int fkf_close_u(sqlite3_file *pf) {
   FkFile *f = (FkFile *)pf;
   FkVfs *v = f->v;
   if (dirty(f)) v->st.discarded++;
@@ -286,7 +287,7 @@ static int fkf_close(sqlite3_file *pf) {
   return SQLITE_OK;
 }
 
-static int fkf_read_m(sqlite3_file *pf, void *buf, int amt, sqlite3_int64 off) {
+static int fkf_read_m_u(sqlite3_file *pf, void *buf, int amt, sqlite3_int64 off) {
   FkFile *f = (FkFile *)pf;
   uint8_t *dst = buf;
   uint8_t tmp[PG];
@@ -305,7 +306,7 @@ static int fkf_read_m(sqlite3_file *pf, void *buf, int amt, sqlite3_int64 off) {
   return SQLITE_OK;
 }
 
-static int fkf_write_m(sqlite3_file *pf, const void *buf, int amt, sqlite3_int64 off) {
+static int fkf_write_m_u(sqlite3_file *pf, const void *buf, int amt, sqlite3_int64 off) {
   FkFile *f = (FkFile *)pf;
   if (off < 0 || (off % PG) != 0 || (amt % PG) != 0) return SQLITE_IOERR_WRITE; /* page size must be a multiple of 4096 */
   const uint8_t *src = buf;
@@ -322,7 +323,7 @@ static int fkf_write_m(sqlite3_file *pf, const void *buf, int amt, sqlite3_int64
   return SQLITE_OK;
 }
 
-static int fkf_truncate(sqlite3_file *pf, sqlite3_int64 size) {
+static int fkf_truncate_u(sqlite3_file *pf, sqlite3_int64 size) {
   FkFile *f = (FkFile *)pf;
   if (size < 0 || (size % PG) != 0) return SQLITE_IOERR_TRUNCATE;
   uint32_t pages = (uint32_t)((uint64_t)size / PG);
@@ -336,7 +337,7 @@ static int fkf_truncate(sqlite3_file *pf, sqlite3_int64 size) {
   return SQLITE_OK;
 }
 
-static int fkf_sync(sqlite3_file *pf, int flags) {
+static int fkf_sync_u(sqlite3_file *pf, int flags) {
   (void)flags;
   FkFile *f = (FkFile *)pf;
   if (!dirty(f)) return SQLITE_OK;
@@ -345,12 +346,12 @@ static int fkf_sync(sqlite3_file *pf, int flags) {
   return rc;
 }
 
-static int fkf_filesize(sqlite3_file *pf, sqlite3_int64 *out) {
+static int fkf_filesize_u(sqlite3_file *pf, sqlite3_int64 *out) {
   *out = (sqlite3_int64)vis_size((FkFile *)pf) * PG;
   return SQLITE_OK;
 }
 
-static int fkf_lock(sqlite3_file *pf, int lv) {
+static int fkf_lock_u(sqlite3_file *pf, int lv) {
   FkFile *f = (FkFile *)pf;
   Branch *b = f->br;
   if (f->lock >= lv) return SQLITE_OK;
@@ -402,15 +403,15 @@ static int unlock_to(FkFile *f, int lv) {
   return SQLITE_OK;
 }
 
-static int fkf_unlock(sqlite3_file *pf, int lv) { return unlock_to((FkFile *)pf, lv); }
+static int fkf_unlock_u(sqlite3_file *pf, int lv) { return unlock_to((FkFile *)pf, lv); }
 
-static int fkf_checkres(sqlite3_file *pf, int *out) {
+static int fkf_checkres_u(sqlite3_file *pf, int *out) {
   Branch *b = ((FkFile *)pf)->br;
   *out = b->reserved || b->pending || b->excl;
   return SQLITE_OK;
 }
 
-static int fkf_fcntl(sqlite3_file *pf, int op, void *arg) {
+static int fkf_fcntl_u(sqlite3_file *pf, int op, void *arg) {
   FkFile *f = (FkFile *)pf;
   FkVfs *v = f->v;
   switch (op) {
@@ -470,6 +471,79 @@ static int fkf_devchar(sqlite3_file *pf) {
   return c;
 }
 
+/* Every method takes the VFS's one mutex (see fkvfs.h): SQLite calls these from whatever thread a connection is used on. The recursive mutex lets the
+ * methods call each other and lets fkx call into SQLite while it holds the lock. */
+static int fkf_close(sqlite3_file *pf) {
+  FkVfs *v = ((FkFile *)pf)->v;
+  sqlite3_mutex_enter(v->mu);
+  int rc = fkf_close_u(pf);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+static int fkf_read_m(sqlite3_file *pf, void *buf, int amt, sqlite3_int64 off) {
+  FkVfs *v = ((FkFile *)pf)->v;
+  sqlite3_mutex_enter(v->mu);
+  int rc = fkf_read_m_u(pf, buf, amt, off);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+static int fkf_write_m(sqlite3_file *pf, const void *buf, int amt, sqlite3_int64 off) {
+  FkVfs *v = ((FkFile *)pf)->v;
+  sqlite3_mutex_enter(v->mu);
+  int rc = fkf_write_m_u(pf, buf, amt, off);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+static int fkf_truncate(sqlite3_file *pf, sqlite3_int64 size) {
+  FkVfs *v = ((FkFile *)pf)->v;
+  sqlite3_mutex_enter(v->mu);
+  int rc = fkf_truncate_u(pf, size);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+static int fkf_sync(sqlite3_file *pf, int flags) {
+  FkVfs *v = ((FkFile *)pf)->v;
+  sqlite3_mutex_enter(v->mu);
+  int rc = fkf_sync_u(pf, flags);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+static int fkf_filesize(sqlite3_file *pf, sqlite3_int64 *out) {
+  FkVfs *v = ((FkFile *)pf)->v;
+  sqlite3_mutex_enter(v->mu);
+  int rc = fkf_filesize_u(pf, out);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+static int fkf_lock(sqlite3_file *pf, int lv) {
+  FkVfs *v = ((FkFile *)pf)->v;
+  sqlite3_mutex_enter(v->mu);
+  int rc = fkf_lock_u(pf, lv);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+static int fkf_unlock(sqlite3_file *pf, int lv) {
+  FkVfs *v = ((FkFile *)pf)->v;
+  sqlite3_mutex_enter(v->mu);
+  int rc = fkf_unlock_u(pf, lv);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+static int fkf_checkres(sqlite3_file *pf, int *out) {
+  FkVfs *v = ((FkFile *)pf)->v;
+  sqlite3_mutex_enter(v->mu);
+  int rc = fkf_checkres_u(pf, out);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+static int fkf_fcntl(sqlite3_file *pf, int op, void *arg) {
+  FkVfs *v = ((FkFile *)pf)->v;
+  sqlite3_mutex_enter(v->mu);
+  int rc = fkf_fcntl_u(pf, op, arg);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+
 static const sqlite3_io_methods fkf_methods = {
   1, fkf_close, fkf_read_m, fkf_write_m, fkf_truncate, fkf_sync, fkf_filesize, fkf_lock, fkf_unlock, fkf_checkres, fkf_fcntl, fkf_sector, fkf_devchar,
   0, 0, 0, 0, 0, 0};
@@ -482,7 +556,7 @@ static void memfile_unref(MemFile *m) {
   free(m);
 }
 
-static int mem_close(sqlite3_file *pf) {
+static int mem_close_u(sqlite3_file *pf) {
   MemHandle *h = (MemHandle *)pf;
   if (h->delete_on_close && h->mf->listed) {
     for (MemFile **pp = &h->v->files; *pp; pp = &(*pp)->next) if (*pp == h->mf) { *pp = h->mf->next; break; }
@@ -494,7 +568,7 @@ static int mem_close(sqlite3_file *pf) {
   return SQLITE_OK;
 }
 
-static int mem_read(sqlite3_file *pf, void *buf, int amt, sqlite3_int64 off) {
+static int mem_read_u(sqlite3_file *pf, void *buf, int amt, sqlite3_int64 off) {
   MemFile *m = ((MemHandle *)pf)->mf;
   if (off < 0) return SQLITE_IOERR_READ;
   if ((uint64_t)off >= m->len) { memset(buf, 0, (size_t)amt); return SQLITE_IOERR_SHORT_READ; }
@@ -516,7 +590,7 @@ static int mem_reserve(MemFile *m, size_t need) {
   return 0;
 }
 
-static int mem_write(sqlite3_file *pf, const void *buf, int amt, sqlite3_int64 off) {
+static int mem_write_u(sqlite3_file *pf, const void *buf, int amt, sqlite3_int64 off) {
   MemFile *m = ((MemHandle *)pf)->mf;
   if (off < 0) return SQLITE_IOERR_WRITE;
   size_t end = (size_t)off + (size_t)amt;
@@ -527,7 +601,7 @@ static int mem_write(sqlite3_file *pf, const void *buf, int amt, sqlite3_int64 o
   return SQLITE_OK;
 }
 
-static int mem_truncate(sqlite3_file *pf, sqlite3_int64 size) {
+static int mem_truncate_u(sqlite3_file *pf, sqlite3_int64 size) {
   MemFile *m = ((MemHandle *)pf)->mf;
   if (size < 0) return SQLITE_IOERR_TRUNCATE;
   if ((size_t)size > m->len) {
@@ -538,13 +612,56 @@ static int mem_truncate(sqlite3_file *pf, sqlite3_int64 size) {
   return SQLITE_OK;
 }
 
-static int mem_sync(sqlite3_file *pf, int flags) { (void)pf; (void)flags; return SQLITE_OK; }
-static int mem_size(sqlite3_file *pf, sqlite3_int64 *out) { *out = (sqlite3_int64)((MemHandle *)pf)->mf->len; return SQLITE_OK; }
+static int mem_sync_u(sqlite3_file *pf, int flags) { (void)pf; (void)flags; return SQLITE_OK; }
+static int mem_size_u(sqlite3_file *pf, sqlite3_int64 *out) { *out = (sqlite3_int64)((MemHandle *)pf)->mf->len; return SQLITE_OK; }
 static int mem_lock(sqlite3_file *pf, int lv) { (void)pf; (void)lv; return SQLITE_OK; }
 static int mem_checkres(sqlite3_file *pf, int *out) { (void)pf; *out = 0; return SQLITE_OK; }
 static int mem_fcntl(sqlite3_file *pf, int op, void *arg) { (void)pf; (void)op; (void)arg; return SQLITE_NOTFOUND; }
 static int mem_sector(sqlite3_file *pf) { (void)pf; return 512; }
 static int mem_devchar(sqlite3_file *pf) { (void)pf; return SQLITE_IOCAP_POWERSAFE_OVERWRITE; }
+
+static int mem_close(sqlite3_file *pf) {
+  FkVfs *v = ((MemHandle *)pf)->v;
+  sqlite3_mutex_enter(v->mu);
+  int rc = mem_close_u(pf);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+static int mem_read(sqlite3_file *pf, void *buf, int amt, sqlite3_int64 off) {
+  FkVfs *v = ((MemHandle *)pf)->v;
+  sqlite3_mutex_enter(v->mu);
+  int rc = mem_read_u(pf, buf, amt, off);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+static int mem_write(sqlite3_file *pf, const void *buf, int amt, sqlite3_int64 off) {
+  FkVfs *v = ((MemHandle *)pf)->v;
+  sqlite3_mutex_enter(v->mu);
+  int rc = mem_write_u(pf, buf, amt, off);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+static int mem_truncate(sqlite3_file *pf, sqlite3_int64 size) {
+  FkVfs *v = ((MemHandle *)pf)->v;
+  sqlite3_mutex_enter(v->mu);
+  int rc = mem_truncate_u(pf, size);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+static int mem_sync(sqlite3_file *pf, int flags) {
+  FkVfs *v = ((MemHandle *)pf)->v;
+  sqlite3_mutex_enter(v->mu);
+  int rc = mem_sync_u(pf, flags);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+static int mem_size(sqlite3_file *pf, sqlite3_int64 *out) {
+  FkVfs *v = ((MemHandle *)pf)->v;
+  sqlite3_mutex_enter(v->mu);
+  int rc = mem_size_u(pf, out);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
 
 static const sqlite3_io_methods mem_methods = {
   1, mem_close, mem_read, mem_write, mem_truncate, mem_sync, mem_size, mem_lock, mem_lock, mem_checkres, mem_fcntl, mem_sector, mem_devchar,
@@ -556,7 +673,7 @@ static MemFile *memfile_find(FkVfs *v, const char *name) {
 }
 
 /* ---- sqlite3_vfs ---- */
-static int vfs_open(sqlite3_vfs *pv, const char *zName, sqlite3_file *pf, int flags, int *pOut) {
+static int vfs_open_u(sqlite3_vfs *pv, const char *zName, sqlite3_file *pf, int flags, int *pOut) {
   FkVfs *v = pv->pAppData;
   if (pOut) *pOut = flags;
   if (flags & SQLITE_OPEN_SUPER_JOURNAL) {
@@ -624,7 +741,7 @@ static int vfs_open(sqlite3_vfs *pv, const char *zName, sqlite3_file *pf, int fl
   return SQLITE_OK;
 }
 
-static int vfs_delete(sqlite3_vfs *pv, const char *zName, int syncDir) {
+static int vfs_delete_u(sqlite3_vfs *pv, const char *zName, int syncDir) {
   FkVfs *v = pv->pAppData;
   (void)syncDir;
   MemFile *m = memfile_find(v, zName);
@@ -635,7 +752,7 @@ static int vfs_delete(sqlite3_vfs *pv, const char *zName, int syncDir) {
   return SQLITE_OK;
 }
 
-static int vfs_access(sqlite3_vfs *pv, const char *zName, int flags, int *pRes) {
+static int vfs_access_u(sqlite3_vfs *pv, const char *zName, int flags, int *pRes) {
   FkVfs *v = pv->pAppData;
   (void)flags;
   uint32_t b;
@@ -669,6 +786,28 @@ static int vfs_curtime64(sqlite3_vfs *pv, sqlite3_int64 *p) {
   return rc;
 }
 
+static int vfs_open(sqlite3_vfs *pv, const char *zName, sqlite3_file *pf, int flags, int *pOut) {
+  FkVfs *v = pv->pAppData;
+  sqlite3_mutex_enter(v->mu);
+  int rc = vfs_open_u(pv, zName, pf, flags, pOut);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+static int vfs_delete(sqlite3_vfs *pv, const char *zName, int syncDir) {
+  FkVfs *v = pv->pAppData;
+  sqlite3_mutex_enter(v->mu);
+  int rc = vfs_delete_u(pv, zName, syncDir);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+static int vfs_access(sqlite3_vfs *pv, const char *zName, int flags, int *pRes) {
+  FkVfs *v = pv->pAppData;
+  sqlite3_mutex_enter(v->mu);
+  int rc = vfs_access_u(pv, zName, flags, pRes);
+  sqlite3_mutex_leave(v->mu);
+  return rc;
+}
+
 int fkvfs_register(fk_store *s, const char *name, FkVfs **out) {
   FkVfs *v = calloc(1, sizeof *v);
   if (!v) return SQLITE_NOMEM;
@@ -676,6 +815,7 @@ int fkvfs_register(fk_store *s, const char *name, FkVfs **out) {
   if (!v->base) { free(v); return SQLITE_ERROR; }
   v->s = s;
   v->batch = 1;
+  v->mu = sqlite3_mutex_alloc(SQLITE_MUTEX_RECURSIVE); /* NULL when SQLite is built single-threaded: then enter and leave are no-ops */
   char *nm = strdup(name);
   if (!nm) { free(v); return SQLITE_NOMEM; }
   size_t fsz = sizeof(FkFile) > sizeof(MemHandle) ? sizeof(FkFile) : sizeof(MemHandle);
@@ -694,31 +834,41 @@ int fkvfs_register(fk_store *s, const char *name, FkVfs **out) {
   v->vfs.xGetLastError = vfs_lasterr;
   v->vfs.xCurrentTimeInt64 = vfs_curtime64;
   int rc = sqlite3_vfs_register(&v->vfs, 0);
-  if (rc != SQLITE_OK) { free(nm); free(v); return rc; }
+  if (rc != SQLITE_OK) { sqlite3_mutex_free(v->mu); free(nm); free(v); return rc; }
   *out = v;
   return SQLITE_OK;
 }
 
 int fkvfs_unregister(FkVfs *v) {
-  if (v->nopen != 0) return SQLITE_BUSY;
+  sqlite3_mutex_enter(v->mu);
+  if (v->nopen != 0) { sqlite3_mutex_leave(v->mu); return SQLITE_BUSY; }
   sqlite3_vfs_unregister(&v->vfs);
   while (v->files) { MemFile *m = v->files; v->files = m->next; m->listed = 0; memfile_unref(m); }
+  sqlite3_mutex_leave(v->mu);
+  sqlite3_mutex_free(v->mu);
   free((void *)v->vfs.zName);
   free(v);
   return SQLITE_OK;
 }
 
-void fkvfs_set_store(FkVfs *v, fk_store *s) { v->s = s; }
-void fkvfs_stats(const FkVfs *v, FkVfsStats *out) { *out = v->st; }
+void fkvfs_lock(FkVfs *v) { sqlite3_mutex_enter(v->mu); }
+void fkvfs_unlock(FkVfs *v) { sqlite3_mutex_leave(v->mu); }
+void fkvfs_set_store(FkVfs *v, fk_store *s) { sqlite3_mutex_enter(v->mu); v->s = s; sqlite3_mutex_leave(v->mu); }
+void fkvfs_stats(const FkVfs *v, FkVfsStats *out) { sqlite3_mutex_enter(v->mu); *out = v->st; sqlite3_mutex_leave(v->mu); }
 uint32_t fkvfs_branch_refs(const FkVfs *v, uint32_t branch) {
+  uint32_t n = 0;
+  sqlite3_mutex_enter(v->mu);
   for (const Branch *b = v->branches; b; b = b->next)
-    if (b->id == branch) return (uint32_t)b->nref;
-  return 0;
+    if (b->id == branch) { n = (uint32_t)b->nref; break; }
+  sqlite3_mutex_leave(v->mu);
+  return n;
 }
 void fkvfs_set_guard(FkVfs *v, fkvfs_guard_fn fn, void *ctx) {
+  sqlite3_mutex_enter(v->mu);
   v->guard = fn;
   v->guard_ctx = ctx;
+  sqlite3_mutex_leave(v->mu);
 }
-void fkvfs_set_batch_atomic(FkVfs *v, int on) { v->batch = on; }
-void fkvfs_fail_commits(FkVfs *v, int n) { v->fail_commits = n; }
-void fkvfs_fail_publish_page(FkVfs *v, int n) { v->fail_page = n; }
+void fkvfs_set_batch_atomic(FkVfs *v, int on) { sqlite3_mutex_enter(v->mu); v->batch = on; sqlite3_mutex_leave(v->mu); }
+void fkvfs_fail_commits(FkVfs *v, int n) { sqlite3_mutex_enter(v->mu); v->fail_commits = n; sqlite3_mutex_leave(v->mu); }
+void fkvfs_fail_publish_page(FkVfs *v, int n) { sqlite3_mutex_enter(v->mu); v->fail_page = n; sqlite3_mutex_leave(v->mu); }

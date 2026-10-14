@@ -195,7 +195,7 @@ void fkx_options_default(fkx_options *o) {
 static int gc_impl(fkx *x, fkx_gc_report *rep);
 static void fkx_install_guard(fkx *x);
 
-int fkx_check(fkx *x, char *buf, size_t n) {
+static int fkx_check_u(fkx *x, char *buf, size_t n) {
   uint32_t cnt = fk_branch_count(x->s);
   int roots = 0;
   Meta a, b;
@@ -314,8 +314,11 @@ int fkx_open(const char *path, const fkx_options *o, fkx **out) {
 
 void fkx_close(fkx *x) {
   if (!x) return;
+  fkvfs_lock(x->vfs);
   while (x->trk) { Trk *t = x->trk; x->trk = t->next; void *h = t->h; void (*fn)(void *) = t->fn; free(t); fn(h); } /* a replay or diff handle the host forgot is rolled back */
-  fkvfs_unregister(x->vfs);
+  FkVfs *v = x->vfs;
+  fkvfs_unlock(v); /* fkvfs_unregister takes it again, and frees it */
+  fkvfs_unregister(v);
   fk_close(x->s);
   if (x->own_prealloc) fk_prealloc_close(&x->io);
   if (x->own_file) fk_file_close(&x->io);
@@ -356,7 +359,7 @@ static void to_info(const fkx *x, uint32_t id, const Meta *m, fkx_info *o) {
   o->open_connections = refs(x, id);
   o->id = id;
 }
-int fkx_info_get(fkx *x, const char *ref, fkx_info *out) {
+static int fkx_info_get_u(fkx *x, const char *ref, fkx_info *out) {
   uint32_t id;
   Meta m;
   int rc = resolve(x, ref, &id, &m);
@@ -364,7 +367,7 @@ int fkx_info_get(fkx *x, const char *ref, fkx_info *out) {
   to_info(x, id, &m, out);
   return FKX_OK;
 }
-int fkx_list(fkx *x, int include_internal, fkx_info *out, size_t cap, size_t *n) {
+static int fkx_list_u(fkx *x, int include_internal, fkx_info *out, size_t cap, size_t *n) {
   size_t cnt = 0;
   uint32_t nb = fk_branch_count(x->s);
   Meta m;
@@ -398,7 +401,7 @@ static int new_branch_meta(fkx *x, uint32_t src, const Meta *m, uint32_t *id) {
   return rc == FK_OK ? FKX_OK : store_fail(x, rc, "forking");
 }
 
-int fkx_fork(fkx *x, const char *from, const char *name) {
+static int fkx_fork_u(fkx *x, const char *from, const char *name) {
   uint32_t src, idA, idF;
   Meta sm;
   int rc;
@@ -429,7 +432,7 @@ int fkx_fork(fkx *x, const char *from, const char *name) {
   return FKX_OK;
 }
 
-int fkx_snapshot(fkx *x, const char *from, const char *name) {
+static int fkx_snapshot_u(fkx *x, const char *from, const char *name) {
   uint32_t src, id;
   Meta sm, s;
   int rc;
@@ -444,7 +447,7 @@ int fkx_snapshot(fkx *x, const char *from, const char *name) {
   return rc;
 }
 
-int fkx_discard(fkx *x, const char *name) {
+static int fkx_discard_u(fkx *x, const char *name) {
   uint32_t id, bid;
   Meta m, bm;
   int rc;
@@ -470,7 +473,7 @@ int fkx_discard(fkx *x, const char *name) {
   return FKX_OK;
 }
 
-int fkx_reset(fkx *x, const char *name, const char *to) {
+static int fkx_reset_u(fkx *x, const char *name, const char *to) {
   uint32_t id, tid;
   Meta m, tm;
   int rc;
@@ -491,20 +494,30 @@ int fkx_reset(fkx *x, const char *name, const char *to) {
 }
 
 /* ---------- open a database on a branch ---------- */
-int fkx_open_db(fkx *x, const char *ref, int flags, sqlite3 **db) {
-  uint32_t id;
+/* Not wrapped in the handle's lock (see the thread-safety note at the end of the file): sqlite3_open_v2 takes the new connection's mutex and then calls into the
+ * VFS, which takes the VFS mutex, so holding the VFS mutex around it would reverse the order every other use has (connection mutex, then VFS mutex). The lock is
+ * held only for the branch lookup and for recording an error. A branch discarded in between makes the open fail in the VFS, which looks the branch up again. */
+static int fkx_open_db_u(fkx *x, const char *ref, int flags, sqlite3 **db) {
+  uint32_t id = 0;
   Meta m;
-  char n[24];
+  char n[24] = "";
+  fkvfs_lock(x->vfs);
   int rc = resolve(x, ref, &id, &m);
+  if (!rc && m.ro && (flags & (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)))
+    rc = failf(x, FKX_EREADONLY, "'%s' is read-only: open it with SQLITE_OPEN_READONLY", ref);
+  if (!rc) fkvfs_branch_name(id, n, sizeof n);
+  fkvfs_unlock(x->vfs);
   if (rc) return rc;
-  if (m.ro && (flags & (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE))) return failf(x, FKX_EREADONLY, "'%s' is read-only: open it with SQLITE_OPEN_READONLY", ref);
-  fkvfs_branch_name(id, n, sizeof n);
-  rc = sqlite3_open_v2(n, db, flags, x->vfs_name);
-  if (rc != SQLITE_OK) {
-    x->sqlite_rc = rc;
-    int code = failf(x, FKX_ESQLITE, "opening branch '%s' failed: %s", ref, *db ? sqlite3_errmsg(*db) : sqlite3_errstr(rc));
+  int orc = sqlite3_open_v2(n, db, flags, x->vfs_name);
+  if (orc != SQLITE_OK) {
+    char msg[200];
+    snprintf(msg, sizeof msg, "%s", *db ? sqlite3_errmsg(*db) : sqlite3_errstr(orc));
     if (*db) { sqlite3_close(*db); *db = NULL; }
-    return code;
+    fkvfs_lock(x->vfs);
+    x->sqlite_rc = orc;
+    rc = failf(x, FKX_ESQLITE, "opening branch '%s' failed: %s", ref, msg);
+    fkvfs_unlock(x->vfs);
+    return rc;
   }
   return FKX_OK;
 }
@@ -561,9 +574,9 @@ static int gc_impl(fkx *x, fkx_gc_report *rep) {
   if (rep) *rep = r;
   return FKX_OK;
 }
-int fkx_gc(fkx *x, fkx_gc_report *report) { return gc_impl(x, report); }
+static int fkx_gc_u(fkx *x, fkx_gc_report *report) { return gc_impl(x, report); }
 
-int fkx_compact_if_needed(fkx *x, uint64_t min_bytes, int *did) {
+static int fkx_compact_if_needed_u(fkx *x, uint64_t min_bytes, int *did) {
   int d = 0;
   int rc = fk_compact_if_needed(x->s, min_bytes, &d);
   if (did) *did = d;
@@ -612,7 +625,7 @@ static int undo_after(fkx *x, uint32_t pid, const Meta *pm, uint64_t ub, int *re
   return FKX_OK;
 }
 
-int fkx_promote(fkx *x, const char *name, const fkx_promote_opts *o, fkx_promote_result *out) {
+static int fkx_promote_u(fkx *x, const char *name, const fkx_promote_opts *o, fkx_promote_result *out) {
   fkx_promote_result local;
   if (!out) out = &local;
   memset(out, 0, sizeof *out);
@@ -659,7 +672,7 @@ int fkx_promote(fkx *x, const char *name, const fkx_promote_opts *o, fkx_promote
   return undo_after(x, pid, &pm, ub, &out->undo_recorded);              /* 3 and 4: the state after, and the list */
 }
 
-int fkx_undo(fkx *x, const char *name, fkx_promote_result *out) {
+static int fkx_undo_u(fkx *x, const char *name, fkx_promote_result *out) {
   fkx_promote_result local;
   if (!out) out = &local;
   memset(out, 0, sizeof *out);
@@ -736,21 +749,21 @@ int fkx_i_fail(fkx *x, int code, const char *fmt, ...) {
   va_end(ap);
   return code;
 }
-int fkx_i_resolve(fkx *x, const char *ref, uint32_t *id, Meta *m) { return resolve(x, ref, id, m); }
-int fkx_i_find_uid(fkx *x, uint64_t uid, uint32_t *id, Meta *m) { return find_uid(x, uid, id, m); }
-uint32_t fkx_i_refs(fkx *x, uint32_t id) { return refs(x, id); }
-int fkx_i_undo_before(fkx *x, uint32_t pid, const Meta *pm, uint64_t *ub) { return undo_before(x, pid, pm, ub); }
-int fkx_i_undo_after(fkx *x, uint32_t pid, const Meta *pm, uint64_t ub, int *recorded) { return undo_after(x, pid, pm, ub, recorded); }
-int fkx_i_discard_uid(fkx *x, uint64_t uid) { return discard_uid(x, uid); }
+static int fkx_i_resolve_u(fkx *x, const char *ref, uint32_t *id, Meta *m) { return resolve(x, ref, id, m); }
+static int fkx_i_find_uid_u(fkx *x, uint64_t uid, uint32_t *id, Meta *m) { return find_uid(x, uid, id, m); }
+static uint32_t fkx_i_refs_u(fkx *x, uint32_t id) { return refs(x, id); }
+static int fkx_i_undo_before_u(fkx *x, uint32_t pid, const Meta *pm, uint64_t *ub) { return undo_before(x, pid, pm, ub); }
+static int fkx_i_undo_after_u(fkx *x, uint32_t pid, const Meta *pm, uint64_t ub, int *recorded) { return undo_after(x, pid, pm, ub, recorded); }
+static int fkx_i_discard_uid_u(fkx *x, uint64_t uid) { return discard_uid(x, uid); }
 unsigned fkx_i_undo_keep(const fkx *x) { return x->undo_keep; }
 void fkx_i_ref(uint64_t uid, char out[24]) { snprintf(out, 24, "#%016llx", (unsigned long long)uid); }
-int fkx_i_track(fkx *x, void *h, void (*fn)(void *)) {
+static int fkx_i_track_u(fkx *x, void *h, void (*fn)(void *)) {
   Trk *t = malloc(sizeof *t);
   if (!t) return FKX_ENOMEM;
   t->h = h; t->fn = fn; t->next = x->trk; x->trk = t;
   return FKX_OK;
 }
-void fkx_i_untrack(fkx *x, void *h) {
+static void fkx_i_untrack_u(fkx *x, void *h) {
   for (Trk **p = &x->trk; *p; p = &(*p)->next)
     if ((*p)->h == h) { Trk *t = *p; *p = t->next; free(t); return; }
 }
@@ -770,3 +783,149 @@ void fkx_promote_result_free(fkx_promote_result *r) {
   free(r->refusal);
   memset(r, 0, sizeof *r);
 }
+
+/* ---------- thread safety ----------
+ * Every operation on a handle holds the VFS's one mutex (fkvfs.h) for its whole duration, the same mutex SQLite's calls into the VFS take, so
+ * the host may use the handle and connections made by fkx_open_db from several threads. The mutex is recursive: the operations call each other, and
+ * a connection of ours may call back into the VFS while one is held. Lock order: a connection's own SQLite mutex, then the VFS mutex: so fkx_open_db, which
+ * hands a connection to the host, does not hold the VFS mutex while it opens it. The operations that use private connections (the session driver's diff, promote,
+ * undo) do hold it around their own SQLite calls: no other thread can hold a private connection's mutex, so no deadlock, but ThreadSanitizer would call it an
+ * order inversion. Not covered: fkx_open and fkx_close lock only inside (the handle does not exist
+ * before, and is gone after), and fkx_errmsg, fkx_store_rc and fkx_sqlite_rc read the last error of the handle without a lock: they say something
+ * only if no other thread used the handle since the call that failed. */
+int fkx_check(fkx *x, char *buf, size_t n) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_check_u(x, buf, n);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+int fkx_info_get(fkx *x, const char *ref, fkx_info *out) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_info_get_u(x, ref, out);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+int fkx_list(fkx *x, int include_internal, fkx_info *out, size_t cap, size_t *n) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_list_u(x, include_internal, out, cap, n);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+int fkx_fork(fkx *x, const char *from, const char *name) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_fork_u(x, from, name);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+int fkx_snapshot(fkx *x, const char *from, const char *name) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_snapshot_u(x, from, name);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+int fkx_discard(fkx *x, const char *name) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_discard_u(x, name);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+int fkx_reset(fkx *x, const char *name, const char *to) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_reset_u(x, name, to);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+int fkx_open_db(fkx *x, const char *ref, int flags, sqlite3 **db) { return fkx_open_db_u(x, ref, flags, db); } /* takes the lock itself, in pieces */
+
+int fkx_compact_if_needed(fkx *x, uint64_t min_bytes, int *did) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_compact_if_needed_u(x, min_bytes, did);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+int fkx_promote(fkx *x, const char *name, const fkx_promote_opts *o, fkx_promote_result *out) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_promote_u(x, name, o, out);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+int fkx_undo(fkx *x, const char *name, fkx_promote_result *out) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_undo_u(x, name, out);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+int fkx_i_resolve(fkx *x, const char *ref, uint32_t *id, Meta *m) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_i_resolve_u(x, ref, id, m);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+int fkx_i_find_uid(fkx *x, uint64_t uid, uint32_t *id, Meta *m) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_i_find_uid_u(x, uid, id, m);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+uint32_t fkx_i_refs(fkx *x, uint32_t id) {
+  fkvfs_lock(x->vfs);
+  uint32_t r = fkx_i_refs_u(x, id);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+int fkx_i_undo_before(fkx *x, uint32_t pid, const Meta *pm, uint64_t *ub) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_i_undo_before_u(x, pid, pm, ub);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+int fkx_i_undo_after(fkx *x, uint32_t pid, const Meta *pm, uint64_t ub, int *recorded) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_i_undo_after_u(x, pid, pm, ub, recorded);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+int fkx_i_discard_uid(fkx *x, uint64_t uid) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_i_discard_uid_u(x, uid);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+int fkx_i_track(fkx *x, void *h, void (*fn)(void *)) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_i_track_u(x, h, fn);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+void fkx_i_untrack(fkx *x, void *h) {
+  fkvfs_lock(x->vfs);
+  fkx_i_untrack_u(x, h);
+  fkvfs_unlock(x->vfs);
+}
+
+int fkx_gc(fkx *x, fkx_gc_report *report) {
+  fkvfs_lock(x->vfs);
+  int r = fkx_gc_u(x, report);
+  fkvfs_unlock(x->vfs);
+  return r;
+}
+
+void fkx_i_lock(fkx *x) { fkvfs_lock(x->vfs); }
+void fkx_i_unlock(fkx *x) { fkvfs_unlock(x->vfs); }

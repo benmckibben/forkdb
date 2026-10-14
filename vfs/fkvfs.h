@@ -2,7 +2,7 @@
  *
  * A database is opened by the name "b<N>", N being a branch id of the store: sqlite3_open_v2("b3", &db, flags, "forkdb").
  * Only the main database file lives in the store. Journals and temporary files are in memory and die with the process.
- * Single process, not thread-safe (like fkstore). WAL is refused. A transaction may write only one branch: a commit that would write
+ * Single process. Thread-safe through one mutex (fkvfs_lock, below); the store behind it is not. WAL is refused. A transaction may write only one branch: a commit that would write
  * several attached branches fails with SQLITE_CANTOPEN (and a sqlite3_log message saying why) before anything is published. The database page size must be a multiple of FK_PAGE (4096). */
 #ifndef FKVFS_H
 #define FKVFS_H
@@ -38,6 +38,11 @@ int fkvfs_register(fk_store *s, const char *name, FkVfs **out);
 /* Unregister and free. All connections must be closed first. */
 int fkvfs_unregister(FkVfs *v);
 /* After the store was reopened (an I/O error is fail-stop in fkstore), point the VFS at the new handle. All connections must be closed. */
+/* The VFS's one mutex, recursive, shared by the store, the branch table and every connection's staging. Every VFS method takes it, so connections may be used
+ * from different threads. Whoever else touches the store while connections are live (fkx does) takes it too, for the whole operation. Lock order: SQLite's own
+ * connection mutex, then this one; never call into a connection you do not own while holding it. Null (a no-op) when SQLite is built without mutexes. */
+void fkvfs_lock(FkVfs *v);
+void fkvfs_unlock(FkVfs *v);
 void fkvfs_set_store(FkVfs *v, fk_store *s);
 
 void fkvfs_stats(const FkVfs *v, FkVfsStats *out);
