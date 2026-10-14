@@ -112,3 +112,12 @@ jobs:
 
       - name: Build the loadable extension and test it from Python's sqlite3
         run: scripts/test-ext.sh
+
+  cli:
+    name: CLI tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test the CLI
+        run: scripts/test-cli.sh

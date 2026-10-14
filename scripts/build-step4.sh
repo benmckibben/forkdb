@@ -16,7 +16,8 @@ cmd=${1:-}
 case $cmd in
   cli)
     sed 's/^int SQLITE_CDECL main(/int SQLITE_CDECL shell_main(/' "$VENDOR/shell.c" > "$out/shell-renamed.c"
-    gcc $F $FS -c "$out/shell-renamed.c" -o "$out/shell.o" 2>&1 | tail -1
+    # The same SQLite as the one in sqlite3-session.o: its headers, and without loadable extensions (that object is built without them)
+    gcc $F $FS -DSQLITE_OMIT_LOAD_EXTENSION -I"$VENDOR" -c "$out/shell-renamed.c" -o "$out/shell.o" 2>&1 | tail -1
     gcc $F $FS $I $SRC "$root/cli/forkdb.c" "$SESS_OBJ" "$out/shell.o" -o "$out/forkdb" -lpthread -lm 2>&1 | tail -1 || {
       # show actual errors
       gcc $F $FS $I $SRC "$root/cli/forkdb.c" "$SESS_OBJ" "$out/shell.o" -o "$out/forkdb" -lpthread -lm 2>&1 | grep error

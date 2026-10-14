@@ -35,6 +35,22 @@ static void die_err(const char *what, const fkx *x, int rc) {
     if (ferror(stderr)) exit(1);
 }
 
+/* fkx_open frees its handle when it fails and leaves *x NULL, so there is no fkx_errmsg to ask (die_err(NULL) crashed): say what happened
+ * from the code. Same wording as open_failed in ext/forkdb_ext.c. */
+static void open_failed(const char *what, const char *path, int rc) {
+    fprintf(stderr, PROGRAM ": %s: ", what);
+    switch (rc) {
+        case FKX_ENOENT:   fprintf(stderr, "no store at '%s'", path); break;
+        case FKX_ESTORE:   fprintf(stderr, "cannot open the store file '%s'", path); break;
+        case FKX_EVERSION: fprintf(stderr, "'%s' is a store older than format version 4", path); break;
+        case FKX_ECORRUPT: fprintf(stderr, "'%s' is damaged or is not a forkdb store", path); break;
+        case FKX_ENOMEM:   fprintf(stderr, "out of memory"); break;
+        default:           fprintf(stderr, "opening '%s' failed (code %d)", path, rc); break;
+    }
+    fputc('\n', stderr);
+    if (ferror(stderr)) exit(1);
+}
+
 /* ---- json helpers ---- */
 
 static void json_str(FILE *fp, const char *s) {
@@ -108,11 +124,7 @@ static int open_store(const char *path, int create, fkx **out) {
     fkx_options o;
     fkx_options_default(&o);
     o.create = create;
-    int rc = fkx_open(path, &o, out);
-    if (rc == FKX_EVERSION) {
-        rc = -1; /* handled by caller */
-    }
-    return rc;
+    return fkx_open(path, &o, out);
 }
 
 static void print_conflicts(fkx_promote_result *r) {
@@ -198,7 +210,7 @@ static int cmd_init(int argc, char **argv) {
     o.root_name = name;
     fkx *x = NULL;
     int rc = fkx_open(path, &o, &x);
-    if (rc != FKX_OK) { die_err("init", x, rc); fkx_close(x); return 1; }
+    if (rc != FKX_OK) { open_failed("init", path, rc); fkx_close(x); return 1; }
 
     fkx_info info;
     rc = fkx_info_get(x, name, &info);
@@ -236,7 +248,7 @@ static int cmd_list(int argc, char **argv) {
 
     fkx *x = NULL;
     int rc = open_store(argv[optind], 0, &x);
-    if (rc != FKX_OK) { die_err("list", x, rc); fkx_close(x); return 1; }
+    if (rc != FKX_OK) { open_failed("list", argv[optind], rc); fkx_close(x); return 1; }
 
     size_t n = 0;
     rc = fkx_list(x, all, NULL, 0, &n);
@@ -315,7 +327,7 @@ static int cmd_fork(int argc, char **argv) {
 
     fkx *x = NULL;
     int rc = open_store(argv[optind], 0, &x);
-    if (rc != FKX_OK) { die_err("fork", x, rc); fkx_close(x); return 1; }
+    if (rc != FKX_OK) { open_failed("fork", argv[optind], rc); fkx_close(x); return 1; }
 
     rc = fkx_fork(x, from, argv[optind + 1]);
     if (rc != FKX_OK) { die_err("fork", x, rc); fkx_close(x); return 1; }
@@ -359,7 +371,7 @@ static int cmd_snapshot(int argc, char **argv) {
 
     fkx *x = NULL;
     int rc = open_store(argv[optind], 0, &x);
-    if (rc != FKX_OK) { die_err("snapshot", x, rc); fkx_close(x); return 1; }
+    if (rc != FKX_OK) { open_failed("snapshot", argv[optind], rc); fkx_close(x); return 1; }
 
     rc = fkx_snapshot(x, from, argv[optind + 1]);
     if (rc != FKX_OK) { die_err("snapshot", x, rc); fkx_close(x); return 1; }
@@ -401,7 +413,7 @@ static int cmd_info(int argc, char **argv) {
 
     fkx *x = NULL;
     int rc = open_store(argv[optind], 0, &x);
-    if (rc != FKX_OK) { die_err("info", x, rc); fkx_close(x); return 1; }
+    if (rc != FKX_OK) { open_failed("info", argv[optind], rc); fkx_close(x); return 1; }
 
     fkx_info info;
     rc = fkx_info_get(x, ref, &info);
@@ -462,7 +474,7 @@ static int cmd_diff(int argc, char **argv) {
 
     fkx *x = NULL;
     int rc = open_store(argv[optind], 0, &x);
-    if (rc != FKX_OK) { die_err("diff", x, rc); fkx_close(x); return 1; }
+    if (rc != FKX_OK) { open_failed("diff", argv[optind], rc); fkx_close(x); return 1; }
 
     fkx_diff_result r;
     memset(&r, 0, sizeof r);
@@ -545,7 +557,7 @@ static int cmd_promote(int argc, char **argv) {
 
     fkx *x = NULL;
     int rc = open_store(argv[optind], 0, &x);
-    if (rc != FKX_OK) { die_err("promote", x, rc); fkx_close(x); return 1; }
+    if (rc != FKX_OK) { open_failed("promote", argv[optind], rc); fkx_close(x); return 1; }
 
     fkx_promote_opts o;
     o.into = into;
@@ -597,7 +609,7 @@ static int cmd_undo(int argc, char **argv) {
 
     fkx *x = NULL;
     int rc = open_store(argv[optind], 0, &x);
-    if (rc != FKX_OK) { die_err("undo", x, rc); fkx_close(x); return 1; }
+    if (rc != FKX_OK) { open_failed("undo", argv[optind], rc); fkx_close(x); return 1; }
 
     fkx_promote_result r;
     memset(&r, 0, sizeof r);
@@ -650,7 +662,7 @@ static int cmd_discard(int argc, char **argv) {
 
     fkx *x = NULL;
     int rc = open_store(argv[optind], 0, &x);
-    if (rc != FKX_OK) { die_err("discard", x, rc); fkx_close(x); return 1; }
+    if (rc != FKX_OK) { open_failed("discard", argv[optind], rc); fkx_close(x); return 1; }
 
     rc = fkx_discard(x, argv[optind + 1]);
     if (rc != FKX_OK) { die_err("discard", x, rc); fkx_close(x); return 1; }
@@ -683,7 +695,7 @@ static int cmd_reset(int argc, char **argv) {
 
     fkx *x = NULL;
     int rc = open_store(argv[optind], 0, &x);
-    if (rc != FKX_OK) { die_err("reset", x, rc); fkx_close(x); return 1; }
+    if (rc != FKX_OK) { open_failed("reset", argv[optind], rc); fkx_close(x); return 1; }
 
     rc = fkx_reset(x, argv[optind + 1], argv[optind + 2]);
     if (rc != FKX_OK) { die_err("reset", x, rc); fkx_close(x); return 1; }
@@ -719,7 +731,7 @@ static int cmd_gc(int argc, char **argv) {
 
     fkx *x = NULL;
     int rc = open_store(argv[optind], 0, &x);
-    if (rc != FKX_OK) { die_err("gc", x, rc); fkx_close(x); return 1; }
+    if (rc != FKX_OK) { open_failed("gc", argv[optind], rc); fkx_close(x); return 1; }
 
     fkx_gc_report rep;
     rc = fkx_gc(x, &rep);
@@ -759,7 +771,7 @@ static int cmd_compact(int argc, char **argv) {
 
     fkx *x = NULL;
     int rc = open_store(argv[optind], 0, &x);
-    if (rc != FKX_OK) { die_err("compact", x, rc); fkx_close(x); return 1; }
+    if (rc != FKX_OK) { open_failed("compact", argv[optind], rc); fkx_close(x); return 1; }
 
     int did = 0;
     rc = fkx_compact_if_needed(x, min_bytes, &did);
@@ -889,7 +901,7 @@ static int cmd_sql(int argc, char **argv) {
 
     fkx *x = NULL;
     int rc = open_store(argv[optind], 0, &x);
-    if (rc != FKX_OK) { die_err("sql", x, rc); fkx_close(x); return 1; }
+    if (rc != FKX_OK) { open_failed("sql", argv[optind], rc); fkx_close(x); return 1; }
 
     sqlite3 *db = NULL;
     int flags = write ? (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE) : SQLITE_OPEN_READONLY;
@@ -929,7 +941,7 @@ static int cmd_shell(int argc, char **argv) {
 
     fkx *x = NULL;
     int rc = open_store(argv[optind], 0, &x);
-    if (rc != FKX_OK) { die_err("shell", x, rc); fkx_close(x); return 1; }
+    if (rc != FKX_OK) { open_failed("shell", argv[optind], rc); fkx_close(x); return 1; }
 
     sqlite3 *db = NULL;
     rc = fkx_open_db(x, "main", SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, &db);
