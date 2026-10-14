@@ -21,6 +21,7 @@ jobs:
 
       - name: Build and run OOM injection tests
         run: |
+          mkdir -p build
           gcc -Wall -Wextra -std=gnu11 -O1 -g -DOOM_INJECT -DFK_MAX_BRANCHES=64 \
             -Istore -Itest test/oom_test.c store/fkstore.c store/io_file.c \
             store/io_prealloc.c -lpthread -lm -o build/oom_test
@@ -28,6 +29,7 @@ jobs:
 
       - name: Build and run corrupt-record recovery tests
         run: |
+          mkdir -p build
           gcc -Wall -Wextra -std=gnu11 -O1 -g -DFK_MAX_BRANCHES=64 \
             -Istore -Itest test/corrupt_test.c store/fkstore.c store/io_file.c \
             store/io_prealloc.c -lpthread -lm -o build/corrupt_test
