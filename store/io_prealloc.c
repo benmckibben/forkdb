@@ -36,7 +36,7 @@ typedef struct {
   uint8_t *zero;
 } PA;
 
-static int pa_extend(PA *p, uint64_t end) {
+static int pa_extend(PA *p, uint64_t end, int sync) {
   uint64_t target = (end + p->chunk - 1) / p->chunk * p->chunk;
 #ifdef FK_BUG_PA_FILL_FROM_ZERO
   uint64_t at = 0; /* mutant: the zero fill starts at the beginning of the file and wipes the log */
@@ -48,7 +48,9 @@ static int pa_extend(PA *p, uint64_t end) {
     if (p->in.pwrite(p->in.ctx, at, p->zero, (size_t)n) != 0) return -1;
     at += n;
   }
-  return p->in.fsync(p->in.ctx); /* the blocks and the size are durable now: later commits only flush data */
+  /* Inline extension (pa_pwrite) syncs: durability needed before data is written.
+   * Background fill (fk_prealloc_background) skips sync: the next commit covers it. */
+  return sync ? p->in.fsync(p->in.ctx) : 0;
 }
 
 static int64_t pa_size64(void *ctx) { return ((PA *)ctx)->in.size(((PA *)ctx)->in.ctx); }
@@ -71,7 +73,7 @@ static int pa_pwrite(void *ctx, uint64_t off, const void *buf, size_t n) {
     if (end > p->alloc) p->alloc = end;
     return 0;
 #else
-    if (pa_extend(p, end) == 0) {
+    if (pa_extend(p, end, 1) == 0) {
       p->alloc = (end + p->chunk - 1) / p->chunk * p->chunk;
     } else {
 #ifdef FK_BUG_PA_NO_FALLBACK
@@ -157,7 +159,7 @@ int fk_prealloc_background(fk_io *io) {
   if (p->off) return -1;
   uint64_t end = p->hi + p->chunk;
   if (end <= p->alloc) return 0;
-  if (pa_extend(p, end) != 0) { (void)p->in.truncate(p->in.ctx, p->alloc); p->off = 1; return -1; }
+  if (pa_extend(p, end, 0) != 0) { (void)p->in.truncate(p->in.ctx, p->alloc); p->off = 1; return -1; }
   p->alloc = (end + p->chunk - 1) / p->chunk * p->chunk;
   return 0;
 }
