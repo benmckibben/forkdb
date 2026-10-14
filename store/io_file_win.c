@@ -142,7 +142,7 @@ static int sync_dir_of(const wchar_t *path) {
   size_t n = wcslen(path);
   wchar_t *dir = malloc((n + 1) * sizeof(wchar_t));
   if (!dir) return -1;
-  wmemcpy(dir, path, n + 1);
+  memcpy(dir, path, (n + 1) * sizeof(wchar_t));
   while (n > 0 && dir[n - 1] != L'\\' && dir[n - 1] != L'/') n--;
   if (n > 1) dir[n - 1] = 0; else { dir[0] = L'.'; dir[1] = 0; }
 
