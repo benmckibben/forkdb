@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build helper for the VFS spike. Needs gcc, curl, sha256sum and python3.
 #   vfs/build.sh sqlite          compile the pinned SQLite three times: stock; with SQLITE_ENABLE_BATCH_ATOMIC_WRITE; and 'session', stock plus the
-#                                session extension (SQLITE_ENABLE_SESSION and SQLITE_ENABLE_PREUPDATE_HOOK), the build the CLI will ship (cached)
+#                                session extension (SQLITE_ENABLE_SESSION and SQLITE_ENABLE_PREUPDATE_HOOK) and FTS5, the build the CLI will ship (cached)
 #   vfs/build.sh test [variant]  build vfs/build/vfs_test-<variant> (variant: batch, stock or session; default batch)
 #   vfs/build.sh bench [variant] build vfs/build/vfs_bench-<variant>
 #   vfs/build.sh micro           build vfs/build/commit_micro (raw I/O patterns of one commit; needs only gcc)
@@ -19,7 +19,7 @@ variant=${2:-batch}
 flags_for() {
   case $1 in
     stock) echo "-DSQLITE_OMIT_LOAD_EXTENSION" ;;
-    session) echo "-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_ENABLE_SESSION -DSQLITE_ENABLE_PREUPDATE_HOOK" ;;
+    session) echo "-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_ENABLE_SESSION -DSQLITE_ENABLE_PREUPDATE_HOOK -DSQLITE_ENABLE_FTS5" ;;
     batch) echo "-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_ENABLE_BATCH_ATOMIC_WRITE" ;;
     *) echo "unknown variant $1 (stock, batch or session)" >&2; exit 2 ;;
   esac

@@ -289,7 +289,7 @@ struct fkx_replay {
   int take_undo;
   char **trig;      /* the sql of the triggers dropped on the touched tables */
   size_t ntrig;
-  char **vtab;      /* names of virtual tables recreated by replay_virtual_ddl — rebuilt after changeset apply */
+  char **vtab;      /* virtual tables recreated by replay_virtual_ddl; external-content FTS indexes are rebuilt after the changeset is applied */
   size_t nvtab;
   int recorded;
 };
@@ -321,7 +321,7 @@ static int refuse(fkx *x, char **refusal, const char *fmt, const char *a, const 
 
 /* Replay virtual table DDL: for each virtual table in the fork that differs from the target,
  * drop and re-create it on the target. Stores the names of recreated tables in r->vtab;
- * replay_commit_ex rebuilds their FTS indexes after changeset apply.
+ * replay_commit_ex rebuilds external-content FTS indexes after the changeset is applied.
  * Tables that are unchanged on both sides are left alone. Called before replay_new_ddl. */
 static int replay_virtual_ddl(fkx *x, sqlite3 *db, fkx_replay *r) {
   Objs sn, sm;
@@ -347,11 +347,13 @@ static int replay_virtual_ddl(fkx *x, sqlite3 *db, fkx_replay *r) {
       objs_free(&sn); objs_free(&sm);
       return rc;
     }
-    /* Record the name for index rebuild after changeset apply */
+    /* Record the name so the FTS index can be rebuilt after the changeset is applied. */
+    char *nm = strdup(sn.o[i].name);
+    if (!nm) { objs_free(&sn); objs_free(&sm); return FKX_ENOMEM; }
     char **g = realloc(r->vtab, (r->nvtab + 1) * sizeof *g);
-    if (!g) { objs_free(&sn); objs_free(&sm); return FKX_ENOMEM; }
+    if (!g) { free(nm); objs_free(&sn); objs_free(&sm); return FKX_ENOMEM; }
     r->vtab = g;
-    r->vtab[r->nvtab++] = strdup(sn.o[i].name);
+    r->vtab[r->nvtab++] = nm;
   }
   objs_free(&sn); objs_free(&sm);
   return FKX_OK;
@@ -417,7 +419,7 @@ static int check_policy(fkx *x, sqlite3 *db, const char *const *touched, size_t 
      * drops and re-creates them on the target before changeset apply.
      * The changeset carries INSERTs into their content tables (regular tables). */
     if (t[i].status == FKX_TABLE_NO_PK && differs)
-      rc = refuse(x, refusal, "table '%s' has no PRIMARY KEY and its rows changed: a changeset cannot carry that, and %s", t[i].name, NULL);
+      rc = refuse(x, refusal, "table '%s' has no PRIMARY KEY and its rows changed: a changeset cannot carry that", t[i].name, NULL);
   }
   tables_free(t, n);
   if (rc != FKX_OK) return rc;
@@ -506,7 +508,118 @@ int fkx_replay_begin(fkx *x, const char *old_ref, const char *new_ref, const cha
   return replay_begin_ex(x, old_ref, new_ref, target, touched, ntouched, 1, r, db, refusal);
 }
 
-/* re-create the triggers, check the foreign keys, commit; fk_table gets the first table with a violation if that is what stopped it */
+/* 1 if s begins with the keyword lit and the next character does not continue an identifier. */
+static int kw(const char *s, const char *lit) {
+  size_t n = strlen(lit);
+  if (strncasecmp(s, lit, n)) return 0;
+  unsigned char c = (unsigned char)s[n];
+  return !isalnum(c) && c != '_';
+}
+/* Read one FTS option value at *pp. 1 if it has any character. Advances *pp past it. */
+static int fts_value_nonempty(const char **pp) {
+  const char *p = *pp;
+  int nonempty = 0;
+  if (*p == '\'' || *p == '"') {
+    char q = *p++;
+    while (*p) {
+      if (*p == q) { if (p[1] == q) { nonempty = 1; p += 2; continue; } p++; break; }
+      nonempty = 1; p++;
+    }
+  } else if (*p == '[') {
+    p++;
+    while (*p && *p != ']') { nonempty = 1; p++; }
+    if (*p) p++;
+  } else {
+    while (*p && *p != ',' && *p != ')' && !isspace((unsigned char)*p)) { nonempty = 1; p++; }
+  }
+  *pp = p;
+  return nonempty;
+}
+/* 1 if sql creates an FTS3/4/5 table with external content (content=<table>).
+ * Creating that table leaves the inverted index empty; contentless tables
+ * (content='') have nothing to rebuild and reject the command. */
+static int fts_external_content(const char *sql) {
+  if (!sql) return 0;
+  const char *mod = NULL;
+  for (const char *p = sql; *p && !mod; p++) {
+    if (p != sql && (isalnum((unsigned char)p[-1]) || p[-1] == '_')) continue;
+    if (!kw(p, "using")) continue;
+    const char *q = p + 5;
+    while (isspace((unsigned char)*q)) q++;
+    if (!kw(q, "fts3") && !kw(q, "fts4") && !kw(q, "fts5")) continue;
+    while (isalnum((unsigned char)*q) || *q == '_') q++;
+    mod = q;
+  }
+  if (!mod) return 0;
+  const char *p = mod;
+  while (*p && isspace((unsigned char)*p)) p++;
+  if (*p != '(') return 0;
+  p++;
+  int depth = 1;
+  while (*p && depth > 0) {
+    unsigned char c = (unsigned char)*p;
+    if (c == '(') { depth++; p++; continue; }
+    if (c == ')') { depth--; p++; continue; }
+    if (c == '\'' || c == '"') {
+      char q = *p++;
+      while (*p) { if (*p == q) { if (p[1] == q) { p += 2; continue; } p++; break; } p++; }
+      continue;
+    }
+    if (c == '[') { p++; while (*p && *p != ']') p++; if (*p) p++; continue; }
+    int ident = isalnum(c) || c == '_';
+    int boundary = p == sql || !(isalnum((unsigned char)p[-1]) || p[-1] == '_');
+    if (depth == 1 && ident && boundary) {
+      const char *name = p;
+      while (isalnum((unsigned char)*p) || *p == '_') p++;
+      int content = (size_t)(p - name) == 7 && strncasecmp(name, "content", 7) == 0;
+      while (isspace((unsigned char)*p)) p++;
+      if (*p != '=') continue;
+      p++;
+      while (isspace((unsigned char)*p)) p++;
+      if (content) return fts_value_nonempty(&p);
+      (void)fts_value_nonempty(&p);
+      continue;
+    }
+    p++;
+  }
+  return 0;
+}
+static int table_sql(sqlite3 *db, const char *name, char **out) {
+  *out = NULL;
+  char *q = sqlite3_mprintf("SELECT sql FROM main.sqlite_schema WHERE type='table' AND name=%Q", name);
+  if (!q) return SQLITE_NOMEM;
+  sqlite3_stmt *st = NULL;
+  int rc = sqlite3_prepare_v2(db, q, -1, &st, NULL);
+  sqlite3_free(q);
+  if (rc != SQLITE_OK) return rc;
+  if (sqlite3_step(st) == SQLITE_ROW) {
+    const unsigned char *t = sqlite3_column_text(st, 0);
+    if (t) {
+      *out = strdup((const char *)t);
+      if (!*out) { sqlite3_finalize(st); return SQLITE_NOMEM; }
+    }
+  }
+  sqlite3_finalize(st);
+  return SQLITE_OK;
+}
+/* The virtual table was recreated before the changeset, so an external-content
+ * FTS index does not yet contain the content rows the changeset just applied. */
+static int replay_rebuild_fts(fkx_replay *r) {
+  fkx *x = r->x;
+  for (size_t i = 0; i < r->nvtab; i++) {
+    char *sql = NULL;
+    int rc = table_sql(r->db, r->vtab[i], &sql);
+    if (rc != SQLITE_OK) { free(sql); return fkx_i_fail(x, rc == SQLITE_NOMEM ? FKX_ENOMEM : FKX_ESQLITE, "reading virtual table '%s' failed: %s", r->vtab[i], sqlite3_errmsg(r->db)); }
+    int rebuild = fts_external_content(sql);
+    free(sql);
+    if (!rebuild) continue;
+    if (sq_execf(r->db, "INSERT INTO main.\"%w\"(\"%w\") VALUES('rebuild')", r->vtab[i], r->vtab[i]) != SQLITE_OK)
+      return fkx_i_fail(x, FKX_ESQLITE, "rebuilding the full-text index of '%s' failed: %s", r->vtab[i], sqlite3_errmsg(r->db));
+  }
+  return FKX_OK;
+}
+
+/* re-create the triggers, rebuild external-content FTS indexes, check the foreign keys, commit; fk_table gets the first table with a violation if that is what stopped it */
 static int replay_commit_ex(fkx_replay *r, char **fk_table) {
   fkx *x = r->x;
   if (fk_table) *fk_table = NULL;
@@ -516,10 +629,10 @@ static int replay_commit_ex(fkx_replay *r, char **fk_table) {
 #endif
     if (sq_exec(r->db, r->trig[i]) != SQLITE_OK) { int rc = fkx_i_fail(x, FKX_ESQLITE, "re-creating a trigger failed: %s", sqlite3_errmsg(r->db)); replay_abort_impl(r); return rc; }
   }
-  /* Recreated virtual tables with external content (content=t1) are already
-   * populated at creation time — FTS5 reads the content table. The changeset
-   * carries content row changes, so the FTS index is correct after replay.
-   * No explicit rebuild needed. The names in r->vtab are freed by replay_free. */
+  {
+    int rc = replay_rebuild_fts(r);
+    if (rc != FKX_OK) { replay_abort_impl(r); return rc; }
+  }
 #ifndef FKX_BUG_REPLAY_NO_FK_CHECK
   {
     sqlite3_stmt *st = NULL;

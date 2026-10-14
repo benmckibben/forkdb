@@ -217,7 +217,7 @@ static void t_policy(void) {
   sql(x, "main", "UPDATE t3 SET z='moved' WHERE x=2"); /* main moves, so only a replay could promote it */
   st0 = state_of(x, "main");
   nl = nlist(x, 1);
-  CHECK(fkx_promote(x, "nopk", NULL, &r) == FKX_EREFUSED && r.refusal && strstr(r.refusal, "t2") && strstr(r.refusal, "PRIMARY KEY"), "a fork that changed a table without a primary key: refused, names the table ('%s')", r.refusal ? r.refusal : "");
+  CHECK(fkx_promote(x, "nopk", NULL, &r) == FKX_EREFUSED && r.refusal && strcmp(r.refusal, "table 't2' has no PRIMARY KEY and its rows changed: a changeset cannot carry that") == 0, "a fork that changed a table without a primary key: refused, names the table ('%s')", r.refusal ? r.refusal : "");
   fkx_promote_result_free(&r);
   CHECK(state_of(x, "main") == st0 && nlist(x, 1) == nl && consistent(x), "nothing changed");
   /* (c) main changed the definition of a table the fork touched */
@@ -387,13 +387,11 @@ static void t_virtual(void) {
 
   /* Fork with an FTS5 virtual table using external content (t1).
    * The session extension captures row changes on t1 (a regular table).
-   * replay_virtual_ddl drops/recreates the FTS table, then rebuilds. */
+   * Replay recreates ft1 before the changeset, then rebuilds the index after it. */
   fkx_fork(x, "main", "ft");
-  sql(x, "ft", "CREATE VIRTUAL TABLE ft1 USING fts5(a, b, content=t1, content_rowid='id')");
-  /* Insert rows into t1 (regular table — captured by session) then rebuild FTS */
-  sql(x, "ft", "INSERT INTO t1 VALUES(10, 'fts')");
-  sql(x, "ft", "INSERT INTO ft1(ft1) VALUES('rebuild')");
-  sql(x, "ft", "UPDATE t1 SET v='FTS' WHERE id=1");
+  CHECK(sql(x, "ft", "CREATE VIRTUAL TABLE ft1 USING fts5(v, content=t1, content_rowid='id')") == 0, "create external-content fts5");
+  CHECK(sql(x, "ft", "INSERT INTO t1 VALUES(11, 'beta')") == 0, "insert a content row on the fork");
+  CHECK(sql(x, "ft", "UPDATE t1 SET v='alpha' WHERE id=1") == 0, "update a content row on the fork");
 
   /* Diff should list ft1 as VIRTUAL and t1 as COMPARED */
   fkx_diff_result d;
@@ -415,22 +413,26 @@ static void t_virtual(void) {
 
   /* Change main so the states diverge, forcing replay (not fast-forward).
    * This exercises the virtual table drop/recreate/rebuild path.
-   * Must actually write a page; zero-row UPDATEs may not commit. */
-  sql(x, "main", "INSERT INTO t1 VALUES(99, 'force-replay')");
+   * Must actually write a page; zero-row UPDATEs may not commit.
+   * 'gamma' exists only on the target, so a rebuild before the changeset cannot see it. */
+  CHECK(sql(x, "main", "INSERT INTO t1 VALUES(99, 'gamma')") == 0, "move main so promote must replay");
 
   /* Promote: was refused before virtual table replay, now succeeds */
   fkx_promote_result r;
   int prc = fkx_promote(x, "ft", NULL, &r);
-  CHECK(prc == 0 && (r.method == FKX_METHOD_REPLAY || r.method == FKX_METHOD_FAST_FORWARD),
-        "promote with virtual table: prc=%d method=%d err=%s", prc, r.method, fkx_errmsg(x));
+  CHECK(prc == 0 && r.method == FKX_METHOD_REPLAY,
+        "promote with virtual table replays: prc=%d method=%d err=%s", prc, r.method, fkx_errmsg(x));
   fkx_promote_result_free(&r);
   if (prc != 0) { fkx_close(x); return; }
 
   /* Verify regular table changes applied */
-  CHECK(same(rows(x, "main", "SELECT v FROM t1 WHERE id=1"), "FTS;"), "regular table change applied");
-  /* FTS table exists on main after promote */
-  int fts_exists = rows(x, "main", "SELECT name FROM sqlite_schema WHERE name='ft1'") != NULL;
-  CHECK(fts_exists, "ft1 exists after promote");
+  CHECK(same(rows(x, "main", "SELECT v FROM t1 WHERE id=1"), "alpha;"), "regular table change applied");
+  /* FTS table exists on main after promote, and the index matches the content table after the changeset */
+  CHECK(same(rows(x, "main", "SELECT name FROM sqlite_schema WHERE name='ft1'"), "ft1;"), "ft1 exists after promote");
+  CHECK(same(rows(x, "main", "SELECT rowid FROM ft1 WHERE ft1 MATCH 'alpha'"), "1;"), "FTS index has the updated row");
+  CHECK(same(rows(x, "main", "SELECT rowid FROM ft1 WHERE ft1 MATCH 'beta'"), "11;"), "FTS index has the inserted row");
+  CHECK(same(rows(x, "main", "SELECT rowid FROM ft1 WHERE ft1 MATCH 'gamma'"), "99;"), "FTS index was rebuilt after the changeset (target-only row)");
+  CHECK(same(rows(x, "main", "SELECT rowid FROM ft1 WHERE ft1 MATCH 'v1'"), ""), "FTS index does not keep the pre-changeset value");
 
   CHECK(consistent(x), "consistent");
   fkx_close(x);
