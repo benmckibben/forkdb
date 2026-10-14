@@ -592,5 +592,134 @@ except sqlite3.OperationalError as e:
         self.assertEqual(db.execute("pragma integrity_check").fetchall(), [("ok",)])
 
 
+class F_Threads(Base):
+    """Connections on separate branches used from separate threads, and branch management from another thread, through Python's sqlite3 (which
+    releases the GIL while SQLite runs, so the threads really overlap in the VFS). Without the VFS mutex this failed with 'disk I/O error' on
+    concurrent commits to different branches. Each case runs in its own process and asserts on the return code: a crash is one failed test."""
+
+    SCRIPT = """
+import random, threading, time
+mode = sys.argv[3]
+host = sqlite3.connect(':memory:', check_same_thread=False)
+host.enable_load_extension(True)
+host.load_extension(SO)
+host.execute("select forkdb_init(?)", (P,)).fetchall()
+def conn(ref):
+    uri = host.execute("select forkdb_open_db(?, ?)", (P, ref)).fetchone()[0]
+    return sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=5, isolation_level=None)
+m = conn('main')
+m.execute("create table t(a integer primary key, b)")
+m.execute("begin")
+for i in range(200):
+    m.execute("insert into t values (?, 'x')", (i,))
+m.execute("commit")
+m.close()
+for n in ('a', 'b', 'c'):
+    host.execute("select forkdb_fork(?, 'main', ?)", (P, n)).fetchall()
+refs = ['a', 'a', 'a'] if mode == 'same-branch' else ['main', 'a', 'b', 'c']
+conns = [conn(r) for r in refs]
+ok = [0] * len(conns)
+errs = []
+ITERS = 120
+def writer(i):
+    c = conns[i]
+    base = 100000 * (i + 1)
+    for k in range(ITERS):
+        for attempt in range(400):
+            try:
+                c.execute("begin immediate")
+                c.execute("insert into t values (?, 'w')", (base + k,))
+                c.execute("commit")
+                ok[i] += 1
+                break
+            except sqlite3.OperationalError as e:
+                try:
+                    c.execute("rollback")
+                except sqlite3.Error:
+                    pass
+                if 'locked' in str(e) or 'busy' in str(e):
+                    time.sleep(random.random() / 500)
+                    continue
+                errs.append('writer %d: %s' % (i, e))
+                return
+def manager():
+    for k in range(20):
+        try:
+            name = 'f%d' % k
+            host.execute("select forkdb_fork(?, 'main', ?)", (P, name)).fetchall()
+            host.execute("select forkdb_discard(?, ?)", (P, name)).fetchall()
+        except Exception as e:
+            errs.append('manager: %s: %s' % (type(e).__name__, e))
+        time.sleep(0.002)
+ts = [threading.Thread(target=writer, args=(i,)) for i in range(len(conns))]
+if mode == 'with-manager':
+    ts.append(threading.Thread(target=manager))
+for t in ts:
+    t.start()
+for t in ts:
+    t.join()
+bad = list(errs)
+total = 0
+for i, c in enumerate(conns):
+    n = c.execute("select count(*) from t where b = 'w'").fetchone()[0]
+    total += n if mode == 'same-branch' and i == 0 else 0
+    if mode != 'same-branch' and n != ok[i]:
+        bad.append('connection %d: %d rows, %d commits acknowledged' % (i, n, ok[i]))
+    if c.execute("pragma integrity_check").fetchall() != [('ok',)]:
+        bad.append('integrity_check on connection %d' % i)
+if mode == 'same-branch' and total != sum(ok):
+    bad.append('same branch: %d rows, %d commits acknowledged' % (total, sum(ok)))
+print('commits', ok, 'problems', bad[:4])
+sys.exit(1 if bad else 0)
+"""
+
+    REGISTRY = """
+import threading
+errs = []
+host = load()
+host.execute("select forkdb_init(?)", (P,)).fetchall()
+host.execute("select forkdb_close(?)", (P,)).fetchall()
+def worker(i):
+    c = load()  # one connection per thread: a shared connection would serialise the calls by itself
+    for k in range(150):
+        try:
+            if (k + i) % 3 == 0:
+                c.execute("select forkdb_close(?)", (P,)).fetchall()
+            else:
+                c.execute("select forkdb_vfs_name(?)", (P,)).fetchall()
+        except sqlite3.OperationalError as e:
+            if 'store not open' not in str(e):
+                errs.append('%d: %s' % (i, e))
+ts = [threading.Thread(target=worker, args=(i,)) for i in range(6)]
+for t in ts:
+    t.start()
+for t in ts:
+    t.join()
+print('problems', errs[:4])
+sys.exit(1 if errs else 0)
+"""
+
+    def test_registry_is_safe_across_connections_and_threads(self):
+        # forkdb_close frees the entry another thread may be using: the registry lock must make each call whole.
+        path = os.path.join(self.dir, "s.fk")
+        r = run_py(self.REGISTRY, path)
+        self.assertEqual(r.returncode, 0, "rc=%s\\n%s%s" % (r.returncode, r.stdout, r.stderr))
+        self.assertIn("problems []", r.stdout)
+
+    def run_mode(self, mode):
+        r = run_py(self.SCRIPT, os.path.join(self.dir, "s.fk"), mode)
+        self.assertEqual(r.returncode, 0, "%s: rc=%s\n%s%s" % (mode, r.returncode, r.stdout, r.stderr))
+        self.assertIn("problems []", r.stdout)
+
+    def test_writers_on_separate_branches(self):
+        self.run_mode("separate")
+
+    def test_writers_on_the_same_branch(self):
+        self.run_mode("same-branch")
+
+    def test_branch_management_while_writers_run(self):
+        self.run_mode("with-manager")
+
+
 if __name__ == "__main__":
     unittest.main()

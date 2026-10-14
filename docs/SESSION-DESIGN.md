@@ -153,7 +153,7 @@ Each step is its own PR, reviewed before the next.
 
 ## Not covered
 
-One process, one thread (as the store). Two forks merged into each other (only fork into parent). Re-basing a fork. Replaying DDL (added tables and columns are the obvious next case; the data of a new table would need an empty base to diff against). Virtual tables and FTS shadow tables. Large changesets are held in memory (a streaming interface exists). The cost figures are one machine, WSL2, and in-memory or small-commit workloads; a real-disk figure for the diff was not taken.
+One process (as the store); the driver runs under the handle's mutex like every other operation. Two forks merged into each other (only fork into parent). Re-basing a fork. Replaying DDL (added tables and columns are the obvious next case; the data of a new table would need an empty base to diff against). Virtual tables and FTS shadow tables. Large changesets are held in memory (a streaming interface exists). The cost figures are one machine, WSL2, and in-memory or small-commit workloads; a real-disk figure for the diff was not taken.
 
 ## Decisions (Ben, 2026-10-12)
 

@@ -1,5 +1,5 @@
 /* fkstore: durable, branchable page store for forkdb. One append-only log file; see docs/DURABLE-STORE.md.
- * One process (the file is locked, see fk_file_open), one writer transaction at a time. Not thread-safe. */
+ * One process (the file is locked, see fk_file_open), one writer transaction at a time. Not thread-safe by itself: the VFS (fkvfs.h) takes one mutex around every use. */
 #ifndef FKSTORE_H
 #define FKSTORE_H
 
