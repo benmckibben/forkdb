@@ -359,6 +359,31 @@ int main(void) {
   long committed = (long)st.st_size;
   fk_close(s); fk_file_close(&io);
 
+  printf("== one opener at a time: a second open of the same file is refused, and releasing it lets the next one in\n");
+  {
+    fk_io lio, lio2; fk_store *ls = NULL;
+    char lp[300];
+    snprintf(lp, sizeof lp, "%s/lock.fk", dir);
+    remove(lp);
+    CHECK(open_path(lp, &lio, &ls) && commit1(ls, 0, 0, 7, 2) == 0, "open a store and commit");
+    long before = fsz(lp);
+    CHECK(fk_file_open(lp, &lio2) == FK_ELOCKED, "a second open in the same process is refused with FK_ELOCKED (and returns no io)");
+    pid_t lpid = fork();
+    if (lpid == 0) { fk_io li3; _exit(fk_file_open(lp, &li3) == FK_ELOCKED ? 0 : 3); }
+    int lst = 0; waitpid(lpid, &lst, 0);
+    CHECK(WIFEXITED(lst) && WEXITSTATUS(lst) == 0, "another process is refused with FK_ELOCKED while this one holds the file");
+    CHECK(fsz(lp) == before && has(ls, 0, 0, 7), "the refused opens changed nothing: same size, same data");
+    fk_close(ls); fk_file_close(&lio);
+    CHECK(open_path(lp, &lio, &ls) && has(ls, 0, 0, 7), "after fk_file_close the next open succeeds and sees the data");
+    fk_close(ls); fk_file_close(&lio);
+    lpid = fork();
+    if (lpid == 0) { fk_io li4; fk_store *s4; if (!open_path(lp, &li4, &s4)) _exit(3); _exit(0); /* holds the lock, dies without closing */ }
+    waitpid(lpid, &lst, 0);
+    CHECK(WIFEXITED(lst) && WEXITSTATUS(lst) == 0 && open_path(lp, &lio, &ls) && has(ls, 0, 0, 7), "a process that dies holding the lock releases it: the next open succeeds");
+    fk_close(ls); fk_file_close(&lio);
+    CHECK(fk_file_open("/nonexistent-dir/x.fk", &lio2) == -1, "any other failure to open is still -1, not FK_ELOCKED");
+  }
+
   printf("== a process that dies without closing\n");
   pid_t pid = fork();
   if (pid == 0) {
@@ -536,6 +561,7 @@ int main(void) {
       CHECK(build_garbage(pv, &io, &s), "build a store, then die in the middle of compacting it");
       big = fsz(pv);
       fk_close(s);
+      fk_file_close(&io); /* the file is locked while it is open: the child opens it itself */
       pid_t pc = fork();
       if (pc == 0) {
         fk_io io3; fk_store *s3;

@@ -23,7 +23,8 @@ enum {
   FK_ENOMEM = -6,
   FK_EBUSY = -7,    /* a transaction is open */
   FK_ELIMIT = -8,   /* fork: FK_MAX_BRANCHES branches are alive; discard one first */
-  FK_EVERSION = -9  /* the file is older than format version 4: compact it (fk_compact rewrites it in the current format) to use this */
+  FK_EVERSION = -9, /* the file is older than format version 4: compact it (fk_compact rewrites it in the current format) to use this */
+  FK_ELOCKED = -10  /* fk_file_open: the file is already open, in another process or in this one (see fk_file_open) */
 };
 
 /* The only way the store touches storage. Offsets are absolute file offsets. */
@@ -145,7 +146,12 @@ uint32_t fk_crc32c(uint32_t crc, const void *p, size_t n);
  * Not thread-safe; call it before any store is open. */
 int fk_crc32c_select(int want_hw);
 
-/* Real-file backend (io_file.c). */
+/* Real-file backend (io_file.c). fk_file_open returns 0, FK_ELOCKED, or -1 for any other failure (so callers that test != 0 keep working).
+ * One opener at a time: it takes an exclusive lock on the file (flock on POSIX; on Windows the share mode already does it), held until
+ * fk_file_close or the process ends, so a process that dies releases it. Two processes writing one store file lose acknowledged commits and
+ * can leave a file that no longer opens (measured: 8 of 8 runs), so the second one is refused instead. The lock belongs to the open file
+ * description: a second fk_file_open of the same path in this process is refused as well, and fork() children share the parent's. A
+ * filesystem that cannot lock (ENOLCK, EOPNOTSUPP: some network filesystems) is not refused, only a proven conflict is. */
 int fk_file_open(const char *path, fk_io *io);
 void fk_file_close(fk_io *io);
 

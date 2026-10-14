@@ -44,7 +44,8 @@ enum {
   FKX_ESQLITE = -11,    /* SQLite failed: fkx_sqlite_rc has its code */
   FKX_ENOMEM = -12,
   FKX_ELIMIT = -13,     /* out of store branch ids (FK_MAX_BRANCHES), or a name or a metadata blob too long */
-  FKX_ECORRUPT = -14    /* the store holds branches fkx did not make, or metadata that does not decode */
+  FKX_ECORRUPT = -14,   /* the store holds branches fkx did not make, or metadata that does not decode */
+  FKX_ELOCKED = -15     /* fkx_open: the store file is open in another process, or already open in this one */
 };
 
 #define FKX_NAME_MAX 63 /* bytes; letters, digits and . _ - / ; not empty; not starting with '#' */

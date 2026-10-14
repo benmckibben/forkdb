@@ -197,6 +197,7 @@ static void open_failed(sqlite3_context *ctx, const char *path, int rc) {
         case FKX_ESTORE:   snprintf(msg, sizeof msg, "cannot open the store file '%.400s'", path); break;
         case FKX_EVERSION: snprintf(msg, sizeof msg, "'%.400s' is a store older than format version 4: compact it with the forkdb CLI first", path); break;
         case FKX_ECORRUPT: snprintf(msg, sizeof msg, "'%.400s' is damaged or is not a forkdb store", path); break;
+        case FKX_ELOCKED:  snprintf(msg, sizeof msg, "the store '%.400s' is open in another process (or already open here): one process at a time", path); break;
         case FKX_ENOMEM:   sqlite3_result_error_nomem(ctx); return;
         default:           snprintf(msg, sizeof msg, "opening '%.400s' failed (code %d)", path, rc); break;
     }
