@@ -47,7 +47,13 @@ static int f_pwrite(void *ctx, uint64_t off, const void *buf, size_t n) {
   return 0;
 }
 static int f_truncate(void *ctx, uint64_t size) { return ftruncate(FD(ctx), (off_t)size); }
-static int f_fsync(void *ctx) { return fdatasync(FD(ctx)); }
+static int f_fsync(void *ctx) {
+#ifdef __APPLE__
+  return fsync(FD(ctx));
+#else
+  return fdatasync(FD(ctx));
+#endif
+}
 
 static int sync_dir_of(const char *path) {
   char dir[4096];

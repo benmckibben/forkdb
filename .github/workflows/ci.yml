@@ -58,3 +58,33 @@ jobs:
 
       - name: Run fkx tests
         run: scripts/test-fkx.sh quick
+
+  macos:
+    name: macOS store tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run store tests (no sanitizers)
+        run: |
+          scripts/test-store.sh quick
+
+  pysqlite:
+    name: Python SQLite VFS tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system SQLite
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libsqlite3-dev
+
+      - name: Build VFS test against system SQLite
+        run: |
+          mkdir -p build
+          gcc -Wall -Wextra -std=gnu11 -O2 \
+            -Istore -Ivfs -Itest \
+            vfs/fkvfs.c store/fkstore.c store/io_file.c store/io_prealloc.c \
+            test/simdisk.c test/file_test.c \
+            -lsqlite3 -lpthread -lm -o build/pysqlite_file_test
+          build/pysqlite_file_test
