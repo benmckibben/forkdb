@@ -269,7 +269,7 @@ static void mut_garbage(Img *im, Rng *r) {
   img_resize(im, n);
   for (size_t i = 0; i < n; i++) im->p[i] = k == 1 ? 0 : (uint8_t)rng_next(r);
   if (k >= 3 && n >= HDR) { memcpy(im->p, "FORKDBST", 8); wr32(im->p + 8, 4); wr32(im->p + 12, FK_PAGE); wr32(im->p + 16, fk_crc32c(0, im->p, 16)); }
-  if (k == 4 && n >= HDR + RECH) { wr32(im->p + HDR, 0x31524b46u); wr32(im->p + HDR + 8, 1); wr64(im->p + HDR + 8, 1); wr32(im->p + HDR + 20, 0); }
+  if (k == 4 && n >= HDR + RECH) { wr32(im->p + HDR, 0x31524b46u); wr16(im->p + HDR + 4, T_PAGE); wr64(im->p + HDR + 8, 1); wr32(im->p + HDR + 16, 1); wr32(im->p + HDR + 20, 0); }
 }
 static void insert_gap(Img *im, size_t at, size_t n) { img_resize(im, im->n + n); memmove(im->p + at + n, im->p + at, im->n - n - at); }
 static void remove_range(Img *im, size_t at, size_t n) { memmove(im->p + at, im->p + at + n, im->n - at - n); im->n -= n; }
