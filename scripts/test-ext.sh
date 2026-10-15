@@ -32,7 +32,8 @@ echo "Building extension..."
 scripts/build-ext.sh
 
 # Set the extension path
-export FK_EXT_SO="$root/build/ext/forkdb.so"
+FK_EXT_SO=$(scripts/build-ext.sh --path)
+export FK_EXT_SO
 
 # Build the fsync-counting interposer
 echo "Building fsync_count interposer..."

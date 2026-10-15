@@ -14,7 +14,7 @@ if (!sqlite.DatabaseSync || typeof sqlite.DatabaseSync.prototype.loadExtension !
 const { DatabaseSync } = sqlite;
 
 const ROOT = path.dirname(__dirname);
-const SO = process.env.FK_EXT_SO || path.join(ROOT, 'build', 'ext', 'forkdb.so');
+const SO = process.env.FK_EXT_SO || path.join(ROOT, 'build', 'ext', 'forkdb.' + (process.platform === 'win32' ? 'dll' : process.platform === 'darwin' ? 'dylib' : 'so'));
 if (!fs.existsSync(SO)) throw new Error('no extension at ' + SO + ': run scripts/build-ext.sh');
 
 // Shared by the child-process scripts: argv[1] is the library, argv[2] a store path, argv[3...] test-specific (node -e puts the first user argument at argv[1]).
@@ -98,4 +98,7 @@ function startNode(code, args, env) {
   });
 }
 
-module.exports = { later, DatabaseSync, SO, ROOT, PRELUDE, load, one, tmpdir, closeStore, newStore, openBranch, runNode, startNode };
+// Did a child that killed itself with process.kill(process.pid, 'SIGKILL') die that way? Windows has no signals: node ends the process with exit status 1 there.
+function died(r) { return r.signal === 'SIGKILL' || (process.platform === 'win32' && r.status === 1 && !r.signal); }
+
+module.exports = { died, later, DatabaseSync, SO, ROOT, PRELUDE, load, one, tmpdir, closeStore, newStore, openBranch, runNode, startNode };

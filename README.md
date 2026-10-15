@@ -21,11 +21,12 @@ forkdb is a C library that requires:
 # Build the extension for the sqlite3 shell (needs the symbols of a host that exports SQLite)
 ./scripts/build-step4.sh ext        # produces build/forkdb.so
 
-# Build the portable extension: loads into any SQLite 3.24+ (Python's sqlite3, Node's built-in node:sqlite), no session driver
-./scripts/build-ext.sh              # produces build/ext/forkdb.so
+# Build the portable extension: loads into SQLite 3.24 and later (tested hosts: Python's sqlite3, Node's built-in node:sqlite, better-sqlite3), no session driver
+./scripts/build-ext.sh              # produces build/ext/forkdb.so (.dylib on macOS, .dll on Windows)
 ./scripts/test-ext.sh               # builds it and runs test/ext_py_test.py through Python's sqlite3
 ./scripts/test-ext-node.sh          # builds it and runs test/ext_node*_test.js through Node 24's built-in node:sqlite
 ./scripts/test-ext-bsq.sh           # installs better-sqlite3 13.0.3 (npm, into build/) and runs test/ext_bsq*_test.js through it
+./scripts/test-oldest-sqlite.sh      # builds the SQLite 3.24.0 shell (the oldest supported) and checks the extension works in it and is refused by 3.23.1
 
 # Build both plus the test suite
 ./scripts/build-step4.sh test
@@ -96,9 +97,24 @@ A commit that returns is meant to survive a power cut, and recovery is meant to 
 - **What the model assumes:** 512-byte sector atomicity, that fsync really makes data durable, and that data does not rot while the machine runs. A drive that lies about fsync, or a file system that loses a file's size update, is outside it. File systems that cannot lock or do not honour fsync (some network mounts) get no protection.
 - **`nosync` stores** (`forkdb_init(path, root, 'nosync')`, for throwaway stores) survive the death of the process, which is tested with real kills. After a power cut they either refuse to open or open to a state the workload had acknowledged, usually an older one, never one it did not have. That claim also rests on the simulator.
 - **Windows:** the store calls `FlushFileBuffers`, and compaction needs NTFS on Windows 10 1709 or later. The directory sync after a compaction is best effort. Windows runs in CI as a smoke test, with a flush counter, and nothing was tested against a power cut there.
-- **Tested on:** Linux in CI (every suite, and the thread tests under ThreadSanitizer), and the store tests on macOS and Windows in CI; SQLite 3.50.0 is pinned for the C tests. Not tested: other operating systems, the extension suites on macOS and Windows, or a power cut on any of them.
+- **Tested on:** see [Platforms](#platforms-what-is-built-and-tested-where) for what runs where. Not tested on any platform: a power cut.
 
 If you need the durable guarantee, run your own power-cut test on your hardware and file system before relying on it.
+
+## Platforms: what is built and tested where
+
+Every row is something CI runs; a blank cell is something that is **not** tested, not something known to work.
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| Store and VFS tests, power-loss simulator, fuzzer, sanitizers | all | store tests | store tests |
+| Loadable extension builds (`scripts/build-ext.sh`) | `.so`, gcc | `.dylib`, Apple clang | `.dll`, mingw-w64 gcc (not MSVC) |
+| Extension from Node 24's built-in `node:sqlite` (23 tests) | yes (plus 19 fsync-counting `nosync` tests) | yes | yes |
+| Extension from better-sqlite3 13.0.3 (22 tests; 41 on Linux with the `nosync` file) | yes | yes | yes |
+| Extension from Python's `sqlite3` (62 tests) | yes | | |
+| Extension in SQLite 3.24.0, the oldest supported (shell built from the amalgamation) | yes | | |
+
+What runs only on Linux, and why: the Python suite (it uses `LD_PRELOAD` and POSIX signals; whether the macOS and Windows Pythons can load extensions at all has not been checked), and every test that counts `fsync` calls (an `LD_PRELOAD` interposer). So **`nosync` is not behaviour-tested on macOS, and on Windows only by the store-level flush counter**. SQLite versions the extension has run in: 3.24.0 (shell), 3.45.1 (Python), 3.50.0 (C tests), 3.53.x (both Node hosts). 32-bit builds, MSVC, and any macOS or Windows version other than the CI runners' are untested.
 
 ## Known limitations
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Download the pinned SQLite amalgamation into spike/vendor and verify its checksum.
-# Needs curl, sha256sum and python3 (used to unzip; unzip itself is not required).
+# Needs curl, a SHA-256 tool (sha256sum, or shasum on macOS) and python (python3 or python; used to unzip, unzip itself is not required).
 set -euo pipefail
 
 VERSION_DIR=sqlite-amalgamation-3500000
@@ -17,7 +17,7 @@ if [ -f "$dest/$VERSION_DIR/sqlite3.c" ]; then
 fi
 
 curl -fsSL -o "$dest/sqlite.zip" "$URL"
-got=$(sha256sum "$dest/sqlite.zip" | cut -d' ' -f1)
+if command -v sha256sum > /dev/null; then got=$(sha256sum "$dest/sqlite.zip" | cut -d' ' -f1); else got=$(shasum -a 256 "$dest/sqlite.zip" | cut -d' ' -f1); fi
 if [ "$got" != "$SHA256" ]; then
   echo "checksum mismatch for $URL" >&2
   echo "  expected $SHA256" >&2
@@ -25,7 +25,8 @@ if [ "$got" != "$SHA256" ]; then
   rm -f "$dest/sqlite.zip"
   exit 1
 fi
-python3 - "$dest/sqlite.zip" "$dest" <<'PY'
+py=$(command -v python3 || command -v python || { echo 'no python3 or python to unzip with' >&2; exit 1; })
+"$py" - "$dest/sqlite.zip" "$dest" <<'PY'
 import sys, zipfile
 zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])
 PY

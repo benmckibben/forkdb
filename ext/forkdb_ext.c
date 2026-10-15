@@ -19,7 +19,11 @@
 #include <string.h>
 #include <stdarg.h>
 #include <inttypes.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
 #include <dlfcn.h>
 #endif
 
@@ -574,9 +578,12 @@ FK_LOCKED(fn_open_db)
 /* This library registers a VFS and keeps a registry of open stores, so it must never be unloaded: when the connection that loaded it closes,
  * SQLite dlcloses it, and every other connection using the VFS then jumps into unmapped code (measured: a segfault in Python when the loader
  * connection is closed before a branch connection). SQLITE_OK_LOAD_PERMANENTLY would say so, but it needs SQLite 3.50; this works on any host.
- * Pin the library with a second dlopen that survives dlclose. (Windows: not done here, see the PR.) */
+ * Pin the library with a second dlopen that survives dlclose; on Windows, GetModuleHandleEx with the pin flag does the same for FreeLibrary. */
 static void pin_library(void) {
-#ifndef _WIN32
+#ifdef _WIN32
+    HMODULE self = NULL;
+    (void)GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, (LPCWSTR)(void *)&pin_library, &self);
+#else
     Dl_info info;
     if (dladdr((void *)&pin_library, &info) && info.dli_fname)
         (void)dlopen(info.dli_fname, RTLD_NOW | RTLD_NODELETE);

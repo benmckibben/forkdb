@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { later, DatabaseSync, SO, PRELUDE, load, one, tmpdir, openBranch, closeStore, runNode } = require('./node_helpers.js');
+const { died, later, DatabaseSync, SO, PRELUDE, load, one, tmpdir, openBranch, closeStore, runNode } = require('./node_helpers.js');
 
 // ---- fsync counter helpers ----
 const FSYNC_COUNT_SO = process.env.FK_FSYNC_COUNT_SO;
@@ -215,7 +215,7 @@ test('H nosync data survives process death', (t) => {
   const dir = tmpdir(t);
   const store = path.join(dir, 'crash.fk');
   const r = runNode(NOSYNC_CRASH, store);
-  assert.equal(r.signal, 'SIGKILL', 'the child must have died by the signal: ' + (r.stdout || '') + (r.stderr || ''));
+  assert.ok(died(r), 'the child must have died by the signal: ' + (r.stdout || '') + (r.stderr || ''));
   // Now open in the parent
   const c = load(t);
   later(t, () => closeStore(c, store)); // the store already exists: openBranch opens it, forkdb_init must not be called again
