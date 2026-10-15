@@ -120,6 +120,19 @@ jobs:
       - name: Build the loadable extension and test it from Python's sqlite3
         run: scripts/test-ext.sh
 
+  extension-node:
+    name: Extension tests (Node node:sqlite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Build the loadable extension and test it from Node's built-in SQLite
+        run: scripts/test-ext-node.sh
+
   cli:
     name: CLI tests
     runs-on: ubuntu-latest

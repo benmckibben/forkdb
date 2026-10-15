@@ -175,9 +175,13 @@ static uint64_t sys_random(void *ctx) {
   if (getrandom(&v, sizeof v, 0) != (ssize_t)sizeof v) v = (uint64_t)random() << 32 ^ (uint64_t)random();
   return v;
 }
+/* A uid comes back to the application as an SQL integer (forkdb_fork, forkdb_snapshot). Hosts whose integers are IEEE doubles cannot hold 64 bits:
+ * node:sqlite throws ERR_OUT_OF_RANGE on an integer above 2^53 (after the fork has already happened), and so does any JSON consumer. So a new uid has 53
+ * bits. Uniqueness does not come from the width but from the find_uid check below. Uids already stored in older files keep their 64 bits and keep working. */
+#define FKX_UID_MASK ((UINT64_C(1) << 53) - 1)
 static uint64_t new_uid(fkx *x) {
   for (;;) {
-    uint64_t u = x->random64(x->random_ctx);
+    uint64_t u = x->random64(x->random_ctx) & FKX_UID_MASK;
     if (u && !find_uid(x, u, NULL, NULL)) return u;
   }
 }

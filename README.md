@@ -21,9 +21,10 @@ forkdb is a C library that requires:
 # Build the extension for the sqlite3 shell (needs the symbols of a host that exports SQLite)
 ./scripts/build-step4.sh ext        # produces build/forkdb.so
 
-# Build the portable extension: loads into any SQLite 3.24+ (Python's sqlite3, a Node addon), no session driver
+# Build the portable extension: loads into any SQLite 3.24+ (Python's sqlite3, Node's built-in node:sqlite), no session driver
 ./scripts/build-ext.sh              # produces build/ext/forkdb.so
 ./scripts/test-ext.sh               # builds it and runs test/ext_py_test.py through Python's sqlite3
+./scripts/test-ext-node.sh          # builds it and runs test/ext_node*_test.js through Node 24's built-in node:sqlite
 
 # Build both plus the test suite
 ./scripts/build-step4.sh test

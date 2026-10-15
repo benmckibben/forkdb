@@ -59,4 +59,5 @@ The CLI bundles its own session-variant SQLite — it works offline on any store
 - The store and VFS each have power-loss test suites (10 seeds × 12+ operations with crash injection at every I/O event) plus over a dozen targeted mutants each.
 - The fkx layer has a logic pass (111 checks), a power-loss pass (session driver: 10 seeds × 20 operations covering both replay and fast-forward), and 20 mutants — 10 core, 10 session — each caught by at least one test variant.
 - The CLI and extension have smoke tests that exercise every operation end-to-end. The extension test loads via `sqlite3_load_extension`.
-- Untested: OOM injection, virtual table handling at the SQL level, Node.js host primitives, and the host survey (macOS, python.org SQLite, Windows).
+- Node: the extension is tested in node:sqlite (Node 24, `scripts/test-ext-node.sh`: loading, branches, locking, nosync, worker threads). Not tested: better-sqlite3 and other Node bindings, which build their own SQLite, and Node versions other than 24. node:sqlite reads SQL integers as JavaScript numbers and throws above 2^53, which is why new branch ids are 53 bits (this was found by that suite).
+- Untested: OOM injection, virtual table handling at the SQL level, and the host survey (macOS, python.org SQLite, Windows).

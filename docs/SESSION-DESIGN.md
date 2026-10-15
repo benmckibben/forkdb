@@ -118,7 +118,7 @@ The roughness that remains: the failure comes at `COMMIT`, not at the first writ
   |---|---|---|---|
   | Ubuntu system libsqlite3 3.45.1 | yes (`ENABLE_SESSION`, `ENABLE_PREUPDATE_HOOK`) | **yes**: the shared library exports `sqlite3session_create` and `sqlite3changeset_apply` | measured (`nm -D`, an extension linked to it ran the API in Python) |
   | Python 3.12.3 (system build, uses that library) | yes | **yes**, same library | measured (`PRAGMA compile_options`) |
-  | Node 24.19.0, built-in `node:sqlite` (SQLite 3.53.3) | yes, and `DatabaseSync.createSession` exists | **no**: the node binary exports no `sqlite3_*` symbols, and an extension loaded with `loadExtension` found no session symbol | measured (`nm -D` on the binary; an extension that tested for the symbol returned 0) |
+  | Node 24.19.0, built-in `node:sqlite` (SQLite 3.53.3) | yes, and `DatabaseSync.createSession` exists | **no**: the node binary exports no `sqlite3_*` symbols, and an extension loaded with `loadExtension` found no session symbol | measured (`nm -D` on the binary; an extension that tested for the symbol returned 0). The rest of the extension (the VFS, branches, locking, nosync, threads) runs there: `scripts/test-ext-node.sh` |
   | better-sqlite3 | not mentioned in its compilation notes | unknown | documentation only, not tested |
   | Go, mattn/go-sqlite3 | its README lists a preupdate-hook build tag and no session tag | unknown | documentation only, not tested |
   | Rust, rusqlite | has a `session` cargo feature (needs `SQLITE_ENABLE_SESSION` in the SQLite it builds) | unknown | documentation only, not tested |
