@@ -195,8 +195,9 @@ static int w_sibling_create(void *ctx, fk_io *tmp) {
 
 static int w_sibling_rename(void *ctx, fk_io *tmp) {
   WC *m = ctx, *t = tmp->ctx;
-  /* On Windows, you cannot rename a file that is open without FILE_SHARE_DELETE.
-   * Close the temp file before renaming. */
+  /* On Windows a file cannot be renamed over, or renamed, while a handle on it was opened without FILE_SHARE_DELETE. The temp file is closed first (its handle
+   * was opened with sharing off); the main file's handle was opened with FILE_SHARE_DELETE (see fk_file_open_ex), which is what lets MoveFileExW replace the file
+   * that this process still holds open. Without it every compaction on Windows failed here with -1 and left the store untouched. */
   CloseHandle(t->h);
   t->h = NULL;
 
@@ -205,9 +206,9 @@ static int w_sibling_rename(void *ctx, fk_io *tmp) {
 
   /* Close the old file handle and reopen using the new path.
    * (The old handle still refers to the now-replaced file.)
-   * Share mode must match fk_file_open: FILE_SHARE_READ keeps concurrent readers working. */
+   * Share mode must match fk_file_open: FILE_SHARE_READ keeps concurrent readers working, FILE_SHARE_DELETE lets the next compaction replace the file again. */
   CloseHandle(m->h);
-  m->h = CreateFileW(m->path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL,
+  m->h = CreateFileW(m->path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
   if (m->h == INVALID_HANDLE_VALUE) return -1;
 
@@ -249,11 +250,13 @@ int fk_file_open_ex(const char *path, fk_io *io, int flags) {
   if (!wp) return -1;
 
   DWORD creation = (GetFileAttributesW(wp) != INVALID_FILE_ATTRIBUTES) ? OPEN_EXISTING : CREATE_NEW;
+  /* FILE_SHARE_READ without FILE_SHARE_WRITE is the lock: a second opener that asks for write access is refused by the system. FILE_SHARE_DELETE is
+   * needed so that compaction can replace this file while it is open (w_sibling_rename); it does not let anyone write. */
   HANDLE h = CreateFileW(wp, GENERIC_READ | GENERIC_WRITE,
-                         FILE_SHARE_READ, NULL,
+                         FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
                          creation, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) {
-    /* The share mode (FILE_SHARE_READ only) is the lock: a second opener that asks for write access is refused by the system. */
+    /* The share mode (no FILE_SHARE_WRITE) is the lock: a second opener that asks for write access is refused by the system. */
     int busy = GetLastError() == ERROR_SHARING_VIOLATION;
     free(wp);
     return busy ? FK_ELOCKED : -1;
