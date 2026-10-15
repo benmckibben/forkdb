@@ -170,6 +170,26 @@ jobs:
           gcc --version | head -1
           scripts/test-ext-${{ matrix.suite }}.sh
 
+  nosync-bench:
+    name: What nosync saves (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Time and durability calls per operation, durable against nosync (the table is in the job summary)
+        run: scripts/bench-nosync.sh
+
   oldest-sqlite:
     name: Extension tests (SQLite 3.24.0, the oldest supported)
     runs-on: ubuntu-latest
