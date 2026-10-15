@@ -188,6 +188,7 @@ static int w_sibling_create(void *ctx, fk_io *tmp) {
   if (!t) { CloseHandle(h); DeleteFileW(tp); free(tp); return -1; }
   t->h = h;
   t->path = tp;
+  t->nosync = m->nosync;
   fill(tmp, t, 0);
   return 0;
 }
