@@ -6,36 +6,47 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { died, later, DatabaseSync, SO, PRELUDE, load, one, tmpdir, openBranch, closeStore, runNode } = require('./node_helpers.js');
 
-// ---- fsync counter helpers ----
+// ---- sync counting ----
+// The children count the durability calls the file backend makes with forkdb_sync_count(), which works the same on Linux, macOS and Windows. On Linux a second counter, an
+// LD_PRELOAD interposer that counts the real fsync and fdatasync system calls from outside, is run alongside in one test (the last one) to check that the portable counter
+// counts what the system actually sees. That test exists only where the interposer can run.
+const LINUX = process.platform === 'linux';
 const FSYNC_COUNT_SO = process.env.FK_FSYNC_COUNT_SO;
-assert.ok(FSYNC_COUNT_SO, 'FK_FSYNC_COUNT_SO must be set: the fsync interposer is not available');
-assert.ok(fs.existsSync(FSYNC_COUNT_SO), 'FK_FSYNC_COUNT_SO=' + FSYNC_COUNT_SO + ' does not exist: build the interposer first');
+if (LINUX) {
+  assert.ok(FSYNC_COUNT_SO, 'FK_FSYNC_COUNT_SO must be set on Linux: the fsync interposer is not available');
+  assert.ok(fs.existsSync(FSYNC_COUNT_SO), 'FK_FSYNC_COUNT_SO=' + FSYNC_COUNT_SO + ' does not exist: build the interposer first');
+}
 
-function runCounted(t, code, ...args) {
+// Runs code in a child (like runNode) and returns { r, count }: count is the number of durability calls the child made while the code ran, from forkdb_sync_count().
+// With interposer=true (Linux only) it also returns the system calls counted from outside: { r, count, external }.
+function runCountedWith(t, interposer, code, ...args) {
   const dir = tmpdir(t);
   const file = path.join(dir, 'cnt.txt');
-  const r = spawnSync(process.execPath, ['--no-warnings', '-e', PRELUDE + code, SO, ...args], {
-    encoding: 'utf8', timeout: 120000,
-    env: { ...process.env, LD_PRELOAD: FSYNC_COUNT_SO, FK_FSYNC_COUNT_FILE: file }
-  });
-  let count = -1;
-  try {
-    const s = fs.readFileSync(file, 'utf8');
-    const m = s.match(/^FSYNC_COUNT (\d+)/m);
-    if (m) count = parseInt(m[1], 10);
-  } catch (e) { /* file may not exist if child killed by signal */ }
-  return { r, count };
+  const ext = path.join(dir, 'ext.txt');
+  const wrapped = [
+    'const __counter = load();',
+    "const __n = () => Number(Object.values(__counter.prepare('select forkdb_sync_count()').get())[0]);",
+    'const __n0 = __n();',
+    "process.on('exit', (status) => { if (status === 0) require('node:fs').writeFileSync(process.env.FK_SYNC_COUNT_FILE, 'SYNCS ' + (__n() - __n0) + '\\n'); });",
+    code,
+  ].join('\n');
+  const env = { ...process.env, FK_SYNC_COUNT_FILE: file };
+  if (interposer) { env.LD_PRELOAD = FSYNC_COUNT_SO; env.FK_FSYNC_COUNT_FILE = ext; }
+  const r = spawnSync(process.execPath, ['--no-warnings', '-e', PRELUDE + wrapped, SO, ...args], { encoding: 'utf8', timeout: 120000, env });
+  const read = (f, re) => { try { const m = fs.readFileSync(f, 'utf8').match(re); return m ? parseInt(m[1], 10) : -1; } catch (e) { return -1; } };
+  return { r, count: read(file, /^SYNCS (\d+)/m), external: interposer ? read(ext, /^FSYNC_COUNT (\d+)/m) : undefined };
 }
+const runCounted = (t, code, ...args) => runCountedWith(t, false, code, ...args);
 
 const baselines = {};
 
 // Measure the baseline: a child that just loads the extension and exits.
-test('H nosync baseline: loading the extension alone issues 0 fsyncs', (t) => {
+test('H nosync baseline: loading the extension alone issues 0 syncs', (t) => {
   const { r, count } = runCounted(t, 'load();\n', '/tmp/nonexistent');
   assert.equal(r.status, 0, r.stderr || r.stdout);
   baselines.loadOnly = count;
   t.diagnostic('baseline (load only) count=' + count);
-  assert.equal(count, 0, 'a process that only loads the extension should issue 0 fsyncs');
+  assert.equal(count, 0, 'a process that only loads the extension should issue 0 syncs');
 });
 
 // ---- subprocess scripts ----
@@ -368,3 +379,18 @@ test('H nosync compaction garbage recipe, with and without nosync', (t) => {
 
   assert.ok(c2 > c3, 'compaction itself should issue fsyncs on a durable store: compact=' + c2 + ' skip=' + c3);
 });
+
+// 9. Linux only: the portable counter agrees with the system calls the interposer sees, for a durable store and for a nosync one. Without this the counter could be wrong in
+// the same way in every test above and nothing would notice.
+if (LINUX) {
+  test('H nosync the portable sync counter agrees with the fsync system calls counted from outside', (t) => {
+    for (const opt of ['none', 'nosync']) {
+      const dir = tmpdir(t);
+      const { r, count, external } = runCountedWith(t, true, NOSYNC_INIT_WORK, path.join(dir, opt + '.fk'), opt, 'main');
+      assert.equal(r.status, 0, r.stderr || r.stdout);
+      t.diagnostic(opt + ': forkdb_sync_count=' + count + ', fsync and fdatasync calls seen by the interposer=' + external);
+      assert.equal(count, external, opt + ': the counter and the interposer must agree');
+      if (opt === 'none') assert.ok(count > 0, 'a durable store must have synced'); else assert.equal(count, 0);
+    }
+  });
+}
