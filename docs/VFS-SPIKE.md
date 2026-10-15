@@ -58,7 +58,7 @@ What to read from it, and what not to:
 
 ## Real disks (2026-10-12)
 
-One throwaway `i4i.large` (Xeon Platinum 8375C, Amazon Linux 2023, kernel 6.1.188, SQLite 3.50.0) built from `infra/bench` ([README](../infra/bench/README.md)), running the same `vfs_bench`, 3 repetitions on each of two disks, both ext4 with default options: the **local NVMe instance store** and a **gp3 EBS volume** (3000 IOPS, 125 MB/s). Medians, ranges are in [vfs/results/bench-real-disks.txt](../vfs/results/bench-real-disks.txt). The same 335 and 319 checks of `scripts/test-vfs.sh quick` also passed on that host (0 failures), so the VFS tests hold on a second kernel and filesystem.
+One throwaway `i4i.large` (Xeon Platinum 8375C, Amazon Linux 2023, kernel 6.1.188, SQLite 3.50.0) built from an OpenTofu definition that was in the repository as `infra/bench` until it was removed (it only recreated that host; it is in git history, e.g. `git show bccb2c9:infra/bench/README.md`), running the same `vfs_bench`, 3 repetitions on each of two disks, both ext4 with default options: the **local NVMe instance store** and a **gp3 EBS volume** (3000 IOPS, 125 MB/s). Medians, ranges are in [vfs/results/bench-real-disks.txt](../vfs/results/bench-real-disks.txt). The same 335 and 319 checks of `scripts/test-vfs.sh quick` also passed on that host (0 failures), so the VFS tests hold on a second kernel and filesystem.
 
 | single-row commit | rollback journal | WAL | forkdb (batch path) | forkdb (journal path) |
 |---|---|---|---|---|

@@ -23,7 +23,7 @@ There has been no release, and nothing automates one: no release workflow, no pa
 It is private today. Before that:
 
 - [ ] **Enable private vulnerability reporting** (SECURITY.md sends reporters there; I could not check whether it is on).
-- [ ] **Decide what to do with `infra/bench` and `bench/`.** `infra/bench` is an OpenTofu definition of a throwaway AWS benchmark host (13 files); its README names an IAM user, describes how the source reaches the host while the repository is private, and quotes cost figures. The IAM policy uses an `ACCOUNT_ID` placeholder, not a real account number. They are part of the history that produced the numbers in `docs/VFS-SPIKE.md`.
+- [ ] **Know what the history contains about the benchmark host.** `infra/bench` (an OpenTofu definition of a throwaway AWS host, with an IAM user's name and cost figures in its README) was removed from the tree and is still in history; read it before making the repository public if that matters. The IAM policy there used an `ACCOUNT_ID` placeholder, not a real account number. `bench/fkbench.c` stays (`scripts/bench-compact.sh` builds it).
 - [ ] **Read the history for anything that should not be public**; this checklist did not.
 - [ ] **Licences:** the README offers Apache-2.0 or MIT at the user's option and both files are present; GitHub's licence detection shows only Apache-2.0.
 

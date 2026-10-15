@@ -37,7 +37,7 @@ Nothing has been released: there is no tag and no release (see [docs/STABILITY.m
 ### Tests, CI and measurement
 
 - CI workflow (#28); OOM fault injection (#29, #32); corrupted-record recovery tests (#30, #32); a recovery fuzzer with a mutant check (#50).
-- Benchmarks and a real-disk measurement, with an OpenTofu host definition under `infra/bench` (#5, #12, #13, #14).
+- Benchmarks and a real-disk measurement (#5, #12, #13, #14). The OpenTofu host definition they added under `infra/bench` has been removed from the tree (it is in history).
 
 ### Documentation and licence
 
