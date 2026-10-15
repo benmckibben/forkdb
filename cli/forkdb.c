@@ -42,7 +42,7 @@ static void open_failed(const char *what, const char *path, int rc) {
     switch (rc) {
         case FKX_ENOENT:   fprintf(stderr, "no store at '%s'", path); break;
         case FKX_ESTORE:   fprintf(stderr, "cannot open the store file '%s'", path); break;
-        case FKX_EVERSION: fprintf(stderr, "'%s' is a store older than format version 4", path); break;
+        case FKX_EVERSION: fprintf(stderr, "'%s' is a store older than format version 4, which the CLI cannot open", path); break;
         case FKX_ECORRUPT: fprintf(stderr, "'%s' is damaged or is not a forkdb store", path); break;
         case FKX_ELOCKED:  fprintf(stderr, "the store '%s' is open in another process (or already open here): one process at a time", path); break;
         case FKX_ENOMEM:   fprintf(stderr, "out of memory"); break;
