@@ -111,7 +111,7 @@ jobs:
         run: |
           mkdir -p build
           gcc -Wall -Wextra -std=gnu11 -O2 \
-            -Istore -Ivfs -Itest \
+            -DFK_TEST_HOOKS -Istore -Ivfs -Itest \
             vfs/fkvfs.c store/fkstore.c store/io_file.c store/io_prealloc.c \
             test/simdisk.c test/file_test.c \
             -lsqlite3 -lpthread -lm -o build/pysqlite_file_test
