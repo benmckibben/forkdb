@@ -77,7 +77,7 @@ jobs:
       - name: Compaction smoke test (the compacted file replaces the log while it is open)
         run: |
           if not exist build mkdir build
-          gcc -Wall -Wextra -std=gnu11 -O2 -Istore -DFK_COUNT_FLUSH -include test\win_flush_redirect.h -c store\io_file_win.c -o build\io_file_win_counted.o
+          gcc -Wall -Wextra -std=gnu11 -O2 -Istore -DFK_COUNT_FLUSH -DFK_WIN_DEBUG -include test\win_flush_redirect.h -c store\io_file_win.c -o build\io_file_win_counted.o
           gcc -Wall -Wextra -std=gnu11 -O2 -Istore -DFK_COUNT_FLUSH test\compact_smoke.c store\fkstore.c store\io_file.c store\io_prealloc.c build\io_file_win_counted.o -o build\compact_smoke.exe
           build\compact_smoke.exe
 
