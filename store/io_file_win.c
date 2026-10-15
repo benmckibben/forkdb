@@ -189,7 +189,9 @@ static int w_sibling_create(void *ctx, fk_io *tmp) {
   wchar_t *tp = tmp_wpath(m->path);
   if (!tp) return FKFAIL(__LINE__);
 
-  HANDLE h = CreateFileW(tp, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+  /* DELETE access: the rename in w_sibling_rename is made through this handle. The share mode is the main file's (readers and deleters, no writers): after the
+   * rename this very handle becomes the main handle, so the one-opener lock is never released. */
+  HANDLE h = CreateFileW(tp, GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) { free(tp); return FKFAIL(__LINE__); }
 
@@ -202,25 +204,45 @@ static int w_sibling_create(void *ctx, fk_io *tmp) {
   return 0;
 }
 
+/* FILE_RENAME_INFO with the Flags member, and the class that takes it (Windows 10 1709 and later, NTFS). Declared here because older MinGW headers lack them. */
+typedef struct {
+  DWORD Flags;
+  HANDLE RootDirectory;
+  DWORD FileNameLength; /* bytes, without the terminating NUL */
+  WCHAR FileName[1];
+} FK_RENAME_INFO_EX;
+#define FK_FILE_RENAME_INFO_EX_CLASS 22 /* FILE_INFO_BY_HANDLE_CLASS: FileRenameInfoEx */
+#define FK_RENAME_REPLACE_IF_EXISTS 0x1
+#define FK_RENAME_POSIX_SEMANTICS 0x2
+
+/* Replace the main file with the compacted one, the way POSIX rename does: atomically, while this process (and the old handle) still has the old file open.
+ * MoveFileExW cannot do that: it fails with ERROR_ACCESS_DENIED when the target has any open handle, whatever its share mode (measured on a Windows runner, with the
+ * main handle opened with FILE_SHARE_DELETE). A rename made with POSIX semantics unlinks the old file at once and lets the open handles keep reading it until they close.
+ * It needs NTFS on Windows 10 1709 or later; where it is refused the compaction fails with an error and the store is untouched and usable, as for any failure before
+ * the replacement. */
 static int w_sibling_rename(void *ctx, fk_io *tmp) {
   WC *m = ctx, *t = tmp->ctx;
-  /* On Windows a file cannot be renamed over, or renamed, while a handle on it was opened without FILE_SHARE_DELETE. The temp file is closed first (its handle
-   * was opened with sharing off); the main file's handle was opened with FILE_SHARE_DELETE (see fk_file_open_ex), which is what lets MoveFileExW replace the file
-   * that this process still holds open. Without it every compaction on Windows failed here with -1 and left the store untouched. */
-  CloseHandle(t->h);
+
+  DWORD fn = GetFullPathNameW(m->path, 0, NULL, NULL);
+  if (fn == 0) return FKFAIL(__LINE__);
+  size_t bytes = sizeof(FK_RENAME_INFO_EX) + (size_t)fn * sizeof(WCHAR);
+  FK_RENAME_INFO_EX *ri = calloc(1, bytes);
+  if (!ri) return FKFAIL(__LINE__);
+  DWORD got = GetFullPathNameW(m->path, fn, ri->FileName, NULL);
+  if (got == 0 || got >= fn) { free(ri); return FKFAIL(__LINE__); }
+  ri->Flags = FK_RENAME_REPLACE_IF_EXISTS | FK_RENAME_POSIX_SEMANTICS;
+  ri->RootDirectory = NULL;
+  ri->FileNameLength = (DWORD)(got * sizeof(WCHAR));
+  BOOL ok = SetFileInformationByHandle(t->h, (FILE_INFO_BY_HANDLE_CLASS)FK_FILE_RENAME_INFO_EX_CLASS, ri, (DWORD)bytes);
+  free(ri);
+  if (!ok) return FKFAIL(__LINE__); /* t is untouched: w_sibling_remove closes and deletes it */
+
+  /* The compacted file is now the file at m->path, and t->h, opened with the main file's share mode, is a handle on it: it becomes the main handle. The old handle
+   * refers to the unlinked old file; closing it frees that. */
+  HANDLE old = m->h;
+  m->h = t->h;
   t->h = NULL;
-
-  if (!MoveFileExW(t->path, m->path, MOVEFILE_REPLACE_EXISTING))
-    return FKFAIL(__LINE__);
-
-  /* Close the old file handle and reopen using the new path.
-   * (The old handle still refers to the now-replaced file.)
-   * Share mode must match fk_file_open: FILE_SHARE_READ keeps concurrent readers working, FILE_SHARE_DELETE lets the next compaction replace the file again. */
-  CloseHandle(m->h);
-  m->h = CreateFileW(m->path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
-                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-  if (m->h == INVALID_HANDLE_VALUE) return FKFAIL(__LINE__);
-
+  CloseHandle(old);
   free(t->path);
   free(t);
   tmp->ctx = NULL;
