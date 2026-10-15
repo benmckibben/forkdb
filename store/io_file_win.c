@@ -148,7 +148,10 @@ static int w_sibling_rename(void *ctx, fk_io *tmp);
 static int w_sync_dir(void *ctx);
 static void w_sibling_remove(void *ctx, fk_io *tmp);
 
-static int sync_dir_of(const wchar_t *path) {
+/* Flush the directory entry of the store file (after a compaction replaced it). FlushFileBuffers needs write access to the handle, and a directory is not always
+ * flushable on Windows (ERROR_ACCESS_DENIED): then the store file's own handle is flushed instead, which on NTFS forces the journalled metadata of that file, the rename
+ * included, to disk. Failing here would stop the store (the replacement has already happened), so a directory that cannot be flushed is not an error. */
+static int sync_dir_of(const wchar_t *path, HANDLE file) {
   /* Get the parent directory path */
   size_t n = wcslen(path);
   wchar_t *dir = malloc((n + 1) * sizeof(wchar_t));
@@ -157,13 +160,15 @@ static int sync_dir_of(const wchar_t *path) {
   while (n > 0 && dir[n - 1] != L'\\' && dir[n - 1] != L'/') n--;
   if (n > 1) dir[n - 1] = 0; else { dir[0] = L'.'; dir[1] = 0; }
 
-  HANDLE h = CreateFileW(dir, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+  HANDLE h = CreateFileW(dir, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                          NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
   free(dir);
-  if (h == INVALID_HANDLE_VALUE) return FKFAIL(__LINE__);
-  int rc = FlushFileBuffers(h) ? 0 : -1;
-  CloseHandle(h);
-  return rc;
+  if (h != INVALID_HANDLE_VALUE) {
+    int ok = FlushFileBuffers(h) ? 0 : -1;
+    CloseHandle(h);
+    if (ok == 0) return 0;
+  }
+  return FlushFileBuffers(file) ? 0 : FKFAIL(__LINE__);
 }
 
 static void fill(fk_io *io, WC *c, int main_file) {
@@ -251,7 +256,7 @@ static int w_sibling_rename(void *ctx, fk_io *tmp) {
 
 static int w_sync_dir(void *ctx) {
   if (((WC *)ctx)->nosync) return 0;
-  return sync_dir_of(((WC *)ctx)->path);
+  return sync_dir_of(((WC *)ctx)->path, ((WC *)ctx)->h);
 }
 
 static void w_sibling_remove(void *ctx, fk_io *tmp) {
