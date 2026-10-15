@@ -191,10 +191,11 @@ static int equal_state(fk_store *s, const Model *M) {
   return 1;
 }
 
-typedef struct { long images, ok_old, ok_new, violations, open_fail, nested, cont, compactions; } Stats;
+typedef struct { long images, ok_old, ok_new, violations, open_fail, nested, cont, compactions; long refused, nosync_ok, lagged, lost_all, pd_checks; } Stats;
 typedef struct {
   const Model *states;
-  int cand[2], ncand;
+  int cand[MAXOPS + 2], ncand;
+  int nosync, acked; /* nosync: the store ran with no syncs, so a recovered state may be any acknowledged one, and refusing to open is allowed */
   Stats *st;
   uint64_t seed;
   long N;
@@ -263,6 +264,11 @@ static void verify_image(void *vc, const uint8_t *img, uint64_t len) {
   fk_io io CLEANUP_IO = mkio(&d);
   fk_store *s = NULL;
   int rc = fk_open(&io, &s);
+  if (rc != 0 && c->nosync) { /* a refusal is an allowed answer after a power cut with no syncs: the file says it cannot be trusted */
+    c->st->refused++;
+    sim_free(&d);
+    return;
+  }
   if (rc != 0) {
     c->st->violations++;
     c->st->open_fail++;
@@ -280,6 +286,11 @@ static void verify_image(void *vc, const uint8_t *img, uint64_t len) {
     return;
   }
   if (m == 0) c->st->ok_old++; else c->st->ok_new++;
+  if (c->nosync && c->depth == 0) {
+    c->st->nosync_ok++;
+    if (c->cand[m] < c->acked) c->st->lagged++;
+    if (c->cand[m] == 0 && c->acked > 0) c->st->lost_all++;
+  }
   if (c->depth == 0) {
     /* The store must be usable after recovery: replay the rest of the workload on it (so new records of many sizes land
      * on top of whatever torn tail was there), reopen, and compare with the oracle's final state. When nothing is left
@@ -334,7 +345,9 @@ static long run_case(uint64_t seed, int K, long N, int mode, Stats *st, long *ev
   gen_ops(seed, K, ops, states);
   SimDisk d;
   sim_init(&d, NULL, 0);
-  if (mode == 0) d.crash_at = N; else d.fsync_fail_at = N;
+  if (mode == 0) d.crash_at = N;
+  else if (mode == 2) { d.crash_at = N; d.nosync = 1; }
+  else d.fsync_fail_at = N;
   fk_io io CLEANUP_IO = mkio(&d);
   fk_store *s = NULL;
   int acked = 0, inflight = 0;
@@ -373,6 +386,22 @@ static long run_case(uint64_t seed, int K, long N, int mode, Stats *st, long *ev
         st->violations++;
       }
     }
+    if (mode == 2 && N < 0 && rc == 0 && acked == K) {
+      /* the process dies (no close), the machine stays up: the operating system still has every write, so nothing may be lost */
+      uint64_t vl = 0;
+      const uint8_t *vv = sim_visible(&d, &vl);
+      SimDisk dv;
+      sim_init(&dv, vv, vl);
+      fk_io iov CLEANUP_IO = mkio(&dv);
+      fk_store *sv = NULL;
+      st->pd_checks++;
+      if (fk_open(&iov, &sv) != 0 || !equal_state(sv, &states[K])) {
+        printf("  VIOLATION seed=%llu the process died with no sync and the machine stayed up, and the data was lost (%s)\n", (unsigned long long)seed, sv ? why : "open failed");
+        st->violations++;
+      }
+      if (sv) fk_close(sv);
+      sim_free(&dv);
+    }
     fk_close(s);
   }
   if (events_out) *events_out = ev_work;
@@ -382,13 +411,19 @@ static long run_case(uint64_t seed, int K, long N, int mode, Stats *st, long *ev
   }
   Ctx c;
   memset(&c, 0, sizeof c);
-  c.states = states; c.st = st; c.seed = seed; c.N = N; c.tag = mode ? "after-failed-fsync" : "power-cut";
+  c.states = states; c.st = st; c.seed = seed; c.N = N; c.tag = mode == 2 ? "power-cut-no-syncs" : mode ? "after-failed-fsync" : "power-cut";
   c.rseed = seed * 31 + (uint64_t)N * 17;
   c.ops = ops; c.K = K;
   c.cand[0] = acked; c.ncand = 1;
   if (inflight && acked < K) c.cand[c.ncand++] = acked + 1;
   Rng r;
   rng_seed(&r, c.rseed);
+  if (mode == 2) {
+    /* with no syncs any prefix of the acknowledged history may be what the disk kept; the open must fail or return one of them */
+    c.nosync = 1; c.acked = acked;
+    for (int j = acked - 1; j >= 0; j--) c.cand[c.ncand++] = j;
+    sim_images_prefix(&d, &r, 24, verify_image, &c);
+  }
   sim_images(&d, &r, verify_image, &c);
   sim_free(&d);
   free(states);
@@ -493,6 +528,22 @@ int main(int argc, char **argv) {
     total_events += events;
     printf("seed %d: %ld I/O events; images so far %ld, violations %ld\n", sd, events, st.images, st.violations);
     fflush(stdout);
+  }
+  {
+    /* The same workloads with a store opened without syncs (FK_FILE_NOSYNC): nothing is ever durable until the power cut. The claim is weaker than the one above and is
+     * tested as exactly that: the open fails, or returns one of the states the workload acknowledged (usually an older one), and the store is usable afterwards; and a
+     * process that dies with the machine up loses nothing. It is never allowed to open as something that was not a state of the workload. */
+    Stats ns;
+    memset(&ns, 0, sizeof ns);
+    for (int sd = 1; sd <= seeds; sd++) {
+      long events = 0;
+      run_case((uint64_t)sd, K, -1, 2, &ns, &events);
+      long stride = events / 12 > 0 ? events / 12 : 1;
+      for (long N = 0; N < events; N += stride) run_case((uint64_t)sd, K, N, 2, &ns, NULL);
+    }
+    printf("\nno-sync pass (store opened with FK_FILE_NOSYNC): images %ld; refused to open %ld; opened to an acknowledged state %ld (older than the last acknowledged: %ld, empty: %ld); process-death checks %ld; violations %ld\n",
+           ns.images, ns.refused, ns.nosync_ok, ns.lagged, ns.lost_all, ns.pd_checks, ns.violations);
+    st.violations += ns.violations;
   }
   printf("\nworkloads x cut points: %ld (incl. fsync-failure cases), I/O events cut: %ld\n", cases, total_events);
   printf("post-crash images checked: %ld (recovered to acknowledged state: %ld, to acknowledged+in-flight: %ld)\n", st.images, st.ok_old, st.ok_new);

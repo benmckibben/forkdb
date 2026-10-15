@@ -34,6 +34,13 @@ scripts/build-ext.sh
 # Set the extension path
 export FK_EXT_SO="$root/build/ext/forkdb.so"
 
+# Build the fsync-counting interposer
+echo "Building fsync_count interposer..."
+gcc -shared -fPIC -O2 -o "$root/build/ext/fsync_count.so" test/fsync_count.c -ldl
+
+# Set the interposer path
+export FK_FSYNC_COUNT_SO="$root/build/ext/fsync_count.so"
+
 # Run the tests
 echo "Running Python tests..."
 python3 test/ext_py_test.py -v

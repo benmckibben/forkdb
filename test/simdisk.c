@@ -40,6 +40,7 @@ void sim_init(SimDisk *d, const uint8_t *image, uint64_t len) {
 }
 void sim_free(SimDisk *d) { file_reset(&d->f[0]); file_reset(&d->f[1]); }
 const uint8_t *sim_durable(const SimDisk *d, uint64_t *len) { *len = d->f[d->dur_main].dur_len; return d->f[d->dur_main].dur; }
+const uint8_t *sim_visible(const SimDisk *d, uint64_t *len) { *len = d->f[d->vis_main].vis_len; return d->f[d->vis_main].vis; }
 
 static SimFile *F(SimHandle *h) { SimDisk *d = h->d; return &d->f[h->tmp ? 1 - d->vis_main : d->vis_main]; }
 
@@ -104,6 +105,7 @@ static int s_fsync(void *c) {
   SimDisk *d = h->d;
   if (tick(d)) return -1;
   if (fsync_fails(d)) return -1; /* pending stays pending */
+  if (d->nosync) return 0;      /* FK_FILE_NOSYNC: reported as done, nothing is made durable */
   SimFile *f = F(h);
   for (int i = 0; i < f->npend; i++) { apply_clean(&f->dur, &f->dcap, &f->dur_len, &f->pend[i]); free(f->pend[i].data); }
   f->npend = 0;
@@ -137,6 +139,7 @@ static int s_sync_dir(void *c) {
   SimDisk *d = h->d;
   if (tick(d)) return -1;
   if (fsync_fails(d)) return -1; /* the rename stays pending */
+  if (d->nosync) return 0;
   d->dur_main = d->vis_main;
   return 0;
 }
@@ -187,9 +190,9 @@ static void one_image(const SimFile *f, Rng *r, uint32_t mask, int variant, sim_
   uint8_t *img = NULL;
   uint64_t cap = 0, len = f->dur_len;
   ensure(&img, &cap, f->dur_len + 1);
-  memcpy(img, f->dur, f->dur_len);
-  int n = f->npend, idx[64], m = 0;
-  for (int i = 0; i < n && i < 64; i++) if ((i < 32 && (mask >> i) & 1) || (i >= 32 && rng_below(r, 2))) idx[m++] = i;
+  if (f->dur_len) memcpy(img, f->dur, f->dur_len);
+  int n = f->npend, idx[1024], m = 0;
+  for (int i = 0; i < n && i < 1024; i++) if ((i < 32 && (mask >> i) & 1) || (i >= 32 && rng_below(r, 2))) idx[m++] = i;
   for (int i = m - 1; i > 0; i--) { int j = (int)rng_below(r, (uint32_t)i + 1); int t = idx[i]; idx[i] = idx[j]; idx[j] = t; } /* any order */
   for (int k = 0; k < m; k++) apply_torn(&img, &cap, &len, &f->pend[idx[k]], r, variant == 1, variant == 1 && rng_below(r, 2));
   cb(ctx, img, len);
@@ -210,4 +213,28 @@ static void file_images(const SimFile *f, Rng *r, sim_image_cb cb, void *ctx) {
 void sim_images(const SimDisk *d, Rng *r, sim_image_cb cb, void *ctx) {
   file_images(&d->f[d->dur_main], r, cb, ctx); /* the directory change, if any, was lost */
   if (d->vis_main != d->dur_main) file_images(&d->f[d->vis_main], r, cb, ctx); /* ... or it survived */
+}
+
+/* The first m pending writes in order, the last torn or whole: see sim_images_prefix. */
+static void prefix_image(const SimFile *f, Rng *r, int m, int torn, sim_image_cb cb, void *ctx) {
+  uint8_t *img = NULL;
+  uint64_t cap = 0, len = f->dur_len;
+  ensure(&img, &cap, f->dur_len + 1);
+  if (f->dur_len) memcpy(img, f->dur, f->dur_len);
+  for (int k = 0; k < m; k++) apply_torn(&img, &cap, &len, &f->pend[k], r, torn && k == m - 1, 0);
+  cb(ctx, img, len);
+  free(img);
+}
+static void file_prefix_images(const SimFile *f, Rng *r, int samples, sim_image_cb cb, void *ctx) {
+  int n = f->npend;
+  int step = samples > 0 && n > samples ? n / samples : 1;
+  for (int m = 0; m <= n; m += step) {
+    prefix_image(f, r, m, 0, cb, ctx);
+    if (m > 0) prefix_image(f, r, m, 1, cb, ctx);
+  }
+  if (n % step != 0) { prefix_image(f, r, n, 0, cb, ctx); prefix_image(f, r, n, 1, cb, ctx); }
+}
+void sim_images_prefix(const SimDisk *d, Rng *r, int samples, sim_image_cb cb, void *ctx) {
+  file_prefix_images(&d->f[d->dur_main], r, samples, cb, ctx);
+  if (d->vis_main != d->dur_main) file_prefix_images(&d->f[d->vis_main], r, samples, cb, ctx);
 }

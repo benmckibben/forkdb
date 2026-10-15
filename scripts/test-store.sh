@@ -23,13 +23,17 @@ echo "== real-file tests"
 $cc $warn "${fdata[@]}" "$here/test/file_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" "$here/store/io_prealloc.c" -o "$out/file_test"
 "$out/file_test"
 
+echo "== nosync test"
+$cc $warn -Wl,--wrap=fdatasync -Wl,--wrap=fsync "$here/test/nosync_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" "$here/store/io_prealloc.c" -o "$out/nosync_test"
+"$out/nosync_test"
+
 echo "== power-loss tests (${seeds} seeds x ${ops} operations, address and undefined-behaviour sanitizers on)"
 # shellcheck disable=SC2086
 $cc $warn -fsanitize=address,undefined -fno-sanitize-recover=undefined $crash_src -o "$out/crash_test"
-"$out/crash_test" "$seeds" "$ops" | grep -E "^(logic pass|workloads|post-crash|append-after|TOTAL)"
+"$out/crash_test" "$seeds" "$ops" | grep -E "^(logic pass|no-sync pass|workloads|post-crash|append-after|TOTAL)"
 
 echo "== the same power-loss tests with every store behind the preallocation layer (16 KiB chunks, so the cuts include the zero fills)"
-CRASH_PREALLOC=16384 "$out/crash_test" "$seeds" "$ops" | grep -E "^(every store|logic pass|workloads|post-crash|append-after|TOTAL)"
+CRASH_PREALLOC=16384 "$out/crash_test" "$seeds" "$ops" | grep -E "^(every store|logic pass|no-sync pass|workloads|post-crash|append-after|TOTAL)"
 
 [ "${1:-}" = quick ] && { echo "all store tests passed (quick)"; exit 0; }
 
@@ -88,4 +92,14 @@ mutant "prealloc: the zero fill runs after the data is written" "-DFK_BUG_PA_FIL
 mutant "prealloc: the state is forgotten after a compaction" "-DFK_BUG_PA_RENAME_FORGETS_STATE" "CRASH_PREALLOC=16384"
 mutant "prealloc: the trim cuts one byte too many" "-DFK_BUG_PA_TRIM_SHORT" "CRASH_PREALLOC=16384"
 mutant "prealloc: a failed zero fill fails the write" "-DFK_BUG_PA_NO_FALLBACK" "CRASH_PREALLOC=16384"
+
+# nosync mutant: the bug makes nosync still issue syncs, so the nosync check (counter must stay at 0) fails
+nosync_mutant() {
+  local flags="-DFK_BUG_NOSYNC_STILL_SYNCS"
+  $cc $warn -Wl,--wrap=fdatasync -Wl,--wrap=fsync $flags "$here/test/nosync_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" "$here/store/io_prealloc.c" -o "$out/m_nosync"
+  timeout 120 "$out/m_nosync" >/dev/null 2>&1 && { printf "  %-52s ALIVE (not killed)\n" "nosync still syncs"; return 1; }
+  printf "  %-52s KILLED\n" "nosync still syncs"
+}
+nosync_mutant
+
 echo "all store tests passed"
