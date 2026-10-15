@@ -75,7 +75,7 @@ SELECT forkdb_close('/tmp/mine.fk');
 
 The URI names the branch by its store id (`b<N>`), which is only stable until the next fork, discard or reset on that store: open it right away.
 
-The SQL functions are `forkdb_init(path[, root[, options]])` (the one option, `'nosync'`, skips every fsync for a throwaway store: about 100 times faster fork and discard on a disk, safe against the death of the process, not against a power cut), `forkdb_fork(path, from, name)`, `forkdb_snapshot(path, from, name)`, `forkdb_discard(path, name)`, `forkdb_reset(path, name[, to])`, `forkdb_compact(path)`, `forkdb_vfs_name(path)`, `forkdb_open_db(path[, ref])`, `forkdb_close(path)`, and `forkdb_diff`, `forkdb_promote` and `forkdb_undo` where the session API is present. The table `forkdb_info` reports the session API, the VFS name and the version. They are direct-only: a view or trigger cannot call them. A store that cannot be opened is an SQL error. The extension stays loaded for the life of the process (it registers a VFS).
+The SQL functions are `forkdb_init(path[, root[, options]])` (the one option, `'nosync'`, skips every fsync for a throwaway store: 6 to 900 times faster per operation depending on the operation and the disk (see [What nosync saves](#what-nosync-saves)), safe against the death of the process, not against a power cut), `forkdb_fork(path, from, name)`, `forkdb_snapshot(path, from, name)`, `forkdb_discard(path, name)`, `forkdb_reset(path, name[, to])`, `forkdb_compact(path)`, `forkdb_vfs_name(path)`, `forkdb_open_db(path[, ref])`, `forkdb_close(path)`, and `forkdb_diff`, `forkdb_promote` and `forkdb_undo` where the session API is present. The table `forkdb_info` reports the session API, the VFS name and the version. They are direct-only: a view or trigger cannot call them. A store that cannot be opened is an SQL error. The extension stays loaded for the life of the process (it registers a VFS).
 
 The other [fkx](docs/FKX-DESIGN.md) operations (list, info, gc) are in the CLI and the C library, not in SQL.
 
@@ -94,12 +94,26 @@ The **session driver** ([SESSION-DESIGN.md](docs/SESSION-DESIGN.md)) uses SQLite
 A commit that returns is meant to survive a power cut, and recovery is meant to yield exactly the state after the last acknowledged operation (or that plus the one operation that was in flight). **That is tested against a simulated disk, not against a real power cut. No real disk was power-cycled, for either mode.**
 
 - **The simulated disk** ([test/simdisk.c](test/simdisk.c), driven by [test/crash_test.c](test/crash_test.c)) is deliberately pessimistic: writes are pending until an fsync, and at a power cut the surviving image is the durable data plus *any subset* of the pending writes, in *any order*, each possibly torn. Seeded workloads (commits, forks, discards, compactions) are cut before every I/O event, including the I/O events of recovery itself and of a compaction, and after a failed fsync. Targeted mutants (for example, commits acknowledged without an fsync) are caught. [DURABLE-STORE.md](docs/DURABLE-STORE.md) has the details and the mutants that were *not* caught.
-- **What the model assumes:** 512-byte sector atomicity, that fsync really makes data durable, and that data does not rot while the machine runs. A drive that lies about fsync, or a file system that loses a file's size update, is outside it. File systems that cannot lock or do not honour fsync (some network mounts) get no protection.
-- **`nosync` stores** (`forkdb_init(path, root, 'nosync')`, for throwaway stores) survive the death of the process, which is tested with real kills. After a power cut they either refuse to open or open to a state the workload had acknowledged, usually an older one, never one it did not have. That claim also rests on the simulator.
+- **What the model assumes:** 512-byte sector atomicity, that fsync really makes data durable (on macOS, forkdb calls plain `fsync` and not `F_FULLFSYNC`, which does not meet that: see [What nosync saves](#what-nosync-saves)), and that data does not rot while the machine runs. A drive that lies about fsync, or a file system that loses a file's size update, is outside it. File systems that cannot lock or do not honour fsync (some network mounts) get no protection.
+- **`nosync` stores** (`forkdb_init(path, root, 'nosync')`, for throwaway stores) survive the death of the process, which is tested with real kills. After a power cut they either refuse to open or open to a state the workload had acknowledged, usually an older one, never one it did not have. That claim rests on the simulator, at the page-store level and under SQLite (images from a power cut before every I/O event: about 45% are refused, and of those that open about 90% are older than the last acknowledged transaction and about half of them are empty; none is a state the workload never had). `forkdb_sync_count()` reports the durability calls a process's stores have made, and is how the tests check that a `nosync` store makes none.
 - **Windows:** the store calls `FlushFileBuffers`, and compaction needs NTFS on Windows 10 1709 or later. The directory sync after a compaction is best effort. Windows runs in CI as a smoke test, with a flush counter, and nothing was tested against a power cut there.
 - **Tested on:** see [Platforms](#platforms-what-is-built-and-tested-where) for what runs where. Not tested on any platform: a power cut.
 
 If you need the durable guarantee, run your own power-cut test on your hardware and file system before relying on it.
+
+## What nosync saves
+
+Measured by CI on its runners (`scripts/bench-nosync.sh`: the median of 5 runs on fresh stores after a warm-up, Node 24; the job summary of `What nosync saves` has each table). Durability calls per operation are the same on every platform (1.03, 4.13, 5.16); the times are not, and are the time of one disk of one runner on one day, not a property of the platform.
+
+| operation (durable ms/op, then `nosync` ms/op, then the ratio) | Linux (ext4) | macOS (APFS, virtual) | Windows (NTFS) |
+|---|---|---|---|
+| commit (insert one row): 1.03 syncs durable, 0 with `nosync` | 0.133, 0.0152, 9x | 0.827, 0.0115, 72x | 5.577, 0.0237, 235x |
+| fork and discard: 4.13 syncs durable, 0 with `nosync` | 0.448, 0.0190, 24x | 0.304, 0.0124, 25x | 21.834, 0.0243, 900x |
+| fork, write, commit, close, discard (a test fixture): 5.16 syncs, 0 | 0.680, 0.1104, 6x | 0.453, 0.0542, 8x | 27.842, 0.0962, 290x |
+
+- **The saving is a property of the disk.** On the Linux runner an fsync costs about 0.1 ms and the saving is 6 to 24 times; on the same operations NTFS on the Windows runner costs about 5 ms and the saving is 235 to 900 times. A local NVMe, a network disk and tmpfs each give another answer (tmpfs: no saving, an fsync costs nothing there). Run `scripts/bench-nosync.sh` with `FK_BENCH_DIR` on the disk you care about.
+- **A durable fork and discard costs 4.13 syncs against 1.03 for a commit.** I have not looked at why.
+- **macOS:** the durable path calls `fsync`, and forkdb never calls `F_FULLFSYNC`. On macOS `fsync` does not ask the drive to empty its own write cache, which `F_FULLFSYNC` does. So a durable store on macOS is weaker against a power cut than the simulator's model (an fsync that really makes data durable) assumes, and the durable macOS figures above are probably the cheaper call for that reason. I have not measured what `F_FULLFSYNC` would cost, or changed the code.
 
 ## Platforms: what is built and tested where
 
@@ -109,12 +123,12 @@ Every row is something CI runs; a blank cell is something that is **not** tested
 |---|---|---|---|
 | Store and VFS tests, power-loss simulator, fuzzer, sanitizers | all | store tests | store tests |
 | Loadable extension builds (`scripts/build-ext.sh`) | `.so`, gcc | `.dylib`, Apple clang | `.dll`, mingw-w64 gcc (not MSVC) |
-| Extension from Node 24's built-in `node:sqlite` (23 tests) | yes (plus 19 fsync-counting `nosync` tests) | yes | yes |
-| Extension from better-sqlite3 13.0.3 (22 tests; 41 on Linux with the `nosync` file) | yes | yes | yes |
+| Extension from Node 24's built-in `node:sqlite` (23 tests, plus the `nosync` file) | yes | yes | yes |
+| Extension from better-sqlite3 13.0.3 (22 tests, plus the `nosync` file) | yes | yes | yes |
 | Extension from Python's `sqlite3` (62 tests) | yes | | |
 | Extension in SQLite 3.24.0, the oldest supported (shell built from the amalgamation) | yes | | |
 
-What runs only on Linux, and why: the Python suite (it uses `LD_PRELOAD` and POSIX signals; whether the macOS and Windows Pythons can load extensions at all has not been checked), and every test that counts `fsync` calls (an `LD_PRELOAD` interposer). So **`nosync` is not behaviour-tested on macOS, and on Windows only by the store-level flush counter**. SQLite versions the extension has run in: 3.24.0 (shell), 3.45.1 (Python), 3.50.0 (C tests), 3.53.x (both Node hosts). 32-bit builds, MSVC, and any macOS or Windows version other than the CI runners' are untested.
+What runs only on Linux, and why: the Python suite (it uses `LD_PRELOAD` and POSIX signals; whether the macOS and Windows Pythons can load extensions at all has not been checked), and the one test per Node host that checks `forkdb_sync_count()` against the `fsync` system calls (an `LD_PRELOAD` interposer). The `nosync` behaviour tests run on all three, counting with `forkdb_sync_count()`. Power loss under `nosync` is simulated, never real, on every platform. SQLite versions the extension has run in: 3.24.0 (shell), 3.45.1 (Python), 3.50.0 (C tests), 3.53.x (both Node hosts). 32-bit builds, MSVC, and any macOS or Windows version other than the CI runners' are untested.
 
 ## Known limitations
 
