@@ -278,8 +278,25 @@ static void w_sibling_remove(void *ctx, fk_io *tmp) {
 
 int fk_file_open(const char *path, fk_io *io) { return fk_file_open_ex(path, io, 0); }
 
+/* The absolute path of w, for every later operation (the temporary file, the rename over the store, the directory sync). A relative path would follow a change of the
+ * process's current directory made after the open and send a compaction to another directory; see fk_file_open_ex in io_file.c. A path that already starts with the long-path prefix
+ * is absolute. Symbolic links are not resolved here (not tested on Windows). */
+static wchar_t *absolute_wpath(wchar_t *w) {
+#ifndef FK_BUG_NO_FULLPATH
+  DWORD n = GetFullPathNameW(w, 0, NULL, NULL);
+  wchar_t *full = n ? malloc((size_t)n * sizeof(wchar_t)) : NULL;
+  DWORD got = full ? GetFullPathNameW(w, n, full, NULL) : 0;
+  if (!full || got == 0 || got >= n) { free(full); free(w); return NULL; }
+  free(w);
+  return full;
+#else
+  return w;
+#endif
+}
+
 int fk_file_open_ex(const char *path, fk_io *io, int flags) {
   wchar_t *wp = to_wpath(path);
+  if (wp) wp = absolute_wpath(wp);
   if (!wp) return -1;
 
   DWORD creation = (GetFileAttributesW(wp) != INVALID_FILE_ATTRIBUTES) ? OPEN_EXISTING : CREATE_NEW;
