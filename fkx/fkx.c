@@ -5,8 +5,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <bcrypt.h> /* BCryptGenRandom: link with -lbcrypt */
+#elif defined(__linux__)
 #include <sys/random.h>
 #include <unistd.h>
+#endif
 
 #include "../vfs/fkvfs.h"
 #include "fkx_internal.h"
@@ -172,7 +180,13 @@ static uint32_t refs(const fkx *x, uint32_t id) { return fkvfs_branch_refs(x->vf
 static uint64_t sys_random(void *ctx) {
   (void)ctx;
   uint64_t v = 0;
+#if defined(_WIN32)
+  if (BCryptGenRandom(NULL, (PUCHAR)&v, (ULONG)sizeof v, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) v = (uint64_t)rand() << 40 ^ (uint64_t)rand() << 20 ^ (uint64_t)rand() ^ GetTickCount64();
+#elif defined(__linux__)
   if (getrandom(&v, sizeof v, 0) != (ssize_t)sizeof v) v = (uint64_t)random() << 32 ^ (uint64_t)random();
+#else
+  arc4random_buf(&v, sizeof v); /* macOS and the BSDs: never fails */
+#endif
   return v;
 }
 /* A uid comes back to the application as an SQL integer (forkdb_fork, forkdb_snapshot). Hosts whose integers are IEEE doubles cannot hold 64 bits:
@@ -296,7 +310,8 @@ int fkx_open(const char *path, const fkx_options *o, fkx **out) {
   fkx_options d;
   fkx_options_default(&d);
   if (!o) o = &d;
-  if (!o->create && access(path, F_OK) != 0) return FKX_ENOENT;
+  struct stat sb;
+  if (!o->create && stat(path, &sb) != 0) return FKX_ENOENT;
   fk_io io;
   int orc = fk_file_open_ex(path, &io, o->nosync ? FK_FILE_NOSYNC : 0);
   if (orc != 0) return orc == FK_ELOCKED ? FKX_ELOCKED : FKX_ESTORE;
