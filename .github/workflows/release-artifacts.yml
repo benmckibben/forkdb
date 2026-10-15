@@ -1,0 +1,211 @@
+name: Release artifacts
+
+# Builds the loadable extension for the three platforms we ship, proves every built library loads and works through the packages' own helpers,
+# and builds the Python wheels and the npm tarball, installing each in a clean environment on every OS. It publishes NOTHING: no registry upload and no release;
+# the artifacts are for a person to look at and attach.
+on:
+  pull_request:
+    paths:
+      - 'ext/**'
+      - 'fkx/**'
+      - 'vfs/**'
+      - 'store/**'
+      - 'scripts/build-ext.sh'
+      - 'scripts/stage-packages.sh'
+      - 'spike/fetch-sqlite.sh'
+      - 'python/**'
+      - 'node/**'
+      - 'test/smoke_*'
+      - '.github/workflows/release-artifacts.yml'
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-latest, ext: so }
+          - { name: darwin-arm64, os: macos-latest, ext: dylib }
+          - { name: windows-x86_64, os: windows-latest, ext: dll }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      # Linux is built inside manylinux_2_28 (glibc 2.28), so the library loads on any glibc distribution from the last several years, not only on one as new as the runner.
+      - name: Build in manylinux_2_28 and strip
+        if: matrix.name == 'linux-x86_64'
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w quay.io/pypa/manylinux_2_28_x86_64 \
+            bash -c 'FK_EXT_OUT=/w/out FK_EXT_STRIP=1 scripts/build-ext.sh'
+
+      # MACOSX_DEPLOYMENT_TARGET: without it the library, and the wheel's tag, would demand the macOS of the runner.
+      - name: Build and strip
+        if: matrix.name != 'linux-x86_64'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+          FK_EXT_OUT: out
+          FK_EXT_STRIP: '1'
+        run: scripts/build-ext.sh
+
+      - name: What was built
+        run: |
+          ls -l out/
+          case '${{ matrix.name }}' in
+            linux-x86_64) objdump -T out/forkdb.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tr '\n' ' '; echo ;;
+            darwin-arm64) file out/forkdb.dylib; otool -l out/forkdb.dylib | grep -A3 LC_BUILD_VERSION ;;
+            windows-x86_64) objdump -p out/forkdb.dll | grep 'DLL Name' ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out/forkdb.${{ matrix.ext }}
+          if-no-files-found: error
+
+  smoke:
+    name: Smoke test the built library (${{ matrix.name }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-latest, ext: so }
+          - { name: darwin-arm64, os: macos-latest, ext: dylib }
+          - { name: windows-x86_64, os: windows-latest, ext: dll }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: lib
+
+      - name: Python smoke test (python/forkdb with the built library)
+        run: FORKDB_EXTENSION_PATH="$PWD/lib/forkdb.${{ matrix.ext }}" python test/smoke_py.py
+
+      - name: Node smoke test (node/ with the built library)
+        run: FORKDB_EXTENSION_PATH="$PWD/lib/forkdb.${{ matrix.ext }}" node --no-warnings test/smoke_node.js
+
+  python-wheel:
+    name: Python wheel (${{ matrix.name }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-latest, ext: so, plat: '--config-setting=--build-option=--plat-name=manylinux_2_28_x86_64', venvpy: venv/bin/python }
+          - { name: darwin-arm64, os: macos-latest, ext: dylib, plat: '', venvpy: venv/bin/python }
+          - { name: windows-x86_64, os: windows-latest, ext: dll, plat: '', venvpy: venv/Scripts/python }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: lib
+
+      - name: Build the wheel around the built library
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+        run: |
+          scripts/stage-packages.sh python lib/forkdb.${{ matrix.ext }}
+          python -m pip install --upgrade build wheel setuptools
+          (cd python && python -m build --wheel ${{ matrix.plat }} -o ../dist .)
+          ls -l dist
+
+      # A clean virtual environment with nothing but the wheel: no FORKDB_EXTENSION_PATH, no repository on the path, so the library it loads is the one inside the wheel.
+      - name: Install the wheel in a clean environment and smoke test it
+        run: |
+          python -m venv venv
+          ${{ matrix.venvpy }} -m pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          FORKDB_SMOKE_INSTALLED=1 "$GITHUB_WORKSPACE/${{ matrix.venvpy }}" "$GITHUB_WORKSPACE/test/smoke_py.py"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.name }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  npm-package:
+    name: npm tarball
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with: { name: linux-x86_64, path: artifacts/linux-x86_64 }
+      - uses: actions/download-artifact@v4
+        with: { name: darwin-arm64, path: artifacts/darwin-arm64 }
+      - uses: actions/download-artifact@v4
+        with: { name: windows-x86_64, path: artifacts/windows-x86_64 }
+
+      - name: Pack
+        run: |
+          scripts/stage-packages.sh node artifacts
+          (cd node && npm pack --silent)
+          mkdir -p dist && mv node/sqlite-forkdb-*.tgz dist/
+          tar -tzf dist/sqlite-forkdb-*.tgz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: dist/sqlite-forkdb-*.tgz
+          if-no-files-found: error
+
+  npm-install-smoke:
+    name: Install the npm tarball (${{ matrix.os }})
+    needs: npm-package
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-tarball
+          path: tarball
+
+      # A clean directory with nothing but the tarball: the library it loads is the one for this OS inside the package.
+      - name: Install the tarball in a clean directory and smoke test it
+        run: |
+          mkdir "$RUNNER_TEMP/consumer" && cd "$RUNNER_TEMP/consumer"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund "$GITHUB_WORKSPACE"/tarball/sqlite-forkdb-*.tgz
+          FORKDB_SMOKE_INSTALLED=1 node --no-warnings "$GITHUB_WORKSPACE/test/smoke_node.js"
