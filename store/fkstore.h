@@ -151,7 +151,11 @@ int fk_crc32c_select(int want_hw);
  * fk_file_close or the process ends, so a process that dies releases it. Two processes writing one store file lose acknowledged commits and
  * can leave a file that no longer opens (measured: 8 of 8 runs), so the second one is refused instead. The lock belongs to the open file
  * description: a second fk_file_open of the same path in this process is refused as well, and fork() children share the parent's. A
- * filesystem that cannot lock (ENOLCK, EOPNOTSUPP: some network filesystems) is not refused, only a proven conflict is. */
+ * filesystem that cannot lock (ENOLCK, EOPNOTSUPP: some network filesystems) is not refused, only a proven conflict is.
+ * The lock is held across fk_compact: the replacement file is locked before it is renamed over the store (until an independent review of 6f9e979 found it, it was not, and the
+ * first compaction on Linux or macOS ended the guarantee). The replacement also has the store's mode, and its owner where the process may set it.
+ * The path is resolved once, when the store is opened, to an absolute path with symbolic links followed, and every later operation (the temporary file, the rename, the directory
+ * sync) uses that: a chdir() made after the open, or a store opened through a symbolic link, does not send a compaction somewhere else. */
 int fk_file_open(const char *path, fk_io *io);
 /* The same with flags. FK_FILE_NOSYNC: fsync, fdatasync, FlushFileBuffers and the directory sync are not issued (they return success), for the life of this open.
  * That is for stores that are throwaway by design (a database per test, a build cache): the writes still reach the operating system, so the data survives the

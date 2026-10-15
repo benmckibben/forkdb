@@ -18,6 +18,17 @@
 #endif
 
 static int fails;
+#ifndef FK_TEST_HOOKS
+#error "file_test.c needs -DFK_TEST_HOOKS (scripts/test-store.sh sets it): its deterministic race test uses a hook that io_file.c only has with that flag"
+#endif
+/* The hook of io_file.c (compiled in with -DFK_TEST_HOOKS) and what the test makes it do. */
+extern void (*fk_test_after_open_hook)(void);
+static fk_store *g_hook_store;
+static int g_hook_ran;
+static void compact_in_hook(void) { g_hook_ran++; (void)fk_compact(g_hook_store); }
+#ifndef RACE_COMPACTIONS
+#define RACE_COMPACTIONS 400 /* compactions the racing opener has to get through */
+#endif
 #define CHECK(c, msg) do { int ok_ = !!(c); printf("  %s %s\n", ok_ ? "PASS" : "FAIL", msg); if (!ok_) fails++; } while (0)
 
 static void page(uint8_t *p, int v) { for (int i = 0; i < (int)FK_PAGE; i++) p[i] = (uint8_t)(v * 31 + i); }
@@ -445,6 +456,107 @@ int main(void) {
     CHECK(WIFEXITED(lst) && WEXITSTATUS(lst) == 0 && open_path(lp, &lio, &ls) && has(ls, 0, 0, 7), "a process that dies holding the lock releases it: the next open succeeds");
     fk_close(ls); fk_file_close(&lio);
     CHECK(fk_file_open("/nonexistent-dir/x.fk", &lio2) == -1, "any other failure to open is still -1, not FK_ELOCKED");
+  }
+
+  printf("== compaction keeps what makes the file the store's: its mode, its place behind a symbolic link, and the lock against an opener that races it\n");
+  {
+    /* the mode: a store its owner made 0600 used to come out of a compaction 0644 (the replacement was created with a fixed mode) */
+    static const mode_t modes[] = { 0600, 0640, 0644 };
+    for (size_t mi = 0; mi < sizeof modes / sizeof *modes; mi++) {
+      char mp[300], msg[200];
+      snprintf(mp, sizeof mp, "%s/mode%03o.fk", dir, (unsigned)modes[mi]);
+      remove(mp);
+      CHECK(build_garbage(mp, &io, &s) && chmod(mp, modes[mi]) == 0, "a store with garbage and a chosen mode");
+      long before_c = fsz(mp);
+      CHECK(fk_compact(s) == 0 && fsz(mp) < before_c, "compact (the file really shrank)");
+      struct stat mst;
+      snprintf(msg, sizeof msg, "mode %04o is still %04o after the compaction", (unsigned)modes[mi], (unsigned)modes[mi]);
+      CHECK(stat(mp, &mst) == 0 && (mst.st_mode & 07777) == modes[mi], msg);
+      fk_close(s); fk_file_close(&io);
+    }
+
+    /* a symbolic link: the compaction used to rename the new file over the link, leaving a regular file where the link was and the real file stale */
+    {
+      char rl[300], ll[300];
+      snprintf(rl, sizeof rl, "%s/real.fk", dir);
+      snprintf(ll, sizeof ll, "%s/link.fk", dir);
+      remove(rl); remove(ll);
+      CHECK(symlink(rl, ll) == 0, "a symbolic link to a file that does not exist yet");
+      CHECK(build_garbage(ll, &io, &s), "open the store through the link (this creates the file it points to), and fill it");
+      long before_l = fsz(rl);
+      CHECK(fk_compact(s) == 0, "compact");
+      struct stat lst, rst;
+      CHECK(lstat(ll, &lst) == 0 && S_ISLNK(lst.st_mode), "the link is still a symbolic link afterwards");
+      CHECK(stat(rl, &rst) == 0 && S_ISREG(rst.st_mode) && fsz(rl) < before_l, "and the file it points to is the one that was compacted");
+      CHECK(commit1(s, 0, 0, 3000, 2) == 0, "a commit after the compaction");
+      fk_close(s); fk_file_close(&io);
+      CHECK(open_path(rl, &io, &s) && has(s, 0, 0, 3000) && has(s, 0, 1, 9) && !fk_branch_alive(s, 2), "opened by its real name: the commit and the earlier data are in it");
+      fk_close(s); fk_file_close(&io);
+      CHECK(open_path(ll, &io, &s) && has(s, 0, 0, 3000), "opened through the link: the same");
+      fk_close(s); fk_file_close(&io);
+    }
+
+    /* The same race, without depending on timing. With FK_TEST_HOOKS the open calls a function between its open() and its flock(); here that function runs the holder's compaction, so
+     * the file the opener has open is replaced (and the holder's descriptor for it closed, releasing its lock) at exactly the instant the race needs. Without the check that what was
+     * locked is still the file at the path, the opener then locks the old file, which nobody can reach, and is let in. With it, it starts again, finds the new file locked, and is refused. */
+    {
+      char hp[300];
+      snprintf(hp, sizeof hp, "%s/hook.fk", dir);
+      remove(hp);
+      CHECK(build_garbage(hp, &io, &s), "open the store, with garbage");
+      long hook_before = fsz(hp);
+      g_hook_store = s;
+      g_hook_ran = 0;
+      fk_test_after_open_hook = compact_in_hook;
+      fk_io hio;
+      int hrc = fk_file_open(hp, &hio);
+      fk_test_after_open_hook = NULL;
+      CHECK(g_hook_ran == 1, "the hook ran: the holder's compaction happened between the opener's open() and flock()");
+      CHECK(fsz(hp) < hook_before, "and it really replaced the file (it shrank)");
+      CHECK(hrc == FK_ELOCKED, "the opener, whose file was replaced under it, is refused with FK_ELOCKED instead of being let in on a file nobody can reach");
+      if (hrc == 0) fk_file_close(&hio);
+      CHECK(commit1(s, 0, 0, 4000, 2) == 0, "the holder can still commit, and its commit is in the file at the path");
+      fk_close(s); fk_file_close(&io);
+      CHECK(open_path(hp, &io, &s) && has(s, 0, 0, 4000), "reopened: the holder's commit is there");
+      fk_close(s); fk_file_close(&io);
+    }
+
+    /* an opener that races the compaction. The compaction renames a new file over the store and then closes the old one. An opener that opened the old file just before the rename, and
+     * locked it just after that close, would hold a lock on a file nobody can reach, and its writes would go into a file that is already unlinked. The opener checks that what it
+     * locked is still the file at the path. The opener is forked BEFORE the store is opened: a child made afterwards inherits the holder's descriptor, and with it the lock on the old
+     * file, which would hide the race. */
+    {
+      char rp[300];
+      snprintf(rp, sizeof rp, "%s/race.fk", dir);
+      remove(rp);
+      int go[2];
+      CHECK(pipe(go) == 0, "a pipe to start the racing opener and to stop it");
+      pid_t rpid = fork();
+      if (rpid == 0) {
+        close(go[1]);
+        char ch;
+        if (read(go[0], &ch, 1) != 1) _exit(5); /* wait until the store is open */
+        fcntl(go[0], F_SETFL, O_NONBLOCK);
+        long granted = 0;
+        for (;;) {
+          fk_io rio;
+          if (fk_file_open(rp, &rio) == 0) { granted++; fk_file_close(&rio); }
+          if (read(go[0], &ch, 1) == 0) break; /* end of file: the parent is done */
+        }
+        _exit(granted ? 4 : 0);
+      }
+      close(go[0]);
+      CHECK(build_garbage(rp, &io, &s), "open the store, with garbage");
+      CHECK(write(go[1], "g", 1) == 1, "start the racing opener");
+      int compact_ok = 1;
+      for (int i = 0; i < RACE_COMPACTIONS && compact_ok; i++) compact_ok = fk_compact(s) == 0;
+      CHECK(compact_ok, "compact the store over and over while the other process tries to open it all the time");
+      close(go[1]);
+      int rst2 = 0; waitpid(rpid, &rst2, 0);
+      CHECK(WIFEXITED(rst2) && WEXITSTATUS(rst2) == 0, "the racing opener was never let in (exit status 4 means it got a lock on a store that was being held)");
+      CHECK(garbage_state_ok(s), "and the holder's data is intact");
+      fk_close(s); fk_file_close(&io);
+    }
   }
 
   printf("== a process that dies without closing\n");
