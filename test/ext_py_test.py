@@ -890,7 +890,9 @@ c.execute("select forkdb_close(?)", (P,)).fetchall()
 
     def test_nosync_with_other_words_and_separators(self):
         cases = [
-            ("nosync", "nosync", "nosync with spaces and comma"),
+            ("nosync, nosync", "nosync", "nosync with spaces and comma"),
+            (",nosync", "nosync", "a leading comma"),
+            ("  nosync  ,  ", "nosync", "runs of separators"),
             ("nosync,", "nosync", "nosync with trailing comma"),
             ("nosync nosync", "nosync", "two nosync words"),
         ]
@@ -907,13 +909,13 @@ c.execute("select forkdb_close(?)", (P,)).fetchall()
         self.assertEqual(c2, 0, "nosync with root 'trunk' should give 0 fsyncs, got %d" % c2)
 
     def test_unknown_option_is_an_error(self):
-        for opt in ("nosnyc", "nosync bogus"):
+        for opt in ("nosnyc", "nosync bogus", "nosync,bogus", "nosync, bogus"):
             with self.subTest(opt=opt):
                 path = os.path.join(self.dir, "bad-%s.fk" % opt.replace(" ", "-"))
                 r, count = self.run_counted(self.INIT_WORK_SHORT_SCRIPT, path, "main", opt)
                 self.assertNotEqual(r.returncode, 0, "expected error for opt=%r, got rc=0" % (opt,))
                 self.assertIn("unknown option", r.stderr)
-                if opt == "nosync bogus":
+                if "bogus" in opt:
                     self.assertIn("bogus", r.stderr)
                 self.assertIn("OperationalError", r.stderr)
 
