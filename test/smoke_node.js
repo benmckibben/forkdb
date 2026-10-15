@@ -5,7 +5,8 @@ const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
 const { DatabaseSync } = require('node:sqlite');
-const forkdb = process.env.FORKDB_SMOKE_INSTALLED ? require('sqlite-forkdb') : require(path.join(__dirname, '..', 'node'));
+// Installed: resolved from the current directory (the clean consumer directory with node_modules), never from this file's directory, which is inside the repository.
+const forkdb = process.env.FORKDB_SMOKE_INSTALLED ? require(require.resolve('sqlite-forkdb', { paths: [process.cwd()] })) : require(path.join(__dirname, '..', 'node'));
 
 const failures = [];
 function check(cond, what) { console.log((cond ? 'ok   ' : 'FAIL ') + what); if (!cond) failures.push(what); }
@@ -13,6 +14,7 @@ const one = (db, sql, ...a) => Object.values(db.prepare(sql).get(...a))[0];
 
 console.log('node', process.version, '| platform', process.platform + '-' + process.arch, '| sqlite-forkdb', forkdb.version);
 console.log('library:', forkdb.extensionPath());
+if (process.env.FORKDB_SMOKE_INSTALLED) check(forkdb.extensionPath().split(path.sep).includes('node_modules'), 'the library is the one bundled in the installed package');
 let refused = false;
 try { forkdb.load(new DatabaseSync(':memory:')); } catch (e) { refused = /allowExtension/.test(e.message); }
 check(refused, 'load() on a database opened without allowExtension says what to do');

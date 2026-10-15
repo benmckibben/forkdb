@@ -25,6 +25,13 @@ permissions:
   contents: read
 
 jobs:
+  versions:
+    name: One version in five places
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check-versions.sh
+
   build:
     name: Build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
@@ -99,8 +106,23 @@ jobs:
           name: ${{ matrix.name }}
           path: lib
 
+      # The Python that actions/setup-python installs on macOS is built without Connection.enable_load_extension (measured: 3.12.10 with SQLite 3.49.1), so forkdb cannot be
+      # loaded into it. Use the first Python on the runner that has it, and say which; fail if there is none.
+      - name: Find a Python whose sqlite3 can load extensions
+        run: |
+          for cand in python python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do
+            command -v "$cand" > /dev/null || continue
+            if "$cand" -c 'import sqlite3,sys; sys.exit(0 if hasattr(sqlite3.connect(":memory:"), "enable_load_extension") else 1)'; then
+              echo "using $(command -v "$cand"): $("$cand" -c 'import sys; print(sys.version.split()[0])')"
+              echo "SMOKE_PY=$(command -v "$cand")" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "$cand has no enable_load_extension"
+          done
+          echo "no Python on this runner can load SQLite extensions"; exit 1
+
       - name: Python smoke test (python/forkdb with the built library)
-        run: FORKDB_EXTENSION_PATH="$PWD/lib/forkdb.${{ matrix.ext }}" python test/smoke_py.py
+        run: FORKDB_EXTENSION_PATH="$PWD/lib/forkdb.${{ matrix.ext }}" "$SMOKE_PY" test/smoke_py.py
 
       - name: Node smoke test (node/ with the built library)
         run: FORKDB_EXTENSION_PATH="$PWD/lib/forkdb.${{ matrix.ext }}" node --no-warnings test/smoke_node.js
@@ -139,9 +161,24 @@ jobs:
           ls -l dist
 
       # A clean virtual environment with nothing but the wheel: no FORKDB_EXTENSION_PATH, no repository on the path, so the library it loads is the one inside the wheel.
+      # The Python that actions/setup-python installs on macOS is built without Connection.enable_load_extension (measured: 3.12.10 with SQLite 3.49.1), so forkdb cannot be
+      # loaded into it. Use the first Python on the runner that has it, and say which; fail if there is none.
+      - name: Find a Python whose sqlite3 can load extensions
+        run: |
+          for cand in python python3 /opt/homebrew/bin/python3 /usr/local/bin/python3; do
+            command -v "$cand" > /dev/null || continue
+            if "$cand" -c 'import sqlite3,sys; sys.exit(0 if hasattr(sqlite3.connect(":memory:"), "enable_load_extension") else 1)'; then
+              echo "using $(command -v "$cand"): $("$cand" -c 'import sys; print(sys.version.split()[0])')"
+              echo "SMOKE_PY=$(command -v "$cand")" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "$cand has no enable_load_extension"
+          done
+          echo "no Python on this runner can load SQLite extensions"; exit 1
+
       - name: Install the wheel in a clean environment and smoke test it
         run: |
-          python -m venv venv
+          "$SMOKE_PY" -m venv venv
           ${{ matrix.venvpy }} -m pip install dist/*.whl
           cd "$RUNNER_TEMP"
           FORKDB_SMOKE_INSTALLED=1 "$GITHUB_WORKSPACE/${{ matrix.venvpy }}" "$GITHUB_WORKSPACE/test/smoke_py.py"

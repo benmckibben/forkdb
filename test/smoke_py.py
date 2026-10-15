@@ -21,6 +21,8 @@ def check(cond, what):
 
 print("python", sys.version.split()[0], "| sqlite", sqlite3.sqlite_version, "| platform", sys.platform, "| forkdb", forkdb.__version__)
 print("library:", forkdb.extension_path())
+if os.environ.get("FORKDB_SMOKE_INSTALLED"):
+    check("site-packages" in forkdb.extension_path() and "_lib" in forkdb.extension_path(), "the library is the one bundled in the installed wheel")
 host = forkdb.connect()
 info = dict(host.execute("select key, value from forkdb_info").fetchall())
 check(info.get("vfs") == "forkdb", "forkdb_info reports the vfs")

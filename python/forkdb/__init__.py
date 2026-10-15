@@ -13,7 +13,7 @@ import os
 import sqlite3
 import sys
 
-__version__ = "0.1.1"
+__version__ = "0.1.0"
 __all__ = ["extension_path", "load", "connect", "open_branch", "__version__"]
 
 _SUFFIX = {"win32": ".dll", "darwin": ".dylib"}.get(sys.platform, ".so")
