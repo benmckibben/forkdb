@@ -34,6 +34,13 @@ Changesets are held in memory during diff, promote, and undo. SQLite's session A
 - **A store opened with `nosync` is not power-loss safe.** It survives the death of the process; after a power cut it refuses to open or opens to a state its workload had acknowledged, usually an older one (see DURABLE-STORE.md). Not tested on a real power cut.
 - **`fsync` semantics.** The store calls `fsync` after every commit unit and after recovery truncation. A file system that does not honour `fsync` (network mounts with write-back caching) can lose committed data on power loss.
 
+## Platforms
+
+- **The README's table says what runs where.** Windows needs mingw-w64 gcc to build the extension (`scripts/build-ext.sh` does not drive MSVC); macOS needs a compiler that takes gcc-style flags (Apple clang is what CI uses). 32-bit builds are untested.
+- **The 3.24 minimum is a stated minimum.** The extension refuses to load below SQLite 3.24 with a message (tested against a 3.23.1 shell), and works in a 3.24.0 shell (tested: init, attach, fork, edit, integrity check, snapshot, discard, reopen from a second process). With the guard lowered in a scratch copy, the same scenario also worked in 3.23.1, so the number is a policy, not a measured crash. Nothing older than 3.23.1 was tried.
+- **The library pins itself** so that closing the connection that loaded it does not unload it under the others: `dlopen(RTLD_NODELETE)` on Linux and macOS, `GetModuleHandleEx` with the pin flag on Windows. Without it a Windows run segfaulted at the first test that closes the loader (CI, first run); the Node loading tests cover it on all three.
+- **`fsync`-counting tests are Linux-only** (an `LD_PRELOAD` interposer), so `nosync` has no behaviour test on macOS, and on Windows only the store-level flush counter. The Python suite is Linux-only.
+
 ## Snapshots
 
 - Snapshots can be up to 1 GiB of metadata stream (`FK_MAX_SNAP`). This is the serialised layer graph, not the page data.
@@ -51,7 +58,7 @@ Changesets are held in memory during diff, promote, and undo. SQLite's session A
 
 ## No bundled SQLite
 
-The library and extension need a host that exposes the session API. The extension reports whether it found one through `forkdb_info.session_api`. Without it, diff, promote and undo return `FKX_ENOSESSION`.
+Only diff, promote and undo need the SQLite session API. The portable extension is built without it and reports `forkdb_info.session_api = 0` (in all three hosts it has run in); those three functions then return `FKX_ENOSESSION`. Branching, forks, snapshots, discard, reset and compaction need none of it. The library and the CLI are built with it; see SESSION-DESIGN.md for the host survey.
 
 The CLI bundles its own session-variant SQLite — it works offline on any store.
 
@@ -60,5 +67,5 @@ The CLI bundles its own session-variant SQLite — it works offline on any store
 - The store and VFS each have power-loss test suites (10 seeds × 12+ operations with crash injection at every I/O event) plus over a dozen targeted mutants each.
 - The fkx layer has a logic pass (111 checks), a power-loss pass (session driver: 10 seeds × 20 operations covering both replay and fast-forward), and 20 mutants — 10 core, 10 session — each caught by at least one test variant.
 - The CLI and extension have smoke tests that exercise every operation end-to-end. The extension test loads via `sqlite3_load_extension`.
-- Node: the extension is tested in node:sqlite (Node 24, `scripts/test-ext-node.sh`: loading, branches, locking, nosync, worker threads). better-sqlite3 13.0.3 is tested too (`scripts/test-ext-bsq.sh`: loading, branches, locking, worker threads, nosync; it needs `SQLITE_USE_URI=1`, see above). Not tested: other Node bindings, other better-sqlite3 versions, Node versions other than 24, macOS and Windows. node:sqlite reads SQL integers as JavaScript numbers and throws above 2^53, which is why new branch ids are 53 bits (this was found by that suite).
-- Untested: OOM injection, virtual table handling at the SQL level, and the host survey (macOS, python.org SQLite, Windows).
+- Node: the extension is tested in node:sqlite (Node 24, `scripts/test-ext-node.sh`: loading, branches, locking, nosync, worker threads). better-sqlite3 13.0.3 is tested too (`scripts/test-ext-bsq.sh`: loading, branches, locking, worker threads, nosync; it needs `SQLITE_USE_URI=1`, see above). Both Node suites also run on macOS and Windows in CI, without the nosync files. Not tested: other Node bindings, other better-sqlite3 versions, Node versions other than 24. node:sqlite reads SQL integers as JavaScript numbers and throws above 2^53, which is why new branch ids are 53 bits (this was found by that suite).
+- Untested: OOM injection, virtual table handling at the SQL level, and Python's sqlite3 on macOS and Windows (the Python suite is Linux-only; python.org builds of SQLite included).
