@@ -20,9 +20,11 @@ crash_src="-DFK_MAX_BRANCHES=8 $here/test/crash_test.c $here/test/simdisk.c $her
 fdata=("-DFK_TEST_DATA=\"$here/test/data\"") # the path of the version 2 fixture, as a C string
 
 echo "== real-file tests"
-$cc $warn "${fdata[@]}" "$here/test/file_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" "$here/store/io_prealloc.c" -o "$out/file_test"
+$cc $warn -DFK_TEST_HOOKS "${fdata[@]}" "$here/test/file_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" "$here/store/io_prealloc.c" -o "$out/file_test"
 "$out/file_test"
 
+# file_test.c is built with FK_TEST_HOOKS: io_file.c then calls a hook between the open() and the flock() of an open, which the test uses to run a compaction at the one instant at
+# which the opener's file can be replaced under it (a race, made deterministic). The mutants below use a short timing-based stress test on top of that (25 compactions).
 # The nosync test counts the fsync and fdatasync calls of io_file.c: that one file is built with test/nosync_redirect.h force-included (no linker option, so this also builds on macOS).
 build_nosync_test() { # output [extra compiler flags]
   local o=$1; shift
@@ -45,6 +47,17 @@ echo "== compaction smoke test"
 build_compact_smoke "$out/compact_smoke"
 (cd "$out" && ./compact_smoke)
 
+# The single-opener lock must survive a compaction (the replacement file is locked before it is renamed in), and a store must keep its place when the process changes directory:
+# the same test runs on Windows in CI. (file_test.c has the POSIX-only parts: the mode, a symbolic link, and an opener that races the compaction.)
+build_lock_smoke() { # output [extra compiler flags]
+  local o=$1; shift
+  # shellcheck disable=SC2086
+  $cc $warn "$@" "$here/test/lock_smoke.c" "$here/store/fkstore.c" "$here/store/io_file.c" "$here/store/io_prealloc.c" -o "$o"
+}
+echo "== lock and path smoke test"
+build_lock_smoke "$out/lock_smoke"
+(cd "$out" && ./lock_smoke)
+
 echo "== power-loss tests (${seeds} seeds x ${ops} operations, address and undefined-behaviour sanitizers on)"
 # shellcheck disable=SC2086
 $cc $warn -fsanitize=address,undefined -fno-sanitize-recover=undefined $crash_src -o "$out/crash_test"
@@ -61,7 +74,7 @@ mutant() { # name, flags, [env for the power-loss run, e.g. CRASH_PREALLOC=16384
   # shellcheck disable=SC2086
   $cc $warn $flags $crash_src -o "$out/m_crash"
   # shellcheck disable=SC2086
-  $cc $warn $flags "${fdata[@]}" "$here/test/file_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" "$here/store/io_prealloc.c" -o "$out/m_file"
+  $cc $warn -DFK_TEST_HOOKS -DRACE_COMPACTIONS=25 $flags "${fdata[@]}" "$here/test/file_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" "$here/store/io_prealloc.c" -o "$out/m_file"
   # A broken store may hang instead of failing (an endless loop): five minutes is far more than a healthy run needs (a few
   # seconds for the file tests, under two minutes for the power-loss run), and a hang counts as caught.
   env $cenv timeout 300 "$out/m_crash" 25 8 >/dev/null 2>&1 || c=YES
@@ -69,6 +82,8 @@ mutant() { # name, flags, [env for the power-loss run, e.g. CRASH_PREALLOC=16384
   # shellcheck disable=SC2086
   build_compact_smoke "$out/m_smoke" $flags
   (cd "$out" && timeout 300 ./m_smoke >/dev/null 2>&1) || f=YES
+  build_lock_smoke "$out/m_lock" $flags
+  (cd "$out" && rm -rf lock_smoke_dir && timeout 300 ./m_lock >/dev/null 2>&1) || f=YES
   printf "  %-52s power-loss harness: %-3s  file tests: %s\n" "$name" "$c" "$f"
   [ "$c" = YES ] || [ "$f" = YES ]
 }
@@ -83,6 +98,10 @@ mutant "compaction: tombstones dropped too early" "-DFK_BUG_COMPACT_DROP_TOMB"
 mutant "compaction: copies a damaged page without checking" "-DFK_BUG_COMPACT_NO_VERIFY"
 mutant "open: leftover compaction file is not deleted" "-DFK_BUG_COMPACT_NO_CLEANUP"
 mutant "file: two openers are not refused (no file lock)" "-DFK_BUG_NO_FILE_LOCK"
+mutant "file: a compaction drops the single-opener lock" "-DFK_BUG_COMPACT_DROPS_LOCK"
+mutant "file: a compaction widens the mode of the store to 0644" "-DFK_BUG_COMPACT_WIDENS_MODE"
+mutant "file: the path is not resolved when the store is opened" "-DFK_BUG_NO_REALPATH"
+mutant "file: an opener does not check it locked the file at the path" "-DFK_BUG_NO_INODE_RECHECK"
 mutant "hardware CRC32C leaves out the last bytes of a buffer" "-DFK_BUG_CRC_HW_TAIL"
 mutant "index: a rehash loses one entry" "-DFK_BUG_INDEX_GROW_DROP"
 mutant "index: a collision is treated as a miss" "-DFK_BUG_INDEX_NO_PROBE"

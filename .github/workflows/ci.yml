@@ -81,6 +81,12 @@ jobs:
           gcc -Wall -Wextra -std=gnu11 -O2 -Istore -DFK_COUNT_FLUSH test\compact_smoke.c store\fkstore.c store\io_file.c store\io_prealloc.c build\io_file_win_counted.o -o build\compact_smoke.exe
           build\compact_smoke.exe
 
+      - name: Lock and path smoke test (the single-opener lock survives a compaction, and a store keeps its place when the process changes directory)
+        run: |
+          if not exist build mkdir build
+          gcc -Wall -Wextra -std=gnu11 -O2 -Istore test\lock_smoke.c store\fkstore.c store\io_file.c store\io_file_win.c store\io_prealloc.c -o build\lock_smoke.exe
+          build\lock_smoke.exe
+
   macos:
     name: macOS store tests
     runs-on: macos-latest
