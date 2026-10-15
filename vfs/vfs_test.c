@@ -858,7 +858,7 @@ static void power_loss(int batch, uint64_t pa) {
   rng_seed(&r, 12345u + (uint64_t)batch);
   long images = 0, viol = 0, points = 0, dropped_acks = 0, half = 0, ns_images = 0, ns_refused = 0, ns_opened = 0, ns_lagged = 0, ns_lost_all = 0, ns_viol = 0;
   for (int mode = 0; mode < 3; mode++) { /* 0: the power is cut before I/O event N; 1: the fsync number N fails, then the power is cut; 2: as 0, on a store opened with no syncs (FK_FILE_NOSYNC) */
-    for (long n = (mode ? 1 : 0); n <= events + 1; n += step) {
+    for (long n = (mode == 1 ? 1 : 0); n <= events + 1; n += step) {
       SimDisk w;
       sim_init(&w, NULL, 0);
       if (mode == 0) w.crash_at = n;
