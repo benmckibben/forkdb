@@ -1,8 +1,8 @@
 # Durable layer store
 
-Status: **implemented and tested in isolation** ([store/](../store), [test/](../test)), including compaction; not yet connected to the SQLite VFS. This document says what the store promises, how it keeps the promise across a power cut, how that was tested, and what it does not do.
+Status: **implemented and tested** ([store/](../store), [test/](../test)), including compaction. The SQLite VFS ([vfs/](../vfs)) and the branch layer ([fkx/](../fkx)) are built on it. This document says what the store promises, how it keeps the promise across a power cut, how that was tested, and what it does not do.
 
-The store holds the pages of many database branches in **one append-only log file**. A fork is one small record. The log is rewritten by compaction when it fills with pages nobody can see any more. Nothing here depends on SQLite: it is a page store with branches, and the VFS from the spike will sit on top of it.
+The store holds the pages of many database branches in **one append-only log file**. A fork is one small record. The log is rewritten by compaction when it fills with pages nobody can see any more. Nothing here depends on SQLite: it is a page store with branches, and the VFS in [vfs/](../vfs) sits on top of it.
 
 ## What it promises
 
@@ -239,7 +239,7 @@ Which test catches which is not what I expected in two places, and I would rathe
 - **A tombstone-heavy shrink** is tested for correctness but not for cost.
 - **Limits are small:** 1,024 branches alive at once (`FK_ELIMIT` when full), 2^28 pages per database, whole transactions held in memory until commit.
 - **A shrink walks every page number it removes** (one table lookup each, so time is proportional to the size removed, though memory is not).
-- **It is not yet the SQLite VFS.** Connecting them (journal and WAL files, the checkpoint-then-fork rule, locking) is separate work.
+- **The store is not the SQLite VFS.** It is a page store with branches; the VFS in [vfs/](../vfs) sits on top of it, and has its own power-loss tests.
 - Tests ran on one machine, on a real file only for a normal close, a process killed without closing (also in the middle of a compaction, before and after the rename), an appended torn tail, a spliced record, a damaged record, a damaged page met during compaction, a full disk (writes to the temporary file failing), and relabelled format versions. A real power cut was not performed.
 
 ## Running the tests

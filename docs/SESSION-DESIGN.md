@@ -1,6 +1,6 @@
 # Session extension on the VFS: design note
 
-Status: **design, decided by Ben on 2026-10-12; steps 1 (the session build, the one-branch-write contract and the host survey) and 2 (store format v4) of the build plan are implemented, the rest is not.** What was measured is in [vfs/results/session-experiments.txt](../vfs/results/session-experiments.txt) (produced by [vfs/experiments/session-experiments.sh](../vfs/experiments/session-experiments.sh), a throwaway program that drives SQLite's session extension through the real VFS and a real file store). Where a statement below is reasoned and not measured, it says so.
+Status: **design, decided by Ben on 2026-10-12; steps 1 to 4 of the build plan below are implemented (the session build and host survey, store format v4, the branch layer, the SQL functions and the CLI); the sections that say otherwise were written before that and are kept as the record of the decisions.** What was measured is in [vfs/results/session-experiments.txt](../vfs/results/session-experiments.txt) (produced by [vfs/experiments/session-experiments.sh](../vfs/experiments/session-experiments.sh), a throwaway program that drives SQLite's session extension through the real VFS and a real file store). Where a statement below is reasoned and not measured, it says so.
 
 The goal ([DESIGN.md](DESIGN.md), v0.1 scope): **diff, promote and undo** for branches, through SQLite session changesets. Promote fast-forwards when the parent has not moved, and otherwise replays the changeset and reports conflicts. The three open questions were: what happens when a transaction touches two attached branches, what schema drift does to a replay, and how to get a SQLite with the session extension.
 
@@ -153,6 +153,8 @@ Each step is its own PR, reviewed before the next.
 
 ## Not covered
 
+(As written on 2026-10-12. Since then DDL for new tables, indexes and triggers is replayed (#26), and so is virtual table DDL (#33); see KNOWN-LIMITS.md for the present state.)
+
 One process (as the store); the driver runs under the handle's mutex like every other operation. Two forks merged into each other (only fork into parent). Re-basing a fork. Replaying DDL (added tables and columns are the obvious next case; the data of a new table would need an empty base to diff against). Virtual tables and FTS shadow tables. Large changesets are held in memory (a streaming interface exists). The cost figures are one machine, WSL2, and in-memory or small-commit workloads; a real-disk figure for the diff was not taken.
 
 ## Decisions (Ben, 2026-10-12)
@@ -160,5 +162,5 @@ One process (as the store); the driver runs under the handle's mutex like every 
 1. **History is snapshots** (no changeset blobs stored, two branch ids per undo point). Decided.
 2. **Format v4** (reset, metadata, state id) is the step after the session build and before any layer code. Decided.
 3. **Tables without a PRIMARY KEY are a documented limitation.** Read as: replay refuses a fork that changed rows of such a table and says which table; fast-forward is still allowed. It is never a silent drop. Decided; the wording "refuses and says why" is my reading of it.
-4. **Packaging:** the library/extension needs a host that exposes the session API and says so when it does not; the CLI is built with its own SQLite for offline use. No bundled SQLite in the library and no SQL-level diff of our own. Decided.
+4. **Packaging** (changed by #39, 2026-10-14: the portable extension is built without the session API and works in any host SQLite from 3.24; only diff, promote and undo need the session API, and report that the host has none): the library/extension needs a host that exposes the session API and says so when it does not; the CLI is built with its own SQLite for offline use. No bundled SQLite in the library and no SQL-level diff of our own. Decided.
 5. **A transaction writes one branch**, enforced by the VFS refusing the super-journal (option A). Decided for v0.1; atomic multi-branch commit stays out unless a feature needs it.

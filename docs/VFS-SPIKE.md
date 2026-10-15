@@ -1,6 +1,6 @@
 # SQLite on the durable store: the VFS spike (2026-10-11)
 
-Status: **spike**, experimental, not wired into anything. Code in [vfs/](../vfs), tests in [scripts/test-vfs.sh](../scripts/test-vfs.sh), raw results in [vfs/results/](../vfs/results). Every number comes from one machine (WSL2, ext4 on a virtual disk), three repetitions, SQLite 3.50.0; see the limits at the end.
+Status: **spike write-up (2026-10-11).** The code in vfs/ has since become the VFS that fkx, the CLI and the extension use; this note keeps the spike's measurements. Code in [vfs/](../vfs), tests in [scripts/test-vfs.sh](../scripts/test-vfs.sh), raw results in [vfs/results/](../vfs/results). Every number comes from one machine (WSL2, ext4 on a virtual disk), three repetitions, SQLite 3.50.0; see the limits at the end.
 
 ## Verdict
 
