@@ -146,6 +146,15 @@ jobs:
       - name: Install the pinned better-sqlite3 and test the loadable extension from it
         run: scripts/test-ext-bsq.sh
 
+  fuzz:
+    name: Recovery fuzzer (sanitizers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fuzz the open and recovery path (100000 inputs, address and undefined-behaviour sanitizers)
+        run: FUZZ_INPUTS=100000 scripts/test-fuzz.sh mutants
+
   cli:
     name: CLI tests
     runs-on: ubuntu-latest
