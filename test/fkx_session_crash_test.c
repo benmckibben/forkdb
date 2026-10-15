@@ -210,7 +210,7 @@ static int run_op(fkx *x, const Op *o) {
   }
 }
 
-typedef struct { long violations, cases, images, nested; } Stats;
+typedef struct { long violations, cases, images, nested, half_created; } Stats;
 typedef struct {
   const Model *cand[5]; int ncand; int mid_idx; const Model *after_undo;
   Stats *st; uint64_t seed; long N; const char *tag; long counter;
@@ -262,6 +262,7 @@ static void verify(Ctx *c, const uint8_t *img, uint64_t len, int deep) {
   fkx *x = NULL;
   fkx_options o = mkopt();
   int rc = fkx_open_io(&io, &o, &x);
+  if (rc && len <= FK_HEADER_SZ) { c->st->half_created++; sim_free(&d); return; } /* a power cut during creation, nothing acknowledged: same allowance as in fkx_crash_test.c */
   if (rc) { snprintf(why, sizeof why, "fkx_open failed rc=%d", rc); report(c, "recovery failed"); sim_free(&d); return; }
   char buf[200];
   int which = -1;
@@ -381,6 +382,7 @@ int main(int argc, char **argv) {
   }
   printf("seeds=%d ops=%d cut points=%ld cases=%ld images=%ld recoveries cut again=%ld\n", seeds, K, total_events, st.cases, st.images, st.nested);
   printf("promotes: %ld fast-forward, %ld replay, %ld up to date; undos: %ld exact, %ld by replay\n", n_ff, n_replay, n_uptodate, n_undo_exact, n_undo_replay);
+  printf("half-created stores refused (nothing acknowledged yet): %ld\n", st.half_created);
   printf("TOTAL VIOLATIONS=%ld\n", st.violations);
   return st.violations ? 1 : 0;
 }
