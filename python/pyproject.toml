@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forkdb"
+version = "0.1.0"
+description = "Branch-per-test SQLite databases: the forkdb loadable extension, prebuilt for Linux x86_64, macOS arm64 and Windows x86_64"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT OR Apache-2.0" }
+classifiers = ["Programming Language :: Python :: 3", "Topic :: Database"]
+
+[project.urls]
+Source = "https://github.com/benmckibben/forkdb"
+
+[tool.setuptools]
+packages = ["forkdb"]
+
+[tool.setuptools.package-data]
+forkdb = ["_lib/*"]
