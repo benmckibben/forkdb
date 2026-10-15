@@ -365,6 +365,21 @@ print('alive:', c.execute('select 1').fetchone()[0])
         out = self.check(os.path.join(self.dir, "no", "such", "dir", "x.fk"), "select forkdb_init(?)")
         self.assertIn("cannot open the store file", out)
 
+    def test_a_store_older_than_format_version_4_is_refused_and_left_alone(self):
+        # The message used to say "compact it with the forkdb CLI first": the CLI has no such step (and no store the CLI or the extension made has ever been older than version 4).
+        data = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        for name in ("v2-compacted.fk", "v3-compacted.fk"):
+            with self.subTest(file=name):
+                path = os.path.join(self.dir, name)
+                shutil.copy(os.path.join(data, name), path)
+                with open(path, "rb") as f:
+                    before = f.read()
+                out = self.check(path, "select forkdb_open_db(?, 'main')")
+                self.assertIn("older than format version 4", out)
+                self.assertNotIn("compact it with", out)
+                with open(path, "rb") as f:
+                    self.assertEqual(f.read(), before, "the file must be left as it was")
+
     def test_small_files_that_are_not_stores_are_never_overwritten(self):
         # Until this was fixed, any file under 4096 bytes (and a 4096-byte one with a bad header) was taken for a creation that a power cut interrupted and was OVERWRITTEN by an
         # empty store: forkdb_init on a 100-byte notes file, or on a one-page SQLite database, destroyed it. The 5000-byte file of the test below was one byte too long to see it.

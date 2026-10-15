@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One disk's worth of a real-disk experiment (run by the benchmark host, see infra/bench). The output is filtered to fit the 64 KB serial
+# One disk's worth of a real-disk experiment (run by the benchmark host, it was recreated from infra/bench, removed from the tree; see git show bccb2c9:infra/bench/README.md). The output is filtered to fit the 64 KB serial
 # console; the full output goes to $LOG when it is set.
 #   vfs/real-disk.sh DIR [REPS] [MODE]
 # MODE commit-path (default): the raw I/O patterns of one commit, and the SQLite benchmark on the configurations that matter for the

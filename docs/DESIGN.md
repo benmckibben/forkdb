@@ -1,6 +1,6 @@
 # Design decision: SQLite VFS with copy-on-write page layers
 
-Status: **decided** (2026-10-09), v0.1 not started. This records the choice among three candidate form factors and the reasoning, so it can be challenged later. The analysis is from reading and reasoning; only the parts listed in [SPIKE-FINDINGS.md](SPIKE-FINDINGS.md) were measured.
+Status: **decided** (2026-10-09), written before any code; what was built since is in [CHANGELOG.md](../CHANGELOG.md). This records the choice among three candidate form factors and the reasoning, so it can be challenged later. The analysis is from reading and reasoning; only the parts listed in [SPIKE-FINDINGS.md](SPIKE-FINDINGS.md) were measured.
 
 ## The three candidates
 

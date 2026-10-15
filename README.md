@@ -121,7 +121,7 @@ What runs only on Linux, and why: the Python suite (it uses `LD_PRELOAD` and POS
 See [KNOWN-LIMITS.md](docs/KNOWN-LIMITS.md). The short version:
 
 - Tables without a PRIMARY KEY are not compared (diff reports them, promote refuses them with FKX_TABLE_NO_PK)
-- DDL changes are detected but not replayed
+- DDL: new tables, indexes and triggers are replayed by promote; alterations to existing objects and dropped objects are refused with the reason named
 - Virtual tables and FTS shadow tables are not compared
 - Large changesets are held in memory (a streaming interface exists but is not exposed to callers yet)
 - Single-writer (one writer at a time, reads from separate connections are fine)
@@ -135,6 +135,12 @@ See [KNOWN-LIMITS.md](docs/KNOWN-LIMITS.md). The short version:
 - [SESSION-DESIGN.md](docs/SESSION-DESIGN.md) — session driver design and build plan
 - [VFS-SPIKE.md](docs/VFS-SPIKE.md) — VFS contract, one-branch-write enforcement, NVMe cost analysis
 - [SPIKE-FINDINGS.md](docs/SPIKE-FINDINGS.md) — early investigation notes
+- [DESIGN.md](docs/DESIGN.md) — the form-factor decision
+- [KNOWN-LIMITS.md](docs/KNOWN-LIMITS.md) — what it does not do
+- [STABILITY.md](docs/STABILITY.md) — what may change (everything, for now)
+- [CHANGELOG.md](CHANGELOG.md) — what has been merged
+- [SECURITY.md](SECURITY.md) — what the code does and does not defend against, and how to report a problem
+- [RELEASE.md](RELEASE.md) — the checklist for a release (there has not been one)
 
 ## License
 
