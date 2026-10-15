@@ -48,7 +48,7 @@ static int rewrite(fk_store *s, uint32_t b, int v, uint32_t pages) {
 }
 /* FNV-1a over the size and every page of a branch: equal digests mean the same content */
 static uint64_t digest(fk_store *s, uint32_t b) {
-  uint64_t h = 1469598103934665603ull;
+  uint64_t h = 14695981039346656037ull;
   uint32_t n = 0;
   uint8_t p[FK_PAGE];
   if (fk_size(s, b, &n)) return 0;
