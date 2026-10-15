@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <sys/stat.h>
+
 #include "../store/fkstore.h"
 
 #ifdef _WIN32
@@ -17,7 +19,6 @@
 #define CHDIR(p) _chdir(p)
 #define GETCWD(b, n) _getcwd(b, (int)(n))
 #else
-#include <sys/stat.h>
 #include <unistd.h>
 #define MKDIR(p) mkdir(p, 0755)
 #define CHDIR(p) chdir(p)
@@ -35,7 +36,12 @@ static int put(fk_store *s, uint32_t b, uint32_t pg, int v, uint32_t size) {
 }
 static int has(fk_store *s, uint32_t b, uint32_t pg, int v) { uint8_t a[FK_PAGE], e[FK_PAGE]; page(e, v); return fk_read(s, b, pg, a) == 0 && !memcmp(a, e, FK_PAGE); }
 static int open_store(const char *path, fk_io *io, fk_store **s) { return fk_file_open(path, io) == 0 && fk_open(io, s) == 0 && *s; }
+/* The size of a file that nobody has open (reading it by name fails on Windows while the store holds it: after a compaction the handle has DELETE access, which a plain fopen does not share with). */
 static long file_size(const char *path) { FILE *f = fopen(path, "rb"); if (!f) return -1; fseek(f, 0, SEEK_END); long n = ftell(f); fclose(f); return n; }
+/* Does the path name a file? stat does not open it, so it works whoever has it open. */
+static int exists(const char *path) { struct stat st; return stat(path, &st) == 0; }
+/* The size of the store's file, asked of the open store (GetFileSizeEx or fstat on the handle it holds). */
+static long open_size(const fk_io *io) { return (long)io->size(io->ctx); }
 
 /* Leaves the file mostly garbage: a branch that rewrites every page twice, then discarded. A compaction then really rewrites the file and the file shrinks. */
 static int make_garbage(fk_store *s) {
@@ -60,11 +66,11 @@ static void lock_survives_compaction(void) {
   CHECK(fk_file_open(path, &io2) == FK_ELOCKED, "before any compaction a second open is refused with FK_ELOCKED");
   for (int round = 1; round <= 3; round++) {
     char msg[200];
-    long before = file_size(path);
+    long before = open_size(&io);
     CHECK(make_garbage(s), "a discarded branch leaves garbage in the file");
-    long grown = file_size(path);
+    long grown = open_size(&io);
     CHECK(fk_compact(s) == 0, "compact");
-    long after = file_size(path);
+    long after = open_size(&io);
     snprintf(msg, sizeof msg, "round %d: the compaction really rewrote the file (it was %ld bytes with garbage, %ld before it, %ld after)", round, grown, before, after);
     CHECK(after < grown, msg);
     snprintf(msg, sizeof msg, "round %d: after the compaction a second open is STILL refused with FK_ELOCKED", round);
@@ -76,7 +82,7 @@ static void lock_survives_compaction(void) {
     CHECK(rc == FK_ELOCKED, "and after that commit the second open is still refused");
     if (rc == 0) fk_file_close(&io2);
   }
-  long size = file_size(path);
+  long size = open_size(&io);
   CHECK(has(s, 0, 3, 1003) && has(s, 0, 7, 7), "what was committed is there");
   fk_close(s); fk_file_close(&io);
   CHECK(file_size(path) == size, "the refused opens did not change the file");
@@ -99,9 +105,9 @@ static void store_keeps_its_place_when_the_directory_changes(void) {
   CHECK(fk_compact(s) == 0, "compact");
   CHECK(put(s, 0, 5, 2001, NP) == 0 && put(s, 0, 6, 2002, NP) == 0, "commits after the compaction are acknowledged");
   CHECK(CHDIR(base) == 0, "back to the base directory");
-  CHECK(file_size("lock_smoke_dir/d2/rel.fk") < 0, "no store appeared in d2, where the process is when it compacts");
-  CHECK(file_size("lock_smoke_dir/d2/rel.fk.compact") < 0, "and no temporary file");
-  CHECK(file_size("lock_smoke_dir/d1/rel.fk.compact") < 0, "the temporary file of d1 is gone");
+  CHECK(!exists("lock_smoke_dir/d2/rel.fk"), "no store appeared in d2, where the process is when it compacts");
+  CHECK(!exists("lock_smoke_dir/d2/rel.fk.compact"), "and no temporary file");
+  CHECK(!exists("lock_smoke_dir/d1/rel.fk.compact"), "the temporary file of d1 is gone");
   fk_io io2;
   int rc = fk_file_open("lock_smoke_dir/d1/rel.fk", &io2);
   CHECK(rc == FK_ELOCKED, "d1/rel.fk is still locked by the process that holds it");
