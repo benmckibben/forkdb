@@ -918,6 +918,22 @@ c.execute("select forkdb_close(?)", (P,)).fetchall()
         self.assertEqual(r.returncode, 0, "subprocess failed: rc=%s\n%s%s" % (r.returncode, r.stdout, r.stderr))
         self.assertGreaterEqual(count, 30, "default (durable) store should issue >= 30 fsyncs, got %d" % count)
 
+    def test_portable_sync_counter_agrees_with_the_fsync_calls(self):
+        # forkdb_sync_count() is what the macOS and Windows tests count with; here it is checked against the system calls the interposer sees, for a durable and a nosync store
+        code = ("c0 = load()\n"
+                "n0 = c0.execute('select forkdb_sync_count()').fetchone()[0]\n" + self.INIT_WORK_SCRIPT +
+                "\nprint('PORTABLE', c0.execute('select forkdb_sync_count()').fetchone()[0] - n0)\n")
+        for opt in ("none", "nosync"):
+            with self.subTest(opt=opt):
+                r, external = self.run_counted(code, os.path.join(self.dir, opt + ".fk"), "main", opt)
+                self.assertEqual(r.returncode, 0, "subprocess failed: %s%s" % (r.stdout, r.stderr))
+                portable = int(r.stdout.split("PORTABLE")[1])
+                self.assertEqual(portable, external, "%s: forkdb_sync_count says %d, the interposer saw %d" % (opt, portable, external))
+                if opt == "none":
+                    self.assertGreater(portable, 0)
+                else:
+                    self.assertEqual(portable, 0)
+
     def test_nosync_issues_none(self):
         path = os.path.join(self.dir, "nosync-none.fk")
         r, count = self.run_counted(self.INIT_WORK_SCRIPT, path, "main", "nosync")

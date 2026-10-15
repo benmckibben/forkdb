@@ -378,6 +378,13 @@ static void fn_vfs_name(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     sqlite3_result_text(ctx, fkx_vfs_name(x), -1, SQLITE_TRANSIENT);
 }
 
+/* forkdb_sync_count(): the number of durability calls (fsync, fdatasync, FlushFileBuffers, directory syncs) this process's stores have made so far, summed over every store;
+ * a store that runs with the 'nosync' option adds nothing. Take the difference of two readings around the work you want to count. Not tied to a store, so no lock. */
+static void fn_sync_count(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    (void)argc; (void)argv;
+    sqlite3_result_int64(ctx, (sqlite3_int64)fk_file_sync_count());
+}
+
 /* ---- session-dependent functions ---- */
 
 /* Append formatted text that fits entirely. snprintf's return is the length that
@@ -608,6 +615,7 @@ int sqlite3_forkdb_init(sqlite3 *db, char **pzErrMsg, const sqlite3_api_routines
     /* branch operations (work everywhere) */
     int flags = SQLITE_UTF8 | SQLITE_DIRECTONLY;
     sqlite3_create_function(db, "forkdb_init",     -1, flags, NULL, fn_init_l,     NULL, NULL);
+    sqlite3_create_function(db, "forkdb_sync_count", 0, flags, NULL, fn_sync_count, NULL, NULL);
     sqlite3_create_function(db, "forkdb_close",    -1, flags, NULL, fn_close_l,    NULL, NULL);
     sqlite3_create_function(db, "forkdb_fork",     -1, flags, NULL, fn_fork_l,     NULL, NULL);
     sqlite3_create_function(db, "forkdb_snapshot", -1, flags, NULL, fn_snapshot_l, NULL, NULL);

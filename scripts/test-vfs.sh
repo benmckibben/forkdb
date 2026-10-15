@@ -16,7 +16,7 @@ quick=0
 for v in batch stock session; do
   echo "== SQLite build: $v (address and undefined-behaviour sanitizers on)"
   SAN=1 "$here/vfs/build.sh" test "$v" | tail -1
-  timeout "$limit" "$here/vfs/build/vfs_test-$v-san" | grep -E '^(SQLite|T11|   [0-9]+ I/O events|checks|  FAIL|  VIOLATION)'
+  timeout "$limit" "$here/vfs/build/vfs_test-$v-san" | grep -E '^(SQLite|T11|   [0-9]+ I/O events|   no syncs|checks|  FAIL|  VIOLATION)'
 done
 [ $quick = 1 ] && exit 0
 

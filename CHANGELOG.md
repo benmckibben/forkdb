@@ -10,7 +10,7 @@ Nothing has been released: there is no tag and no release (see [docs/STABILITY.m
 - Format version 4: branch metadata, reset and state ids (#18).
 - The log can be preallocated, opt-in (#15); zero-filling in the background between commits (#25), wired into the branch layer's writes (#27), without an fsync (#31).
 - Open-time index checkpoint and auto-compaction (#23).
-- Run without fsync for throwaway stores, `forkdb_init(path, root, 'nosync')` (#44).
+- Run without fsync for throwaway stores, `forkdb_init(path, root, 'nosync')` (#44). A sync counter that works on every platform, `fk_file_sync_count()` and `forkdb_sync_count()`; the `nosync` tests run on macOS and Windows; a power-loss pass for `nosync` stores under SQLite; a benchmark of what `nosync` saves, run on all three platforms in CI (#54).
 
 ### The VFS, the branch layer, the SQL functions and the CLI
 

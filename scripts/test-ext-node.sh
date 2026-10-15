@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Test the forkdb loadable extension from Node's built-in node:sqlite, on Linux, macOS and Windows (Git Bash).
 # Needs: a C compiler, curl and python for the SQLite headers (for the build), and a Node whose node:sqlite has DatabaseSync.loadExtension (24 is what CI uses).
-# The fsync-counting tests (nosync) need an LD_PRELOAD interposer and run on Linux only; elsewhere they are left out, and the script says so.
+# The nosync tests count syncs with forkdb_sync_count() and run everywhere; one of them cross-checks that counter against an LD_PRELOAD interposer, which exists on Linux only.
 # Usage: scripts/test-ext-node.sh        NODE=/path/to/node overrides the node binary.
 set -euo pipefail
 
@@ -29,14 +29,13 @@ export FK_EXT_SO
 
 # Explicit file lists: with no arguments node --test would also run every .js file under test/, the helpers and the worker among them.
 shopt -s nullglob
-files=(test/ext_node_test.js)
+files=(test/ext_node_test.js test/ext_node_nosync_test.js)
 if [ "$(uname -s)" = Linux ]; then
     echo "Building fsync_count interposer..."
     gcc -shared -fPIC -O2 -o "$root/build/ext/fsync_count.so" test/fsync_count.c -ldl
     export FK_FSYNC_COUNT_SO="$root/build/ext/fsync_count.so"
-    files+=(test/ext_node_*_test.js)
 else
-    echo "NOT RUN on $(uname -s): test/ext_node_nosync_test.js (it counts fsync calls with an LD_PRELOAD interposer, which is Linux only)"
+    echo "NOT RUN on $(uname -s): the cross-check of forkdb_sync_count against the fsync system calls (test/fsync_count.c is an LD_PRELOAD interposer, Linux only)"
 fi
 echo "Running Node tests: ${files[*]}"
 if ! "$node" --no-warnings --test --test-reporter=spec "${files[@]}"; then

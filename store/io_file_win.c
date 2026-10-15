@@ -128,8 +128,12 @@ static int w_truncate(void *ctx, uint64_t size) {
   return 0;
 }
 
+static unsigned long long g_syncs; /* see fk_file_sync_count in fkstore.h */
+unsigned long long fk_file_sync_count(void) { return __atomic_load_n(&g_syncs, __ATOMIC_RELAXED); }
+#define COUNT_SYNC() ((void)__atomic_fetch_add(&g_syncs, 1, __ATOMIC_RELAXED))
 static int w_fsync(void *ctx) {
   if (((WC *)ctx)->nosync) return 0;
+  COUNT_SYNC();
   return FlushFileBuffers(H(ctx)) ? 0 : -1;
 }
 
@@ -155,10 +159,12 @@ static int sync_dir_of(const wchar_t *path, HANDLE file) {
                          NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
   free(dir);
   if (h != INVALID_HANDLE_VALUE) {
+    COUNT_SYNC();
     int ok = FlushFileBuffers(h) ? 0 : -1;
     CloseHandle(h);
     if (ok == 0) return 0;
   }
+  COUNT_SYNC();
   return FlushFileBuffers(file) ? 0 : -1;
 }
 

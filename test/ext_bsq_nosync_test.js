@@ -4,46 +4,47 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { died, later, Database, load, one, tmpdir, openBranch, closeStore, runNode } = require('./bsq_helpers.js');
+const { spawnSync } = require('node:child_process');
+const { died, later, Database, load, one, tmpdir, openBranch, closeStore, runNode, PRELUDE, SO } = require('./bsq_helpers.js');
 
+const LINUX = process.platform === 'linux';
 const FSYNC_COUNT_SO = process.env.FK_FSYNC_COUNT_SO;
-assert.ok(FSYNC_COUNT_SO, 'FK_FSYNC_COUNT_SO must be set');
-assert.ok(fs.existsSync(FSYNC_COUNT_SO), 'FK_FSYNC_COUNT_SO=' + FSYNC_COUNT_SO + ' does not exist');
+if (LINUX) {
+  assert.ok(FSYNC_COUNT_SO, 'FK_FSYNC_COUNT_SO must be set on Linux: the fsync interposer is not available');
+  assert.ok(fs.existsSync(FSYNC_COUNT_SO), 'FK_FSYNC_COUNT_SO=' + FSYNC_COUNT_SO + ' does not exist: build the interposer first');
+}
 
-const baselines = {};
+// forkdb_sync_count() counts only what the store itself asks the operating system for, so a process that merely loads the extension is at exactly 0 (the first test checks it).
+// It is a constant, not a measurement, so that any single test can be run alone with --test-name-pattern.
+const baselines = { loadOnly: 0 };
 
-// Counted runner: spawn a child with LD_PRELOAD counting fsyncs.
-function runCounted(t, code, ...args) {
+// Runs code in a child (like runNode) and returns { r, count }: count is the number of durability calls the child made while the code ran, from forkdb_sync_count().
+// With interposer=true (Linux only) it also returns the system calls counted from outside: { r, count, external }.
+function runCountedWith(t, interposer, code, ...args) {
   const dir = tmpdir(t);
   const file = path.join(dir, 'cnt.txt');
-  const r = runNode(code, args, { env: { LD_PRELOAD: FSYNC_COUNT_SO, FK_FSYNC_COUNT_FILE: file } });
-  let count = -1;
-  try {
-    const s = fs.readFileSync(file, 'utf8');
-    const m = s.match(/^FSYNC_COUNT (\d+)/m);
-    if (m) count = parseInt(m[1], 10);
-  } catch (e) { /* file may not exist if child killed by signal */ }
-  return { r, count };
+  const ext = path.join(dir, 'ext.txt');
+  const wrapped = [
+    'const __counter = load();',
+    "const __n = () => Number(Object.values(__counter.prepare('select forkdb_sync_count()').get())[0]);",
+    'const __n0 = __n();',
+    "process.on('exit', (status) => { if (status === 0) require('node:fs').writeFileSync(process.env.FK_SYNC_COUNT_FILE, 'SYNCS ' + (__n() - __n0) + '\\n'); });",
+    code,
+  ].join('\n');
+  const env = { ...process.env, FK_SYNC_COUNT_FILE: file };
+  if (interposer) { env.LD_PRELOAD = FSYNC_COUNT_SO; env.FK_FSYNC_COUNT_FILE = ext; }
+  const r = spawnSync(process.execPath, ['--no-warnings', '-e', PRELUDE + wrapped, SO, ...args], { encoding: 'utf8', timeout: 120000, env });
+  const read = (f, re) => { try { const m = fs.readFileSync(f, 'utf8').match(re); return m ? parseInt(m[1], 10) : -1; } catch (e) { return -1; } };
+  return { r, count: read(file, /^SYNCS (\d+)/m), external: interposer ? read(ext, /^FSYNC_COUNT (\d+)/m) : undefined };
 }
-
-// Measured once, when the file loads, so a single test can be run alone (--test-name-pattern): a child that only loads the extension through better-sqlite3 and exits.
-{
-  const d = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'fk-bsq-base-'));
-  const file = path.join(d, 'cnt.txt');
-  const r = runNode('load();\n', ['/tmp/nonexistent'], { env: { LD_PRELOAD: FSYNC_COUNT_SO, FK_FSYNC_COUNT_FILE: file } });
-  const m = fs.existsSync(file) && fs.readFileSync(file, 'utf8').match(/^FSYNC_COUNT (\d+)/m);
-  fs.rmSync(d, { recursive: true, force: true });
-  assert.equal(r.status, 0, 'the baseline child failed: ' + r.stderr + r.stdout);
-  assert.ok(m, 'the baseline child wrote no FSYNC_COUNT');
-  baselines.loadOnly = parseInt(m[1], 10);
-}
+const runCounted = (t, code, ...args) => runCountedWith(t, false, code, ...args);
 
 // The baseline again, through the counted runner the tests use: it must agree.
-test('bsq nosync baseline: loading the extension alone', (t) => {
+test('bsq nosync baseline: loading the extension alone issues 0 syncs', (t) => {
   const { r, count } = runCounted(t, 'load();\n', '/tmp/nonexistent');
   assert.equal(r.status, 0, r.stderr || r.stdout);
-  assert.equal(count, baselines.loadOnly, 'the baseline is stable');
   t.diagnostic('baseline (load only) count=' + count);
+  assert.equal(count, 0, 'a process that only loads the extension should issue 0 syncs');
 });
 
 // ---- subprocess scripts ----
@@ -372,3 +373,17 @@ test('bsq nosync compaction garbage recipe, with and without nosync', (t) => {
 
   assert.ok(c2 > c3, 'compaction itself should issue fsyncs on a durable store: compact=' + c2 + ' skip=' + c3);
 });
+
+// 10. Linux only: the portable counter agrees with the system calls the interposer sees, for a durable store and for a nosync one.
+if (LINUX) {
+  test('bsq nosync the portable sync counter agrees with the fsync system calls counted from outside', (t) => {
+    for (const opt of ['none', 'nosync']) {
+      const dir = tmpdir(t);
+      const { r, count, external } = runCountedWith(t, true, NOSYNC_INIT_WORK, path.join(dir, opt + '.fk'), opt, 'main');
+      assert.equal(r.status, 0, r.stderr || r.stdout);
+      t.diagnostic(opt + ': forkdb_sync_count=' + count + ', fsync and fdatasync calls seen by the interposer=' + external);
+      assert.equal(count, external, opt + ': the counter and the interposer must agree');
+      if (opt === 'none') assert.ok(count > 0, 'a durable store must have synced'); else assert.equal(count, 0);
+    }
+  });
+}

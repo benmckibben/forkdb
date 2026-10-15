@@ -32,15 +32,14 @@ export FK_EXT_SO
 export SQLITE_USE_URI=1
 
 # Explicit file lists: with no arguments node --test would also run the helper files under test/.
-# The fsync-counting tests (nosync) need an LD_PRELOAD interposer and run on Linux only; elsewhere they are left out, and the script says so.
-files=(test/ext_bsq_test.js test/ext_bsq_port_test.js test/ext_bsq_threads_test.js)
+# The nosync tests count syncs with forkdb_sync_count() and run everywhere; one of them cross-checks that counter against an LD_PRELOAD interposer, which exists on Linux only.
+files=(test/ext_bsq_test.js test/ext_bsq_port_test.js test/ext_bsq_threads_test.js test/ext_bsq_nosync_test.js)
 if [ "$(uname -s)" = Linux ]; then
     echo "Building fsync_count interposer..."
     gcc -shared -fPIC -O2 -o "$root/build/ext/fsync_count.so" test/fsync_count.c -ldl
     export FK_FSYNC_COUNT_SO="$root/build/ext/fsync_count.so"
-    files+=(test/ext_bsq_nosync_test.js)
 else
-    echo "NOT RUN on $(uname -s): test/ext_bsq_nosync_test.js (it counts fsync calls with an LD_PRELOAD interposer, which is Linux only)"
+    echo "NOT RUN on $(uname -s): the cross-check of forkdb_sync_count against the fsync system calls (test/fsync_count.c is an LD_PRELOAD interposer, Linux only)"
 fi
 echo "Running better-sqlite3 tests: ${files[*]}"
 if ! "$node" --no-warnings --test --test-reporter=spec "${files[@]}"; then
