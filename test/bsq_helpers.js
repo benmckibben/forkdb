@@ -21,7 +21,7 @@ if (process.env.SQLITE_USE_URI !== '1') {
   throw new Error('SQLITE_USE_URI=1 must be set before node starts (scripts/test-ext-bsq.sh does): better-sqlite3 reads it once, at load');
 }
 const Database = require(BSQ);
-const SO = process.env.FK_EXT_SO || path.join(ROOT, 'build', 'ext', 'forkdb.so');
+const SO = process.env.FK_EXT_SO || path.join(ROOT, 'build', 'ext', 'forkdb.' + (process.platform === 'win32' ? 'dll' : process.platform === 'darwin' ? 'dylib' : 'so'));
 if (!fs.existsSync(SO)) throw new Error('no extension at ' + SO + ': run scripts/build-ext.sh');
 
 // Cleanups run last-in first-out (like unittest's addCleanup): node:test runs t.after hooks in registration order, which would close the connection a store was
@@ -109,4 +109,7 @@ function startNode(code, args, env) {
   });
 }
 
-module.exports = { later, Database, BSQ, SO, ROOT, PRELUDE, load, one, tmpdir, closeStore, newStore, openBranch, runNode, startNode };
+// Did a child that killed itself with process.kill(process.pid, 'SIGKILL') die that way? Windows has no signals: node ends the process with exit status 1 there.
+function died(r) { return r.signal === 'SIGKILL' || (process.platform === 'win32' && r.status === 1 && !r.signal); }
+
+module.exports = { died, later, Database, BSQ, SO, ROOT, PRELUDE, load, one, tmpdir, closeStore, newStore, openBranch, runNode, startNode };

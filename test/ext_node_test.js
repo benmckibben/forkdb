@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { Worker } = require('node:worker_threads');
-const { later, DatabaseSync, SO, load, one, tmpdir, newStore, openBranch, closeStore, runNode } = require('./node_helpers.js');
+const { died, later, DatabaseSync, SO, load, one, tmpdir, newStore, openBranch, closeStore, runNode } = require('./node_helpers.js');
 
 const INFO = { session_api: 0, vfs: 'forkdb', version: '0.1.0' };
 const infoOf = (c) => Object.fromEntries(c.prepare('select key, value from forkdb_info').all().map((r) => [r.key, r.value]));
@@ -182,7 +182,7 @@ test('D a process killed (SIGKILL) after a commit leaves the data, and the lock 
     'd.exec("insert into t values (999, \'uncommitted\')");',
     'process.kill(process.pid, "SIGKILL");',
   ].join('\n'), store);
-  assert.equal(r.signal, 'SIGKILL', 'the child must have died by the signal: ' + r.stdout + r.stderr);
+  assert.ok(died(r), 'the child must have died by the signal: ' + r.stdout + r.stderr);
   const c = load(t);
   const db = openBranch(t, c, store, 'main');
   later(t, () => closeStore(c, store));
@@ -223,7 +223,7 @@ test('E the lock is released by forkdb_close', (t) => {
 test('E the lock is released when the holder dies', (t) => {
   const store = path.join(tmpdir(t), 's.fk');
   const r = runNode('const c = load(); c.prepare("select forkdb_init(?)").get(P); process.kill(process.pid, "SIGKILL");', store);
-  assert.equal(r.signal, 'SIGKILL', r.stdout + r.stderr);
+  assert.ok(died(r), r.stdout + r.stderr);
   const c = load(t);
   const db = openBranch(t, c, store, 'main');
   later(t, () => closeStore(c, store));

@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { later, Database, load, one, tmpdir, openBranch, closeStore, runNode } = require('./bsq_helpers.js');
+const { died, later, Database, load, one, tmpdir, openBranch, closeStore, runNode } = require('./bsq_helpers.js');
 
 const FSYNC_COUNT_SO = process.env.FK_FSYNC_COUNT_SO;
 assert.ok(FSYNC_COUNT_SO, 'FK_FSYNC_COUNT_SO must be set');
@@ -219,7 +219,7 @@ test('bsq nosync data survives process death', (t) => {
   const dir = tmpdir(t);
   const store = path.join(dir, 'crash.fk');
   const r = runNode(NOSYNC_CRASH, [store]);
-  assert.equal(r.signal, 'SIGKILL', 'the child must have died by the signal: ' + (r.stdout || '') + (r.stderr || ''));
+  assert.ok(died(r), 'the child must have died by the signal: ' + (r.stdout || '') + (r.stderr || ''));
   const c = load(t);
   later(t, () => closeStore(c, store));
   const db = openBranch(t, c, store, 'main');

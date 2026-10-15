@@ -4,7 +4,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { later, Database, load, one, tmpdir, newStore, openBranch, closeStore, runNode } = require('./bsq_helpers.js');
+const { died, later, Database, load, one, tmpdir, newStore, openBranch, closeStore, runNode } = require('./bsq_helpers.js');
 
 const seed = (db, n) => {
   db.exec('create table t(a integer primary key, b text)');
@@ -121,7 +121,7 @@ test('bsq D a process killed (SIGKILL) after a commit leaves the data, and the l
     'd.exec("insert into t values (999, \'uncommitted\')");',
     'process.kill(process.pid, "SIGKILL");',
   ].join('\n'), [store]);
-  assert.equal(r.signal, 'SIGKILL', 'the child must have died by the signal: ' + r.stdout + r.stderr);
+  assert.ok(died(r), 'the child must have died by the signal: ' + r.stdout + r.stderr);
   const c = load(t);
   const db = openBranch(t, c, store, 'main');
   later(t, () => closeStore(c, store));
@@ -162,7 +162,7 @@ test('bsq E the lock is released by forkdb_close', (t) => {
 test('bsq E the lock is released when the holder dies', (t) => {
   const store = path.join(tmpdir(t), 's.fk');
   const r = runNode('const c = load(); c.prepare("select forkdb_init(?)").get(P); process.kill(process.pid, "SIGKILL");', [store]);
-  assert.equal(r.signal, 'SIGKILL', r.stdout + r.stderr);
+  assert.ok(died(r), r.stdout + r.stderr);
   const c = load(t);
   const db = openBranch(t, c, store, 'main');
   later(t, () => closeStore(c, store));
