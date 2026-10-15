@@ -10,6 +10,7 @@ There has been no release, and nothing automates one: no release workflow, no pa
 - [ ] **CI is green on the exact commit** (every job listed in `.github/workflows/ci.yml`).
 - [ ] **Run the full gates locally.** CI runs only the `quick` variants of the store, VFS and fkx suites. Run `scripts/test-store.sh`, `scripts/test-vfs.sh` and `scripts/test-fkx.sh` without `quick` (the store suite took about 33 minutes on one machine), and `scripts/test-threads.sh`.
 - [ ] **README table and KNOWN-LIMITS.md match what CI ran** (the table is a claim about CI; check it against the job list).
+- [ ] **Run `scripts/verify-windows.ps1` on a real Windows machine** (CI runs the same smoke tests on a Windows runner; this installs the packages the way a user would, on a desktop, and adds a compaction check, a hard kill and a second-process check).
 - [ ] **A clean checkout builds:** `scripts/build-step4.sh test`, and `scripts/build-ext.sh` on each platform in the table.
 - [ ] **No generated files are committed** (build output, vendored SQLite, `node_modules`); `git status` is clean.
 
