@@ -200,6 +200,19 @@ class B_Functions(Base):
         self.assertRegex(uri, r"^file:b[0-9]+\?vfs=forkdb$")
         self.assertIn("no branch named 'nope'", self.err(c, "select forkdb_open_db(?, 'nope')", self.store))
 
+    def test_new_ids_fit_in_a_javascript_number(self):
+        # forkdb_fork and forkdb_snapshot return the new branch's uid. node:sqlite throws on an integer above 2^53 (after the fork has happened), so every id must
+        # fit. 64 random bits would be above 2^53 for all but 1 in 1024 of them: 100 draws make a failure certain.
+        c = self.load()
+        self.new_store(c)
+        ids = []
+        for i in range(50):
+            ids.append(self.one(c, "select forkdb_fork(?, 'main', ?)", self.store, "f%d" % i))
+            ids.append(self.one(c, "select forkdb_snapshot(?, 'main', ?)", self.store, "s%d" % i))
+        self.assertEqual(len(set(ids)), 100, "ids are distinct")
+        for u in ids:
+            self.assertTrue(0 < u < 2 ** 53, "uid %d does not fit in a JavaScript number" % u)
+
     def test_discard(self):
         c = self.load()
         self.new_store(c)

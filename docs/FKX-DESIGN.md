@@ -127,6 +127,6 @@ One process; threads are allowed. Every operation holds the VFS's one mutex for 
 
 1. Fast-forward and reset need no open connection on the target in v0.1; the cache trick is left for later (replay covers a fork that only changed rows).
 2. User snapshots are a first-class kind.
-3. uids are random 64-bit numbers.
+3. uids are random 53-bit numbers (a uid is returned to the application as an SQL integer, and 2^53 is the largest integer a JavaScript number holds exactly; node:sqlite throws above it). Uniqueness comes from the collision check at creation, not from the width. A file made by an older build can hold 64-bit uids; they keep working.
 4. A store with branches fkx did not make is refused.
 5. The PR split: 3b core, 3c session driver.
