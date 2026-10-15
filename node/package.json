@@ -1,0 +1,29 @@
+{
+  "name": "sqlite-forkdb",
+  "version": "0.1.0",
+  "description": "The forkdb SQLite extension (branch-per-test databases), prebuilt for Linux x64, macOS arm64 and Windows x64, with load() for node:sqlite and better-sqlite3",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/benmckibben/forkdb.git"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "lib/",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
+  "keywords": [
+    "sqlite",
+    "sqlite-extension",
+    "branching",
+    "testing"
+  ]
+}

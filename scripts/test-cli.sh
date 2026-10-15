@@ -210,6 +210,19 @@ check_init_create
 # junk file unchanged after all commands
 check_junk_unchanged
 
+# --version: prints the version, needs no store, and --json gives the same in JSON, whichever order the flags come in; and it is the version the extension reports.
+for want in 'forkdb 0.1.0|--version' 'forkdb 0.1.0|-V' 'forkdb 0.1.0|-v' '{"version":"0.1.0"}|--json --version' '{"version":"0.1.0"}|--version --json'; do
+  checks=$((checks + 1))
+  expected=${want%%|*}; args=${want#*|}
+  # shellcheck disable=SC2086
+  got=$("$CLI" $args 2>&1 </dev/null) || fail "forkdb $args: exit status $?"
+  [ "$got" = "$expected" ] || fail "forkdb $args printed '$got', want '$expected'"
+done
+checks=$((checks + 1))
+ext_version=$(grep -o 'result_text(ctx, "[0-9][0-9.]*"' ext/forkdb_ext.c | head -1 | grep -o '[0-9][0-9.]*' || true)
+cli_version=$(grep -o 'define FORKDB_VERSION "[0-9][0-9.]*"' cli/forkdb.c | grep -o '[0-9][0-9.]*' || true)
+if [ -z "$ext_version" ] || [ "$ext_version" != "$cli_version" ]; then fail "the CLI's version ('$cli_version') is not the extension's ('$ext_version')"; fi
+
 # A store from before format version 4 is refused with a message that says so (this path used to be remapped to -1 and print nothing useful),
 # and the file is not touched.
 OLD=$tmp/old.fk
