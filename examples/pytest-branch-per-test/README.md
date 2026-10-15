@@ -36,7 +36,7 @@ Needs Python whose `sqlite3` can load extensions and `build/ext/forkdb.so` (`scr
 
 ## What it costs, measured
 
-Linux, ext4 on a local disk versus tmpfs (`/dev/shm`), Python 3.12, SQLite 3.45. One "cycle" is what a test pays: get a private database that holds the seed, update ten rows,
+Linux, ext4 on WSL2's virtual disk versus tmpfs (`/dev/shm`), Python 3.12, SQLite 3.45. One "cycle" is what a test pays: get a private database that holds the seed, update ten rows,
 commit, throw it away. Median of 20 to 300 cycles (`bench_isolation.py`; `NOSYNC=1` opens the store without fsync).
 
 | seed rows (file size) | forkdb, fsync | **forkdb, nosync** | file copy | sqlite backup to memory | reseed | forkdb with fsync, tmpfs | file copy, tmpfs |
