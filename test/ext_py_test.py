@@ -721,5 +721,284 @@ sys.exit(1 if errs else 0)
         self.run_mode("with-manager")
 
 
+class H_NoSync(Base):
+    """Tests for the nosync option: forkdb_init(path, 'main', 'nosync') skips fsync entirely."""
+
+    @staticmethod
+    def _read_count(tmpfile):
+        with open(tmpfile, "r") as f:
+            for line in f:
+                if line.startswith("FSYNC_COUNT "):
+                    return int(line.split()[1])
+        return -1
+
+    def run_counted(self, code, *args):
+        """Run a subprocess with LD_PRELOAD counting fsync/fdatasync. Returns (CompletedProcess, count)."""
+        so = os.environ.get("FK_FSYNC_COUNT_SO")
+        if not so:
+            self.fail("FK_FSYNC_COUNT_SO is not set: the fsync interposer is not available (run scripts/test-ext.sh)")
+        if not os.path.exists(so):
+            self.fail("FK_FSYNC_COUNT_SO=%s does not exist: build the interposer first (scripts/test-ext.sh)" % so)
+        with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False) as tf:
+            tmpfile = tf.name
+        env = {**os.environ, "LD_PRELOAD": so, "FK_FSYNC_COUNT_FILE": tmpfile}
+        r = subprocess.run(
+            [sys.executable, "-c", PRELUDE + code, SO, *args],
+            capture_output=True, text=True, timeout=120, env=env
+        )
+        count = self._read_count(tmpfile)
+        os.unlink(tmpfile)
+        return r, count
+
+    # ---- subprocess scripts ----
+
+    # These scripts use sys.argv[2] as the store path (P from PRELUDE),
+    # sys.argv[3] as the root/branch name, and sys.argv[4] as the options word.
+    # "none" means call forkdb_init(P) with only the path (no options).
+
+    INIT_WORK_SCRIPT = """
+c = load()
+opt = sys.argv[4]
+root = sys.argv[3]
+if opt == 'none':
+    c.execute("select forkdb_init(?, ?)", (P, root)).fetchall()
+else:
+    c.execute("select forkdb_init(?, ?, ?)", (P, root, opt)).fetchall()
+uri = c.execute("select forkdb_open_db(?, ?)", (P, root)).fetchone()[0]
+d = sqlite3.connect(uri, uri=True)
+d.execute("create table t(a integer primary key, b text)")
+d.execute("create index tb on t(b)")
+for i in range(100):
+    d.execute("insert into t values (?, ?)", (i, 'v%d' % i))
+d.execute("commit")
+for i in range(30):
+    c.execute("select forkdb_fork(?, ?, ?)", (P, root, 't%d' % i)).fetchall()
+    c.execute("select forkdb_discard(?, ?)", (P, 't%d' % i)).fetchall()
+c.execute("select forkdb_close(?)", (P,)).fetchall()
+"""
+
+    INIT_WORK_SHORT_SCRIPT = """
+c = load()
+opt = sys.argv[4]
+root = sys.argv[3]
+if opt == 'none':
+    c.execute("select forkdb_init(?, ?)", (P, root)).fetchall()
+else:
+    c.execute("select forkdb_init(?, ?, ?)", (P, root, opt)).fetchall()
+c.execute("select forkdb_close(?)", (P,)).fetchall()
+"""
+
+    INIT_WORK_NAMED_SCRIPT = """
+c = load()
+opt = sys.argv[4]
+root = sys.argv[3]
+if opt == 'none':
+    c.execute("select forkdb_init(?, ?)", (P, root)).fetchall()
+else:
+    c.execute("select forkdb_init(?, ?, ?)", (P, root, opt)).fetchall()
+uri = c.execute("select forkdb_open_db(?, ?)", (P, root)).fetchone()[0]
+d = sqlite3.connect(uri, uri=True)
+d.execute("create table t(a integer primary key)")
+for i in range(10):
+    d.execute("insert into t values (?)", (i,))
+d.execute("commit")
+c.execute("select forkdb_close(?)", (P,)).fetchall()
+"""
+
+    NOSYNC_CRASH_SCRIPT = """
+c = load()
+c.execute("select forkdb_init(?, 'main', 'nosync')", (P,)).fetchall()
+uri = c.execute("select forkdb_open_db(?, 'main')", (P,)).fetchone()[0]
+d = sqlite3.connect(uri, uri=True)
+for txn in range(20):
+    d.execute("create table if not exists t(a integer primary key, b text)")
+    count = d.execute("select ifnull(max(a), -1) + 1 from t").fetchone()[0]
+    d.execute("insert into t values (?, 'row' || ?)", (count, count))
+    d.execute("commit")
+os._exit(9)
+"""
+
+    LOCK_SCRIPT = """
+c = load()
+try:
+    c.execute("select forkdb_open_db(?, 'main')", (P,)).fetchone()
+except sqlite3.OperationalError as e:
+    print('error:', e)
+    sys.exit(0)
+print('NO ERROR')
+sys.exit(3)
+"""
+
+    REOPEN_AFTER_NOSYNC_CLOSE = """
+c = load()
+uri = c.execute("select forkdb_open_db(?, 'main')", (P,)).fetchone()[0]
+d = sqlite3.connect(uri, uri=True)
+d.execute("insert into t values (100, 'durable-write')")
+d.execute("commit")
+d.close()
+c.execute("select forkdb_close(?)", (P,)).fetchall()
+"""
+
+    # ---- tests ----
+
+    def test_default_issues_syncs(self):
+        path = os.path.join(self.dir, "def-syncs.fk")
+        r, count = self.run_counted(self.INIT_WORK_SCRIPT, path, "main", "none")
+        self.assertEqual(r.returncode, 0, "subprocess failed: rc=%s\n%s%s" % (r.returncode, r.stdout, r.stderr))
+        self.assertGreaterEqual(count, 30, "default (durable) store should issue >= 30 fsyncs, got %d" % count)
+
+    def test_nosync_issues_none(self):
+        path = os.path.join(self.dir, "nosync-none.fk")
+        r, count = self.run_counted(self.INIT_WORK_SCRIPT, path, "main", "nosync")
+        self.assertEqual(r.returncode, 0, "subprocess failed: rc=%s\n%s%s" % (r.returncode, r.stdout, r.stderr))
+        self.assertEqual(count, 0, "nosync store should issue exactly 0 fsyncs, got %d" % count)
+
+    def test_nosync_with_other_words_and_separators(self):
+        cases = [
+            ("nosync", "nosync", "nosync with spaces and comma"),
+            ("nosync,", "nosync", "nosync with trailing comma"),
+            ("nosync nosync", "nosync", "two nosync words"),
+        ]
+        for opt, root, desc in cases:
+            with self.subTest(opt=opt, root=root, desc=desc):
+                path = os.path.join(self.dir, "var-%s.fk" % desc.replace(" ", "-"))
+                r1, c1 = self.run_counted(self.INIT_WORK_SHORT_SCRIPT, path, root, opt)
+                self.assertEqual(r1.returncode, 0, "failed with opt=%r root=%r: rc=%s" % (opt, root, r1.returncode))
+                self.assertEqual(c1, 0, "nosync with opt=%r should give 0 fsyncs, got %d" % (opt, c1))
+        # Also test with a root name other than 'main'
+        path2 = os.path.join(self.dir, "trunk-nosync.fk")
+        r2, c2 = self.run_counted(self.INIT_WORK_NAMED_SCRIPT, path2, "trunk", "nosync")
+        self.assertEqual(r2.returncode, 0, "failed with trunk: rc=%s" % r2.returncode)
+        self.assertEqual(c2, 0, "nosync with root 'trunk' should give 0 fsyncs, got %d" % c2)
+
+    def test_unknown_option_is_an_error(self):
+        for opt in ("nosnyc", "nosync bogus"):
+            with self.subTest(opt=opt):
+                path = os.path.join(self.dir, "bad-%s.fk" % opt.replace(" ", "-"))
+                r, count = self.run_counted(self.INIT_WORK_SHORT_SCRIPT, path, "main", opt)
+                self.assertNotEqual(r.returncode, 0, "expected error for opt=%r, got rc=0" % (opt,))
+                self.assertIn("unknown option", r.stderr)
+                if opt == "nosync bogus":
+                    self.assertIn("bogus", r.stderr)
+                self.assertIn("OperationalError", r.stderr)
+
+    def test_nosync_data_survives_process_death(self):
+        path = os.path.join(self.dir, "crash.fk")
+        r = subprocess.run(
+            [sys.executable, "-c", PRELUDE + self.NOSYNC_CRASH_SCRIPT, SO, path],
+            capture_output=True, text=True, timeout=120
+        )
+        self.assertEqual(r.returncode, 9, "expected _exit(9), got rc=%s\n%s%s" % (r.returncode, r.stdout, r.stderr))
+        # Now open in the parent process
+        c = self.load()
+        self.new_store(c, path=path)
+        self.addCleanup(self.close_store, c, path)
+        db = self.open_branch(c, path=path)
+        rows = db.execute("select a from t order by a").fetchall()
+        self.assertEqual(len(rows), 20, "expected 20 rows after crash, got %d" % len(rows))
+        self.assertEqual(rows, [(i,) for i in range(20)])
+        self.assertEqual(db.execute("pragma integrity_check").fetchall(), [("ok",)])
+
+    def test_nosync_store_reopens_durably(self):
+        # Write data under nosync, close cleanly, then open the store in a counted
+        # subprocess (no init, just open_db). The reopened store should issue fsyncs
+        # (it is durable unless opened nosync), and the nosync data must be intact.
+        path = os.path.join(self.dir, "reopen.fk")
+
+        # First a nosync session: write 30 rows, fork/discard a few times, close.
+        r1 = run_py("""
+c = load()
+c.execute("select forkdb_init(?, 'main', 'nosync')", (P,)).fetchall()
+uri = c.execute("select forkdb_open_db(?, 'main')", (P,)).fetchone()[0]
+d = sqlite3.connect(uri, uri=True)
+d.execute("create table t(a integer primary key, b text)")
+for i in range(30):
+    d.execute("insert into t values (?, ?)", (i, 'nosync-row-' + str(i)))
+d.execute("commit")
+for i in range(5):
+    c.execute("select forkdb_fork(?, 'main', ?)", (P, 'f' + str(i))).fetchall()
+    c.execute("select forkdb_discard(?, ?)", (P, 'f' + str(i))).fetchall()
+c.execute("select forkdb_close(?)", (P,)).fetchall()
+print('nosync session done')
+""", path)
+        self.assertEqual(r1.returncode, 0, "nosync session failed: rc=%s\n%s%s" % (r1.returncode, r1.stdout, r1.stderr))
+
+        # Now a counted subprocess opens it without nosync (regular open_db), does a write.
+        r2, count = self.run_counted(self.REOPEN_AFTER_NOSYNC_CLOSE, path)
+        self.assertEqual(r2.returncode, 0, "durable reopen write failed: rc=%s\n%s%s" % (r2.returncode, r2.stdout, r2.stderr))
+        self.assertGreaterEqual(count, 1, "reopening without nosync should issue >= 1 fsync, got %d" % count)
+
+        # Verify data from nosync session is all there
+        c = self.load()
+        self.addCleanup(self.close_store, c, path)
+        uri = self.one(c, "select forkdb_open_db(?, 'main')", path)
+        db = sqlite3.connect(uri, uri=True)
+        self.addCleanup(db.close)
+        rows = db.execute("select a from t where a < 30 order by a").fetchall()
+        self.assertEqual(len(rows), 30, "expected 30 nosync rows, got %d" % len(rows))
+        self.assertEqual(db.execute("select a from t where a = 100").fetchone(), (100,))
+        self.assertEqual(db.execute("pragma integrity_check").fetchall(), [("ok",)])
+
+    COMPACT_SCRIPT = """
+c = load()
+opt = sys.argv[4]
+root = sys.argv[3]
+if opt == 'none':
+    c.execute("select forkdb_init(?, ?)", (P, root)).fetchall()
+else:
+    c.execute("select forkdb_init(?, ?, ?)", (P, root, opt)).fetchall()
+uri = c.execute("select forkdb_open_db(?, ?)", (P, root)).fetchone()[0]
+d = sqlite3.connect(uri, uri=True)
+d.execute("create table t(a integer primary key, b text)")
+d.execute("create index tb on t(b)")
+for i in range(2000):
+    d.execute("insert into t values (?, ?)", (i, 'v%d' % i))
+d.execute("commit")
+# Fork, write and discard to create garbage, then compact
+for i in range(20):
+    c.execute("select forkdb_fork(?, ?, ?)", (P, root, 'f%d' % i)).fetchall()
+    uri2 = c.execute("select forkdb_open_db(?, ?)", (P, 'f%d' % i)).fetchone()[0]
+    d2 = sqlite3.connect(uri2, uri=True)
+    d2.execute("update t set b = 'x' where a < 100")
+    d2.execute("commit")
+    d2.close()
+    c.execute("select forkdb_discard(?, ?)", (P, 'f%d' % i)).fetchall()
+# Compact with threshold 0 to force it
+r = c.execute("select forkdb_compact(?)", (P,)).fetchone()[0]
+c.execute("select forkdb_close(?)", (P,)).fetchall()
+"""
+
+    def test_nosync_compaction_issues_no_directory_sync(self):
+        """Compaction under nosync must not issue any fsync, including the directory sync after rename."""
+        path = os.path.join(self.dir, "nosync-compact.fk")
+        r, count = self.run_counted(self.COMPACT_SCRIPT, path, "main", "nosync")
+        self.assertEqual(r.returncode, 0, "nosync compaction failed: rc=%s\n%s%s" % (r.returncode, r.stdout, r.stderr))
+        self.assertEqual(count, 0, "nosync compaction should issue exactly 0 fsyncs, got %d" % count)
+
+    def test_nosync_store_is_still_locked(self):
+        # Parent opens a nosync store and keeps it open.
+        path = os.path.join(self.dir, "locked.fk")
+        c = self.load()
+        c.execute("select forkdb_init(?, 'main', 'nosync')", (path,)).fetchone()
+        self.addCleanup(self.close_store, c, path)
+        # Open a branch to hold the store open
+        db = self.open_branch(c, path=path)
+        db.execute("create table t(a)")
+        db.execute("insert into t values (1)")
+        db.execute("commit")
+
+        # Subprocess tries to open the store
+        r = subprocess.run(
+            [sys.executable, "-c", PRELUDE + self.LOCK_SCRIPT, SO, path],
+            capture_output=True, text=True, timeout=120
+        )
+        self.assertEqual(r.returncode, 0, "lock subprocess failed: rc=%s\n%s%s" % (r.returncode, r.stdout, r.stderr))
+        self.assertIn("open in another process", r.stdout,
+                      "expected 'open in another process' in stdout, got: %s" % r.stdout)
+
+        # Parent data is fine
+        self.assertEqual(db.execute("select count(*) from t").fetchone()[0], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

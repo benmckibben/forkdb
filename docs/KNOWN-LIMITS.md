@@ -29,6 +29,7 @@ Changesets are held in memory during diff, promote, and undo. SQLite's session A
 ## File system requirements
 
 - **Rename over an open file** is needed for compaction (`fk_compact`, open-time checkpoint). This works on local Unix file systems and WSL2. Without it, the store works but cannot compact — and the log grows with every fork + discard cycle.
+- **A store opened with `nosync` is not power-loss safe.** It survives the death of the process; after a power cut it refuses to open or opens to a state its workload had acknowledged, usually an older one (see DURABLE-STORE.md). Not tested on a real power cut.
 - **`fsync` semantics.** The store calls `fsync` after every commit unit and after recovery truncation. A file system that does not honour `fsync` (network mounts with write-back caching) can lose committed data on power loss.
 
 ## Snapshots

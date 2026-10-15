@@ -25,7 +25,7 @@ Whatever the test writes is gone afterwards, pass or fail. Under pytest-xdist ea
 
 | | |
 |---|---|
-| `forkdb_pytest.py` | the plugin: fixtures `db`, `db_uri`, `forkdb_seed`, `forkdb_configure`, `forkdb_stats`, options `--forkdb-dir`, `--forkdb-max-mb` |
+| `forkdb_pytest.py` | the plugin: fixtures `db`, `db_uri`, `forkdb_seed`, `forkdb_configure`, `forkdb_stats`, options `--forkdb-dir`, `--forkdb-max-mb`, `--forkdb-durable` |
 | `shop/`, `tests/` | a small order system (customers, products, orders, a view, a trigger, check constraints) and **116 tests** for it, written against the fixtures only. Several tests wreck their database on purpose |
 | `canary/` | isolation canaries: 283 tests that delete, drop, overwrite and leave transactions open, and others that check the seed is intact; run in order, reversed, shuffled, under 4 workers, on tmpfs, after a failing test, and with a tiny size limit |
 | `scale/` | the same 200 tests under forkdb, a file copy per test and a reseed per test, at 20 thousand to 1 million rows |
@@ -37,31 +37,33 @@ Needs Python whose `sqlite3` can load extensions and `build/ext/forkdb.so` (`scr
 ## What it costs, measured
 
 Linux, ext4 on a local disk versus tmpfs (`/dev/shm`), Python 3.12, SQLite 3.45. One "cycle" is what a test pays: get a private database that holds the seed, update ten rows,
-commit, throw it away. Median of 20 to 300 cycles (`bench_isolation.py`).
+commit, throw it away. Median of 20 to 300 cycles (`bench_isolation.py`; `NOSYNC=1` opens the store without fsync).
 
-| seed rows (file size) | forkdb, disk | file copy, disk | sqlite backup to memory | reseed | forkdb, tmpfs | file copy, tmpfs |
-|---|---|---|---|---|---|---|
-| 1 000 (0.1 MB) | 8.6 ms | 9.6 ms | 0.20 ms | 0.9 ms | 0.09 ms | 0.29 ms |
-| 20 000 (2.5 MB) | 8.7 ms | 12.1 ms | 0.81 ms | 18.8 ms | 0.10 ms | 1.3 ms |
-| 200 000 (25 MB) | 8.3 ms | 32.7 ms | 7.4 ms | 216 ms | 0.08 ms | 11.3 ms |
-| 1 000 000 (125 MB) | 8.4 ms | 123.5 ms | 51.3 ms | 1 155 ms | 0.09 ms | 58.1 ms |
+| seed rows (file size) | forkdb, fsync | **forkdb, nosync** | file copy | sqlite backup to memory | reseed | forkdb with fsync, tmpfs | file copy, tmpfs |
+|---|---|---|---|---|---|---|---|
+| 1 000 (0.1 MB) | 8.5 ms | **0.09 ms** | 9.6 ms | 0.20 ms | 0.9 ms | 0.09 ms | 0.29 ms |
+| 20 000 (2.5 MB) | 8.7 ms | **0.10 ms** | 12.1 ms | 0.81 ms | 18.8 ms | 0.10 ms | 1.3 ms |
+| 200 000 (25 MB) | 8.8 ms | **0.09 ms** | 32.7 ms | 7.4 ms | 216 ms | 0.08 ms | 11.3 ms |
+| 1 000 000 (125 MB) | 8.3 ms | **0.09 ms** | 123.5 ms | 51.3 ms | 1 155 ms | 0.09 ms | 58.1 ms |
 
 * **The cost of a fork does not depend on the size of the database.** It copies no pages.
-* **On a disk, a fork and a discard each end in an fsync** (about 3.8 ms apiece): that is the 8 ms floor. A backup to memory (which gives a private `:memory:` database, not one a second connection can open by name) beats it below about 250 000 rows,
-  and a reseed below about 20 000. A file copy beats it only when the test does not commit, because the copy then costs no fsync: that is why the 200-test run below favours copying at 20 000 rows. At 1 million rows forkdb is 15 times
-  faster than a copy in this table and 4.3 times in the 200-test run.
-* **On tmpfs the floor disappears** (0.01 ms for a fork, 0.01 ms for a discard) and forkdb is the fastest strategy at every size measured. `--forkdb-dir=/dev/shm/x` (or `FORKDB_DIR`) puts the stores there.
+* **With fsync, a fork and a discard each end in an fsync** (about 3.8 ms apiece): that is the 8.5 ms floor, and on a disk it makes a file copy, a backup to memory or a reseed as fast or faster below a few hundred thousand rows.
+* **Without fsync the floor is gone**: 0.01 ms for a fork and 0.01 ms for a discard, the whole cycle 0.09 ms at every size, faster than every other strategy in the table. The plugin therefore opens its stores with `nosync` by default
+  (`--forkdb-durable` puts the fsyncs back). That is safe here because the store is throwaway: it is deleted at the end of the session, and the data survives the death of the test process. Only a power cut loses it
+  (see [DURABLE-STORE.md](../../docs/DURABLE-STORE.md), "Running without syncs"). On tmpfs fsync is already almost free, so there the two modes are the same.
 
 The same 200 tests (100 reads, 60 committed writes, 40 uncommitted writes), whole pytest process in seconds (`scale/run_scale.sh`):
 
-| seed rows | forkdb, disk | copy, disk | reseed, disk | forkdb, tmpfs | copy, tmpfs | reseed, tmpfs |
-|---|---|---|---|---|---|---|
-| 20 000 | 2.67 | **1.53** | 14.2 | **0.45** | 0.82 | 5.7 |
-| 200 000 | 2.42 | 2.95 | 59.6 | **0.80** | 3.57 | 50.4 |
-| 1 000 000 | **5.56** | 23.9 | n/a | **2.94** | 13.6 | n/a |
+| seed rows | **forkdb, disk** | forkdb with fsync, disk | copy, disk | reseed, disk | forkdb, tmpfs | copy, tmpfs | reseed, tmpfs |
+|---|---|---|---|---|---|---|---|
+| 20 000 | **0.48** | 2.03 | 1.50 | 12.7 | 0.46 | 0.74 | 2.5 |
+| 200 000 | **0.80** | 2.39 | 5.74 | 61.7 | 0.76 | 3.55 | 49.0 |
+| 1 000 000 | **2.82** | 4.61 | 26.2 | n/a | 2.82 | 16.4 | n/a |
 
-The shop suite itself (113 tests when measured, a seed of about 1 MB): forkdb 1.34 s on disk and 0.40 s on tmpfs; file copy 0.96 s and 0.53 s; reseed 15.3 s and 5.7 s.
-**For a seed that small on a disk, copying the file is as good as forkdb or better.** The case for forkdb is a seed that is large, or a store on tmpfs, or many tests.
+(Disk columns from one run of the final script; the tmpfs columns from the earlier idle-machine run. An earlier version of the script timed with the wall clock, which jumped during one run, so it now uses `/proc/uptime`; pytest's own reported times agreed with the numbers kept here.)
+
+The shop suite itself (116 tests, a seed of about 1 MB), on a disk: forkdb with fsync 1.43 s, **forkdb with the plugin's default (nosync) 0.53 s**, file copy 0.96 s, reseed about 15 s (113 tests when the copy and reseed were measured, 1.34 s and 0.96 s then).
+With fsync, a small seed on a disk was a case where copying the file was as good; without it forkdb is the fastest strategy at every size measured.
 
 ## It grows, and the plugin compacts it
 

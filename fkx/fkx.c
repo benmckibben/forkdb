@@ -294,7 +294,7 @@ int fkx_open(const char *path, const fkx_options *o, fkx **out) {
   if (!o) o = &d;
   if (!o->create && access(path, F_OK) != 0) return FKX_ENOENT;
   fk_io io;
-  int orc = fk_file_open(path, &io);
+  int orc = fk_file_open_ex(path, &io, o->nosync ? FK_FILE_NOSYNC : 0);
   if (orc != 0) return orc == FK_ELOCKED ? FKX_ELOCKED : FKX_ESTORE;
   int wrapped = 0;
   if (o->prealloc_chunk) wrapped = fk_prealloc_wrap(&io, o->prealloc_chunk) == 0;

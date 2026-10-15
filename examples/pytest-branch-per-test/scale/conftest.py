@@ -5,7 +5,7 @@ import sys
 import pytest
 
 _PLUGIN = os.environ.get("SCALE_PLUGIN", "forkdb")
-pytest_plugins = ["forkdb_pytest"] if _PLUGIN == "forkdb" else ["baseline_plugins"]
+pytest_plugins = ["forkdb_pytest"] if _PLUGIN.startswith("forkdb") else ["baseline_plugins"]  # forkdb: no fsync (the plugin default); forkdb-durable: fsync
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 ROWS = int(os.environ.get("SCALE_ROWS", "200000"))

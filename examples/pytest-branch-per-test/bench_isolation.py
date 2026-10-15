@@ -7,6 +7,7 @@ A cycle is what a test pays: get a private writable database holding the seed, c
   backup   sqlite3 backup API from the seeded file into a :memory: database, write, close
   rebuild  create the schema and insert every row again (what a conftest with a seed script does per test)
 Usage: bench_isolation.py [rows ...]      (default 1000 20000 200000 1000000)   FORKDB_EXT overrides the library
+       NOSYNC=1                    open the store with the nosync option (no fsync): the forkdb numbers then show the cost without the disk
        WORK=commit|rollback|read   what the test does with its database (default commit): a commit is a durable, fsynced write on a real file
 """
 import os, shutil, sqlite3, statistics, sys, tempfile, time
@@ -74,7 +75,7 @@ def main():
         t0 = time.perf_counter(); seed(c, n); sec_plain = time.perf_counter() - t0
         c.close()
         fk = os.path.join(tmp, "seed-%d.fk" % n)
-        host.execute("select forkdb_init(?, 'main')", (fk,)).fetchall()
+        host.execute("select forkdb_init(?, 'main', ?)", (fk, "nosync" if os.environ.get("NOSYNC") else None)).fetchall()
         uri = host.execute("select forkdb_open_db(?, 'main')", (fk,)).fetchone()[0]
         c = sqlite3.connect(uri, uri=True)
         t0 = time.perf_counter(); seed(c, n); sec_fk = time.perf_counter() - t0

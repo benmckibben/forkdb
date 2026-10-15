@@ -244,6 +244,21 @@ static void fn_init(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     if (!path) { sqlite3_result_error(ctx, "init: path is NULL", -1); return; }
     const char *name = argc >= 2 ? (const char *)sqlite3_value_text(argv[1]) : "main";
     if (!name) name = "main";
+    /* Options, a space or comma separated word list. Only "nosync": no fsync for this open of the store (a throwaway store; see fk_file_open_ex in
+     * fkstore.h: it survives the death of the process, not a power cut). Any other word is an error, so a typo cannot silently leave a store durable. */
+    int nosync = 0;
+    if (argc >= 3 && sqlite3_value_type(argv[2]) != SQLITE_NULL) {
+        const char *opts = (const char *)sqlite3_value_text(argv[2]);
+        while (opts && *opts) {
+            while (*opts == ' ' || *opts == ',') opts++;
+            size_t n = 0;
+            while (opts[n] && opts[n] != ' ' && opts[n] != ',') n++;
+            if (n == 0) break;
+            if (n == 6 && !memcmp(opts, "nosync", 6)) nosync = 1;
+            else { char msg[96]; snprintf(msg, sizeof msg, "init: unknown option '%.*s' (known: nosync)", (int)(n > 30 ? 30 : n), opts); sqlite3_result_error(ctx, msg, -1); return; }
+            opts += n;
+        }
+    }
 
     fkx *x = repo_find(path);
     if (x) { sqlite3_result_error(ctx, "store is already open", -1); return; }
@@ -252,6 +267,7 @@ static void fn_init(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     fkx_options_default(&o);
     o.create = 1;
     o.root_name = name;
+    o.nosync = nosync;
     int rc = fkx_open(path, &o, &x);
     if (rc != FKX_OK) { open_failed(ctx, path, rc); return; }
     if (!repo_add(path, x, ctx)) return;
