@@ -53,10 +53,14 @@ static int f_pwrite(void *ctx, uint64_t off, const void *buf, size_t n) {
   return 0;
 }
 static int f_truncate(void *ctx, uint64_t size) { return ftruncate(FD(ctx), (off_t)size); }
+static unsigned long long g_syncs; /* see fk_file_sync_count in fkstore.h */
+unsigned long long fk_file_sync_count(void) { return __atomic_load_n(&g_syncs, __ATOMIC_RELAXED); }
+#define COUNT_SYNC() ((void)__atomic_fetch_add(&g_syncs, 1, __ATOMIC_RELAXED))
 static int f_fsync(void *ctx) {
 #ifndef FK_BUG_NOSYNC_STILL_SYNCS
   if (((FC *)ctx)->nosync) return 0;
 #endif
+  COUNT_SYNC();
 #ifdef __APPLE__
   return fsync(FD(ctx));
 #else
@@ -73,6 +77,7 @@ static int sync_dir_of(const char *path) {
   if (n == 0) { dir[0] = '.'; dir[1] = 0; } else if (n > 1) dir[n - 1] = 0; else dir[1] = 0;
   int dfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   if (dfd < 0) return -1;
+  COUNT_SYNC();
   int rc = fsync(dfd);
   close(dfd);
   return rc;

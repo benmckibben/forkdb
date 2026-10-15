@@ -160,6 +160,10 @@ int fk_file_open(const char *path, fk_io *io);
  * open, with or without the flag, reads it as usual. Compaction swaps files without syncing either. */
 #define FK_FILE_NOSYNC 1
 int fk_file_open_ex(const char *path, fk_io *io, int flags);
+/* How many times the file backend has asked the operating system to make data durable (fsync, fdatasync, FlushFileBuffers, a directory sync) since the process started, for every
+ * store in it. A store opened with FK_FILE_NOSYNC never adds to it. It counts calls made, not calls that succeeded. Meant for tests, benchmarks and for anyone who wants to check that
+ * a store is doing what they think: it works the same on every platform, where counting the system calls from outside (LD_PRELOAD) works only on some. */
+unsigned long long fk_file_sync_count(void);
 void fk_file_close(fk_io *io);
 
 #endif
