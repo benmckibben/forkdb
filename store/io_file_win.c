@@ -59,20 +59,11 @@ static wchar_t *tmp_wpath(const wchar_t *p) {
   return t;
 }
 
-
-/* TEMPORARY DIAGNOSTICS (to be reverted): with -DFK_WIN_DEBUG every failing return reports its line and GetLastError. */
-#ifdef FK_WIN_DEBUG
-#include <stdio.h>
-static int FKFAIL(int line) { fprintf(stderr, "io_file_win.c:%d GetLastError=%lu\n", line, (unsigned long)GetLastError()); return -1; }
-#else
-#define FKFAIL(line) (-1)
-#endif
-
 /* ---------- I/O operations ---------- */
 
 static int64_t w_size(void *ctx) {
   LARGE_INTEGER li;
-  if (!GetFileSizeEx(H(ctx), &li)) return FKFAIL(__LINE__);
+  if (!GetFileSizeEx(H(ctx), &li)) return -1;
   return li.QuadPart;
 }
 
@@ -86,7 +77,7 @@ static int w_pread(void *ctx, uint64_t off, void *buf, size_t n) {
   SetFilePointerEx(h, (LARGE_INTEGER){0}, &oldpos, FILE_CURRENT);
 
   /* seek to offset, read, restore */
-  if (!SetFilePointerEx(h, li, NULL, FILE_BEGIN)) return FKFAIL(__LINE__);
+  if (!SetFilePointerEx(h, li, NULL, FILE_BEGIN)) return -1;
 
   size_t done = 0;
   while (done < n) {
@@ -94,7 +85,7 @@ static int w_pread(void *ctx, uint64_t off, void *buf, size_t n) {
     if (!ReadFile(h, (char *)buf + done, (DWORD)(n - done > MAXDWORD ? MAXDWORD : n - done), &nr, NULL)) {
       if (GetLastError() == ERROR_OPERATION_ABORTED) continue;
       SetFilePointerEx(h, oldpos, NULL, FILE_BEGIN);
-      return FKFAIL(__LINE__);
+      return -1;
     }
     if (nr == 0) break;
     done += nr;
@@ -112,7 +103,7 @@ static int w_pwrite(void *ctx, uint64_t off, const void *buf, size_t n) {
   LARGE_INTEGER oldpos = {0};
   SetFilePointerEx(h, (LARGE_INTEGER){0}, &oldpos, FILE_CURRENT);
 
-  if (!SetFilePointerEx(h, li, NULL, FILE_BEGIN)) return FKFAIL(__LINE__);
+  if (!SetFilePointerEx(h, li, NULL, FILE_BEGIN)) return -1;
 
   size_t done = 0;
   while (done < n) {
@@ -120,7 +111,7 @@ static int w_pwrite(void *ctx, uint64_t off, const void *buf, size_t n) {
     if (!WriteFile(h, (const char *)buf + done, (DWORD)(n - done > MAXDWORD ? MAXDWORD : n - done), &nw, NULL)) {
       if (GetLastError() == ERROR_OPERATION_ABORTED) continue;
       SetFilePointerEx(h, oldpos, NULL, FILE_BEGIN);
-      return FKFAIL(__LINE__);
+      return -1;
     }
     done += nw;
   }
@@ -132,8 +123,8 @@ static int w_pwrite(void *ctx, uint64_t off, const void *buf, size_t n) {
 static int w_truncate(void *ctx, uint64_t size) {
   LARGE_INTEGER li;
   li.QuadPart = (LONGLONG)size;
-  if (!SetFilePointerEx(H(ctx), li, NULL, FILE_BEGIN)) return FKFAIL(__LINE__);
-  if (!SetEndOfFile(H(ctx))) return FKFAIL(__LINE__);
+  if (!SetFilePointerEx(H(ctx), li, NULL, FILE_BEGIN)) return -1;
+  if (!SetEndOfFile(H(ctx))) return -1;
   return 0;
 }
 
@@ -155,7 +146,7 @@ static int sync_dir_of(const wchar_t *path, HANDLE file) {
   /* Get the parent directory path */
   size_t n = wcslen(path);
   wchar_t *dir = malloc((n + 1) * sizeof(wchar_t));
-  if (!dir) return FKFAIL(__LINE__);
+  if (!dir) return -1;
   memcpy(dir, path, (n + 1) * sizeof(wchar_t));
   while (n > 0 && dir[n - 1] != L'\\' && dir[n - 1] != L'/') n--;
   if (n > 1) dir[n - 1] = 0; else { dir[0] = L'.'; dir[1] = 0; }
@@ -168,7 +159,7 @@ static int sync_dir_of(const wchar_t *path, HANDLE file) {
     CloseHandle(h);
     if (ok == 0) return 0;
   }
-  return FlushFileBuffers(file) ? 0 : FKFAIL(__LINE__);
+  return FlushFileBuffers(file) ? 0 : -1;
 }
 
 static void fill(fk_io *io, WC *c, int main_file) {
@@ -192,16 +183,16 @@ static void fill(fk_io *io, WC *c, int main_file) {
 static int w_sibling_create(void *ctx, fk_io *tmp) {
   WC *m = ctx;
   wchar_t *tp = tmp_wpath(m->path);
-  if (!tp) return FKFAIL(__LINE__);
+  if (!tp) return -1;
 
   /* DELETE access: the rename in w_sibling_rename is made through this handle. The share mode is the main file's (readers and deleters, no writers): after the
    * rename this very handle becomes the main handle, so the one-opener lock is never released. */
   HANDLE h = CreateFileW(tp, GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
-  if (h == INVALID_HANDLE_VALUE) { free(tp); return FKFAIL(__LINE__); }
+  if (h == INVALID_HANDLE_VALUE) { free(tp); return -1; }
 
   WC *t = malloc(sizeof *t);
-  if (!t) { CloseHandle(h); DeleteFileW(tp); free(tp); return FKFAIL(__LINE__); }
+  if (!t) { CloseHandle(h); DeleteFileW(tp); free(tp); return -1; }
   t->h = h;
   t->path = tp;
   t->nosync = m->nosync;
@@ -229,18 +220,18 @@ static int w_sibling_rename(void *ctx, fk_io *tmp) {
   WC *m = ctx, *t = tmp->ctx;
 
   DWORD fn = GetFullPathNameW(m->path, 0, NULL, NULL);
-  if (fn == 0) return FKFAIL(__LINE__);
+  if (fn == 0) return -1;
   size_t bytes = sizeof(FK_RENAME_INFO_EX) + (size_t)fn * sizeof(WCHAR);
   FK_RENAME_INFO_EX *ri = calloc(1, bytes);
-  if (!ri) return FKFAIL(__LINE__);
+  if (!ri) return -1;
   DWORD got = GetFullPathNameW(m->path, fn, ri->FileName, NULL);
-  if (got == 0 || got >= fn) { free(ri); return FKFAIL(__LINE__); }
+  if (got == 0 || got >= fn) { free(ri); return -1; }
   ri->Flags = FK_RENAME_REPLACE_IF_EXISTS | FK_RENAME_POSIX_SEMANTICS;
   ri->RootDirectory = NULL;
   ri->FileNameLength = (DWORD)(got * sizeof(WCHAR));
   BOOL ok = SetFileInformationByHandle(t->h, (FILE_INFO_BY_HANDLE_CLASS)FK_FILE_RENAME_INFO_EX_CLASS, ri, (DWORD)bytes);
   free(ri);
-  if (!ok) return FKFAIL(__LINE__); /* t is untouched: w_sibling_remove closes and deletes it */
+  if (!ok) return -1; /* t is untouched: w_sibling_remove closes and deletes it */
 
   /* The compacted file is now the file at m->path, and t->h, opened with the main file's share mode, is a handle on it: it becomes the main handle. The old handle
    * refers to the unlinked old file; closing it frees that. */
@@ -283,7 +274,7 @@ int fk_file_open(const char *path, fk_io *io) { return fk_file_open_ex(path, io,
 
 int fk_file_open_ex(const char *path, fk_io *io, int flags) {
   wchar_t *wp = to_wpath(path);
-  if (!wp) return FKFAIL(__LINE__);
+  if (!wp) return -1;
 
   DWORD creation = (GetFileAttributesW(wp) != INVALID_FILE_ATTRIBUTES) ? OPEN_EXISTING : CREATE_NEW;
   /* FILE_SHARE_READ without FILE_SHARE_WRITE is the lock: a second opener that asks for write access is refused by the system. FILE_SHARE_DELETE is
@@ -299,7 +290,7 @@ int fk_file_open_ex(const char *path, fk_io *io, int flags) {
   }
 
   WC *c = malloc(sizeof *c);
-  if (!c) { CloseHandle(h); free(wp); return FKFAIL(__LINE__); }
+  if (!c) { CloseHandle(h); free(wp); return -1; }
   c->h = h;
   c->path = wp;
   c->nosync = (flags & FK_FILE_NOSYNC) != 0;
