@@ -763,7 +763,7 @@ out:
   fk_close(s);
 }
 
-typedef struct { Ack a; int batch; uint64_t pa; long images, violations, half_created; const char *what; long crash_at; } Ctx;
+typedef struct { Ack a; int batch; uint64_t pa; long images, violations, half_created, refused, opened, lagged, lost_all; int nosync; const char *what; long crash_at; } Ctx;
 
 static long expect_rows(int last) { long n = 0; for (int j = 1; j <= last; j++) n += rows_for(j); return n; }
 
@@ -795,26 +795,36 @@ static void verify_image(void *cx, const uint8_t *img, uint64_t len) {
   char why[200] = "";
   int bad = 0;
   int orc = fk_open(&io, &s);
-  if (orc != 0 && len <= FK_HEADER_SZ && c->a.ack0 < 0 && !c->a.forked) {
+  if (orc != 0 && !c->nosync && len <= FK_HEADER_SZ && c->a.ack0 < 0 && !c->a.forked) {
     /* the power was cut while the store was being created and nothing was acknowledged: what is left is a torn header write, which under this model can be arbitrary bytes.
      * It holds no data, so refusing it loses nothing (see the same allowance in crash_test.c; open must never take somebody else's short file for such a remnant, which file_test.c checks) */
     c->half_created++;
     goto done;
   }
+  if (orc != 0 && c->nosync) { c->refused++; goto done; } /* with no syncs the file may say it cannot be trusted: refusing is an allowed answer, not a loss */
   if (orc != 0) { bad = 1; snprintf(why, sizeof why, "the store does not open"); goto done; }
+  if (c->nosync) c->opened++;
   if (fkvfs_register(s, "fkq", &v) != SQLITE_OK) { bad = 1; snprintf(why, sizeof why, "register"); goto done; }
   fkvfs_set_batch_atomic(v, c->batch);
   sqlite3 *db = openb("fkq", 0);
   if (!db) { bad = 1; snprintf(why, sizeof why, "b0 does not open"); goto closeit; }
-  bad = check_branch(db, 0, c->a.ack0, c->a.ack0 < 0 ? 0 : c->a.ack0 + 1, why, sizeof why);
+  /* no syncs: any prefix of what was acknowledged may be what the disk kept (b0 may even be empty), but never a partial transaction and never something not yet started */
+  bad = check_branch(db, 0, c->nosync ? -1 : c->a.ack0, c->a.ack0 < 0 ? 0 : c->a.ack0 + 1, why, sizeof why);
+  long long b0_last = -1;
+  if (!bad && c->nosync && scalar(db, "SELECT count(*) FROM sqlite_master WHERE name = 'meta'") == 1) b0_last = scalar(db, "SELECT last FROM meta");
+  if (!bad && c->nosync) {
+    if (b0_last < c->a.ack0) c->lagged++;
+    if (b0_last <= 0 && c->a.ack0 > 0) c->lost_all++;
+  }
   sqlite3_close(db);
   if (!bad) {
-    if (c->a.forked && !fk_branch_alive(s, 1)) { bad = 1; snprintf(why, sizeof why, "an acknowledged fork is gone"); }
+    if (c->a.forked && !c->nosync && !fk_branch_alive(s, 1)) { bad = 1; snprintf(why, sizeof why, "an acknowledged fork is gone"); }
     else if (fk_branch_alive(s, 1)) {
       db = openb("fkq", 1);
       if (!db) { bad = 1; snprintf(why, sizeof why, "b1 does not open"); }
       else {
-        if (c->a.forked) bad = check_branch(db, 1, c->a.ack1, c->a.ack1 + 1, why, sizeof why);
+        if (c->nosync && b0_last < 3) { bad = 1; snprintf(why, sizeof why, "b1 exists but b0 is at transaction %lld: the fork was made after transaction 3", b0_last); }
+        else if (c->a.forked) bad = check_branch(db, 1, c->nosync ? 3 : c->a.ack1, c->a.ack1 + 1, why, sizeof why);
         else bad = check_branch(db, 1, 3, 3, why, sizeof why); /* the fork may have landed without being acknowledged: then it is b0 as of transaction 3 */
         sqlite3_close(db);
       }
@@ -846,22 +856,26 @@ static void power_loss(int batch, uint64_t pa) {
   if (step < 1) step = 1;
   Rng r;
   rng_seed(&r, 12345u + (uint64_t)batch);
-  long images = 0, viol = 0, points = 0, dropped_acks = 0, half = 0;
-  for (int mode = 0; mode < 2; mode++) { /* 0: the power is cut before I/O event N; 1: the fsync number N fails, then the power is cut */
+  long images = 0, viol = 0, points = 0, dropped_acks = 0, half = 0, ns_images = 0, ns_refused = 0, ns_opened = 0, ns_lagged = 0, ns_lost_all = 0, ns_viol = 0;
+  for (int mode = 0; mode < 3; mode++) { /* 0: the power is cut before I/O event N; 1: the fsync number N fails, then the power is cut; 2: as 0, on a store opened with no syncs (FK_FILE_NOSYNC) */
     for (long n = (mode ? 1 : 0); n <= events + 1; n += step) {
       SimDisk w;
       sim_init(&w, NULL, 0);
-      if (mode == 0) w.crash_at = n; else w.fsync_fail_at = n;
+      if (mode == 0) w.crash_at = n;
+      else if (mode == 2) { w.crash_at = n; w.nosync = 1; }
+      else w.fsync_fail_at = n;
       Ctx c;
       memset(&c, 0, sizeof c);
       workload(&w, batch, pa, &c.a);
       c.batch = batch;
       c.pa = pa;
-      c.what = mode ? "fsync fails" : "power cut";
+      c.nosync = mode == 2;
+      c.what = mode == 2 ? "power cut, no syncs" : mode ? "fsync fails" : "power cut";
       c.crash_at = n;
+      if (mode == 2) sim_images_prefix(&w, &r, 24, verify_image, &c);
       sim_images(&w, &r, verify_image, &c);
-      images += c.images;
-      viol += c.violations;
+      if (mode == 2) { ns_images += c.images; ns_refused += c.refused; ns_opened += c.opened; ns_lagged += c.lagged; ns_lost_all += c.lost_all; ns_viol += c.violations; }
+      else { images += c.images; viol += c.violations; }
       half += c.half_created;
       points++;
       if (c.a.ack0 < NT) dropped_acks++;
@@ -871,6 +885,10 @@ static void power_loss(int batch, uint64_t pa) {
   printf("   %ld I/O events in the run; %ld crash or failure points, %ld post-crash images checked (%ld of them a half-created store, refused: nothing was acknowledged yet), %ld violations\n", events, points, images, half, viol);
   CHECK(viol == 0, "every post-crash image is a state SQLite could have committed (%ld violations)", viol);
   CHECK(images > 0 && dropped_acks > 0, "the harness actually cut runs short");
+  printf("   no syncs (FK_FILE_NOSYNC): %ld post-crash images: %ld refused to open, %ld opened (%ld of them to a state older than the last acknowledged transaction, %ld of those to an empty b0), %ld violations\n", ns_images, ns_refused, ns_opened, ns_lagged, ns_lost_all, ns_viol);
+  CHECK(ns_viol == 0, "with no syncs, every image either refuses to open or is a state SQLite committed at some point (a transaction acknowledged earlier, never a partial one) (%ld violations)", ns_viol);
+  CHECK(ns_opened > 0 && ns_refused + ns_opened == ns_images, "no-sync images are all accounted for (%ld refused + %ld opened = %ld)", ns_refused, ns_opened, ns_images);
+  CHECK(ns_lagged > 0, "the no-sync pass really loses acknowledged transactions (%ld images older than the last acknowledged one): it is testing what it claims", ns_lagged);
 }
 
 int main(int argc, char **argv) {
