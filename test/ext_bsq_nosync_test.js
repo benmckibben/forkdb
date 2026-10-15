@@ -174,7 +174,7 @@ test('bsq nosync nosync issues no fsyncs', (t) => {
 // 3. nosync option words with other words and separators.
 test('bsq nosync option words with other words and separators', async (t) => {
   const cases = [
-    { opt: 'nosync', root: 'nosync', desc: 'nosync with spaces and comma' },
+    { opt: 'nosync, nosync', root: 'nosync', desc: 'nosync with spaces and comma' },
     { opt: 'nosync,', root: 'nosync', desc: 'nosync with trailing comma' },
     { opt: 'nosync nosync', root: 'nosync', desc: 'two nosync words' },
   ];
