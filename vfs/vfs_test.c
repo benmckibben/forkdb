@@ -763,7 +763,7 @@ out:
   fk_close(s);
 }
 
-typedef struct { Ack a; int batch; uint64_t pa; long images, violations; const char *what; long crash_at; } Ctx;
+typedef struct { Ack a; int batch; uint64_t pa; long images, violations, half_created; const char *what; long crash_at; } Ctx;
 
 static long expect_rows(int last) { long n = 0; for (int j = 1; j <= last; j++) n += rows_for(j); return n; }
 
@@ -794,7 +794,14 @@ static void verify_image(void *cx, const uint8_t *img, uint64_t len) {
   FkVfs *v = NULL;
   char why[200] = "";
   int bad = 0;
-  if (fk_open(&io, &s) != 0) { bad = 1; snprintf(why, sizeof why, "the store does not open"); goto done; }
+  int orc = fk_open(&io, &s);
+  if (orc != 0 && len <= FK_HEADER_SZ && c->a.ack0 < 0 && !c->a.forked) {
+    /* the power was cut while the store was being created and nothing was acknowledged: what is left is a torn header write, which under this model can be arbitrary bytes.
+     * It holds no data, so refusing it loses nothing (see the same allowance in crash_test.c; open must never take somebody else's short file for such a remnant, which file_test.c checks) */
+    c->half_created++;
+    goto done;
+  }
+  if (orc != 0) { bad = 1; snprintf(why, sizeof why, "the store does not open"); goto done; }
   if (fkvfs_register(s, "fkq", &v) != SQLITE_OK) { bad = 1; snprintf(why, sizeof why, "register"); goto done; }
   fkvfs_set_batch_atomic(v, c->batch);
   sqlite3 *db = openb("fkq", 0);
@@ -839,7 +846,7 @@ static void power_loss(int batch, uint64_t pa) {
   if (step < 1) step = 1;
   Rng r;
   rng_seed(&r, 12345u + (uint64_t)batch);
-  long images = 0, viol = 0, points = 0, dropped_acks = 0;
+  long images = 0, viol = 0, points = 0, dropped_acks = 0, half = 0;
   for (int mode = 0; mode < 2; mode++) { /* 0: the power is cut before I/O event N; 1: the fsync number N fails, then the power is cut */
     for (long n = (mode ? 1 : 0); n <= events + 1; n += step) {
       SimDisk w;
@@ -855,12 +862,13 @@ static void power_loss(int batch, uint64_t pa) {
       sim_images(&w, &r, verify_image, &c);
       images += c.images;
       viol += c.violations;
+      half += c.half_created;
       points++;
       if (c.a.ack0 < NT) dropped_acks++;
       sim_free(&w);
     }
   }
-  printf("   %ld I/O events in the run; %ld crash or failure points, %ld post-crash images checked, %ld violations\n", events, points, images, viol);
+  printf("   %ld I/O events in the run; %ld crash or failure points, %ld post-crash images checked (%ld of them a half-created store, refused: nothing was acknowledged yet), %ld violations\n", events, points, images, half, viol);
   CHECK(viol == 0, "every post-crash image is a state SQLite could have committed (%ld violations)", viol);
   CHECK(images > 0 && dropped_acks > 0, "the harness actually cut runs short");
 }
