@@ -25,6 +25,7 @@ forkdb is a C library that requires:
 ./scripts/build-ext.sh              # produces build/ext/forkdb.so
 ./scripts/test-ext.sh               # builds it and runs test/ext_py_test.py through Python's sqlite3
 ./scripts/test-ext-node.sh          # builds it and runs test/ext_node*_test.js through Node 24's built-in node:sqlite
+./scripts/test-ext-bsq.sh           # installs better-sqlite3 13.0.3 (npm, into build/) and runs test/ext_bsq*_test.js through it
 
 # Build both plus the test suite
 ./scripts/build-step4.sh test

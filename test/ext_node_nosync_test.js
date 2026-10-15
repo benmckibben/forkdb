@@ -169,7 +169,9 @@ test('H nosync nosync issues no fsyncs', (t) => {
 // 3. nosync option words with other words and separators.
 test('H nosync option words with other words and separators', async (t) => {
   const cases = [
-    { opt: 'nosync', root: 'nosync', desc: 'nosync with spaces and comma' },
+    { opt: 'nosync, nosync', root: 'nosync', desc: 'nosync with spaces and comma' },
+    { opt: ',nosync', root: 'nosync', desc: 'a leading comma' },
+    { opt: '  nosync  ,  ', root: 'nosync', desc: 'runs of separators' },
     { opt: 'nosync,', root: 'nosync', desc: 'nosync with trailing comma' },
     { opt: 'nosync nosync', root: 'nosync', desc: 'two nosync words' },
   ];
@@ -192,7 +194,7 @@ test('H nosync option words with other words and separators', async (t) => {
 
 // 4. an unknown option word is an error and does not create a store.
 test('H nosync unknown option is an error', async (t) => {
-  const cases = ['nosnyc', 'nosync bogus'];
+  const cases = ['nosnyc', 'nosync bogus', 'nosync,bogus', 'nosync, bogus'];
   for (const opt of cases) {
     await t.test('opt: ' + opt, (st) => {
       const dir = tmpdir(st);
@@ -202,7 +204,7 @@ test('H nosync unknown option is an error', async (t) => {
       assert.notEqual(r.status, 0, 'expected error for opt=' + JSON.stringify(opt) + ', got status=' + r.status + ' stdout=' + r.stdout + ' stderr=' + r.stderr);
       const combined = r.stdout + r.stderr;
       assert.ok(combined.includes('unknown option'), 'expected "unknown option" in output: ' + combined);
-      if (opt === 'nosync bogus') assert.ok(combined.includes('bogus'), 'expected "bogus" in output for ' + opt);
+      if (opt.includes('bogus')) assert.ok(combined.includes('bogus'), 'expected "bogus" in output for ' + opt);
       assert.ok(!fs.existsSync(store), 'an unknown option must not create the store file');
     });
   }

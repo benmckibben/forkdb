@@ -133,6 +133,19 @@ jobs:
       - name: Build the loadable extension and test it from Node's built-in SQLite
         run: scripts/test-ext-node.sh
 
+  extension-bsq:
+    name: Extension tests (better-sqlite3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install the pinned better-sqlite3 and test the loadable extension from it
+        run: scripts/test-ext-bsq.sh
+
   cli:
     name: CLI tests
     runs-on: ubuntu-latest
