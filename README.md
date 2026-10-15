@@ -10,7 +10,7 @@ forkdb is a C library that requires:
 
 - A SQLite built with the **session API** (`SQLITE_ENABLE_SESSION`, `SQLITE_ENABLE_PREUPDATE_HOOK`) for diff/promote/undo. The CLI and the library are built with it. The portable loadable extension (`scripts/build-ext.sh`) is not: the session API is not in the table SQLite gives an extension, so its `diff`, `promote` and `undo` report that this host has none (`forkdb_info.session_api` is 0), and the VFS and branch operations work.
 - A file system that supports **rename over an open file** for compaction (otherwise the store works without it).
-- **Single-writer.** One writer transaction at a time, across all branches, enforced by the VFS. Reads from separate connections on different branches are fine.
+- **One writer per branch.** SQLite allows one write transaction at a time on a branch. Connections on different branches can each have a write transaction open at once and commit independently (measured, see KNOWN-LIMITS.md); one connection cannot write two branches in one transaction.
 
 ## Quick start
 
@@ -105,7 +105,7 @@ If you need the durable guarantee, run your own power-cut test on your hardware 
 
 Measured by CI on its runners (`scripts/bench-nosync.sh`: the median of 5 runs on fresh stores after a warm-up, Node 24; the job summary of `What nosync saves` has each table). Durability calls per operation are the same on every platform (1.03, 4.13, 5.16); the times are not, and are the time of one disk of one runner on one day, not a property of the platform.
 
-| operation (durable ms/op, then `nosync` ms/op, then the ratio) | Linux (ext4) | macOS (APFS, virtual) | Windows (NTFS) |
+| operation (durable ms/op, then `nosync` ms/op, then the ratio) | Linux (ext4) | macOS (virtual machine) | Windows (NTFS) |
 |---|---|---|---|
 | commit (insert one row): 1.03 syncs durable, 0 with `nosync` | 0.133, 0.0152, 9x | 0.827, 0.0115, 72x | 5.577, 0.0237, 235x |
 | fork and discard: 4.13 syncs durable, 0 with `nosync` | 0.448, 0.0190, 24x | 0.304, 0.0124, 25x | 21.834, 0.0243, 900x |
@@ -125,10 +125,11 @@ Every row is something CI runs; a blank cell is something that is **not** tested
 | Loadable extension builds (`scripts/build-ext.sh`) | `.so`, gcc | `.dylib`, Apple clang | `.dll`, mingw-w64 gcc (not MSVC) |
 | Extension from Node 24's built-in `node:sqlite` (23 tests, plus the `nosync` file) | yes | yes | yes |
 | Extension from better-sqlite3 13.0.3 (22 tests, plus the `nosync` file) | yes | yes | yes |
-| Extension from Python's `sqlite3` (62 tests) | yes | | |
+| Extension from Python's `sqlite3`: the full suite (62 tests) | yes | | |
+| The Python wheel installed in a clean virtual environment, with `test/smoke_py.py` | yes | yes (Homebrew's Python; see below) | yes |
 | Extension in SQLite 3.24.0, the oldest supported (shell built from the amalgamation) | yes | | |
 
-What runs only on Linux, and why: the Python suite (it uses `LD_PRELOAD` and POSIX signals; whether the macOS and Windows Pythons can load extensions at all has not been checked), and the one test per Node host that checks `forkdb_sync_count()` against the `fsync` system calls (an `LD_PRELOAD` interposer). The `nosync` behaviour tests run on all three, counting with `forkdb_sync_count()`. Power loss under `nosync` is simulated, never real, on every platform. SQLite versions the extension has run in: 3.24.0 (shell), 3.45.1 (Python), 3.50.0 (C tests), 3.53.x (both Node hosts). 32-bit builds, MSVC, and any macOS or Windows version other than the CI runners' are untested.
+What runs only on Linux, and why: the full Python suite (it uses `LD_PRELOAD` and POSIX signals; only the smoke test of the installed wheel runs on macOS and Windows), and the one test per Node host that checks `forkdb_sync_count()` against the `fsync` system calls (an `LD_PRELOAD` interposer). The `nosync` behaviour tests run on all three, counting with `forkdb_sync_count()`. Power loss under `nosync` is simulated, never real, on every platform. SQLite versions the extension has run in: 3.24.0 (shell), 3.45.1 (Python), 3.50.0 (C tests), 3.53.x (both Node hosts). 32-bit builds, MSVC, and any macOS or Windows version other than the CI runners' are untested.
 
 ## Known limitations
 
@@ -138,7 +139,7 @@ See [KNOWN-LIMITS.md](docs/KNOWN-LIMITS.md). The short version:
 - DDL: new tables, indexes and triggers are replayed by promote; alterations to existing objects and dropped objects are refused with the reason named
 - Virtual tables and FTS shadow tables are not compared
 - Large changesets are held in memory (a streaming interface exists but is not exposed to callers yet)
-- Single-writer (one writer at a time, reads from separate connections are fine)
+- One writer per branch (writers on different branches can overlap; one connection cannot write two branches in one transaction)
 - Durability is tested against a simulated disk, not a real power cut (see Durability above)
 - better-sqlite3 needs the environment variable `SQLITE_USE_URI=1` before it is required; without it opening a branch fails (see KNOWN-LIMITS.md)
 
