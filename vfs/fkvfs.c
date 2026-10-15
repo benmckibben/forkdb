@@ -155,6 +155,7 @@ static const sqlite3_io_methods fkf_methods, mem_methods;
 static int parse_branch(const char *z, uint32_t *b) {
   if (!z) return -1;
   if (*z == '/') z++;
+  if (!strncmp(z, "forkdb/", 7)) z += 7; /* the shape forkdb_open_db returns: file:/forkdb/b12 */
   if (*z != 'b') return -1;
   z++;
   if (!*z) return -1;

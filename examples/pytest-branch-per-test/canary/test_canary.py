@@ -72,4 +72,4 @@ def test_no_branch_outlives_its_test(db, forkdb_store, forkdb_stats):
     for k in range(1, forkdb_stats["forks"]):
         with pytest.raises(sqlite3.OperationalError, match="no branch named"):
             forkdb_store.host.execute("select forkdb_open_db(?, ?)", (forkdb_store.path, "t%d" % k)).fetchall()
-    assert forkdb_store.host.execute("select forkdb_open_db(?, ?)", (forkdb_store.path, "t%d" % forkdb_stats["forks"])).fetchone()[0].startswith("file:b")
+    assert forkdb_store.host.execute("select forkdb_open_db(?, ?)", (forkdb_store.path, "t%d" % forkdb_stats["forks"])).fetchone()[0].startswith("file:/forkdb/b")
