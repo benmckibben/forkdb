@@ -136,7 +136,7 @@ jobs:
       matrix:
         include:
           - { name: linux-x86_64, os: ubuntu-latest, ext: so, plat: '--config-setting=--build-option=--plat-name=manylinux_2_28_x86_64', venvpy: venv/bin/python }
-          - { name: darwin-arm64, os: macos-latest, ext: dylib, plat: '', venvpy: venv/bin/python }
+          - { name: darwin-arm64, os: macos-latest, ext: dylib, plat: '--config-setting=--build-option=--plat-name=macosx_11_0_arm64', venvpy: venv/bin/python }
           - { name: windows-x86_64, os: windows-latest, ext: dll, plat: '', venvpy: venv/Scripts/python }
     defaults:
       run:
@@ -159,6 +159,11 @@ jobs:
           python -m pip install --upgrade build wheel setuptools
           (cd python && python -m build --wheel ${{ matrix.plat }} -o ../dist .)
           ls -l dist
+
+      # A wheel is installed on every machine its tag allows. The macOS wheel was first tagged universal2 (that is what the runner Python's build says) around an arm64-only library:
+      # pip would have installed it on an Intel Mac, where it cannot load. Check that the tag says what the library is.
+      - name: The wheel tag matches the library inside
+        run: python scripts/check-wheel.py dist/*.whl
 
       # A clean virtual environment with nothing but the wheel: no FORKDB_EXTENSION_PATH, no repository on the path, so the library it loads is the one inside the wheel.
       # The Python that actions/setup-python installs on macOS is built without Connection.enable_load_extension (measured: 3.12.10 with SQLite 3.49.1), so forkdb cannot be
