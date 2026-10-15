@@ -38,13 +38,14 @@ function runCountedWith(t, interposer, code, ...args) {
 }
 const runCounted = (t, code, ...args) => runCountedWith(t, false, code, ...args);
 
-const baselines = {};
+// forkdb_sync_count() counts only what the store itself asks the operating system for, so a process that merely loads the extension is at exactly 0 (the first test checks it).
+// It is a constant, not a measurement, so that any single test can be run alone with --test-name-pattern.
+const baselines = { loadOnly: 0 };
 
 // Measure the baseline: a child that just loads the extension and exits.
 test('H nosync baseline: loading the extension alone issues 0 syncs', (t) => {
   const { r, count } = runCounted(t, 'load();\n', '/tmp/nonexistent');
   assert.equal(r.status, 0, r.stderr || r.stdout);
-  baselines.loadOnly = count;
   t.diagnostic('baseline (load only) count=' + count);
   assert.equal(count, 0, 'a process that only loads the extension should issue 0 syncs');
 });
