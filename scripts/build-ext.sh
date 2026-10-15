@@ -4,6 +4,7 @@
 #   scripts/build-ext.sh             build the portable extension, then check the result (see below)
 #   scripts/build-ext.sh --path      print where the library is (or will be) for this platform, and do nothing else
 #   FK_EXT_OUT=dir                   build somewhere else
+#   FK_EXT_STRIP=1                   strip the library (about 109 KB on Linux, instead of 458 KB with debug info) before the checks below, which then prove the two init functions are still exported
 # Portable means: no session driver (diff, promote and undo report that this host has none), every SQLite call goes through the host's
 # sqlite3_api_routines table (ext/fk_ext_shim.h), and only the two init functions are exported.
 set -euo pipefail
@@ -35,6 +36,13 @@ case $os in
   macos) $cc $flags -fPIC -dynamiclib $sources -o "$lib" -lpthread -lm ;;
   windows) $cc $flags -shared -static-libgcc $sources store/io_file_win.c -o "$lib" -lbcrypt ;;
 esac
+
+if [ -n "${FK_EXT_STRIP:-}" ]; then
+  case $os in
+    macos) strip -x "$lib" ;;
+    *) strip --strip-unneeded "$lib" ;;
+  esac
+fi
 
 # The checks that make it loadable anywhere: nothing from SQLite left to resolve at load time, and the entry points are exported.
 case $os in

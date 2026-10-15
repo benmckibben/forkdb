@@ -32,3 +32,13 @@ build/
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# packaging output: prebuilt libraries are never committed
+python/forkdb/_lib/
+python/dist/
+python/build/
+python/*.egg-info/
+python/LICENSE*
+node/lib/
+node/LICENSE*
+node/*.tgz
