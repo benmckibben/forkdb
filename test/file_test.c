@@ -26,6 +26,16 @@ static int commit1(fk_store *s, uint32_t b, uint32_t pg, int v, uint32_t size) {
 static int open_path(const char *path, fk_io *io, fk_store **s) { return fk_file_open(path, io) == 0 && fk_open(io, s) == 0; }
 static long fsz(const char *p) { struct stat st; return stat(p, &st) == 0 ? (long)st.st_size : -1; }
 static int exists(const char *p) { return access(p, F_OK) == 0; }
+static void write_bytes(const char *p, const uint8_t *b, size_t n) { FILE *f = fopen(p, "wb"); if (!f) exit(2); if (n && fwrite(b, 1, n, f) != n) exit(2); fclose(f); }
+static int file_is(const char *p, const uint8_t *b, size_t n) {
+  uint8_t *t = malloc(n + 1);
+  FILE *f = fopen(p, "rb");
+  size_t got = f ? fread(t, 1, n + 1, f) : (size_t)-1;
+  int ok = f && got == n && (!n || !memcmp(t, b, n));
+  if (f) fclose(f);
+  free(t);
+  return ok;
+}
 
 /* an io that refuses big writes (the zero fill of the preallocation layer), like a disk that has room for the log but not for chunks */
 typedef struct { fk_io r; int fail_big; } Shim;
@@ -214,6 +224,59 @@ int main(void) {
     CHECK(has(os, 0, 0, 7), "the abort left the committed page alone");
     fk_close(os); fk_file_close(&oio);
     unlink(po);
+  }
+  printf("== a file that is not a store is never overwritten; what a cut-short creation leaves is still taken for a new store\n");
+  {
+    char pf[300];
+    snprintf(pf, sizeof pf, "%s/foreign.bin", dir);
+    uint8_t hdr[FK_HEADER_SZ]; /* the header of a real store: nothing here knows the format */
+    {
+      fk_io hio; fk_store *hs = NULL;
+      CHECK(open_path(pf, &hio, &hs), "a store made to read its header from");
+      fk_close(hs); fk_file_close(&hio);
+      FILE *f = fopen(pf, "rb");
+      CHECK(f && fread(hdr, 1, sizeof hdr, f) == sizeof hdr && !memcmp(hdr, "FORKDBST", 8), "its header");
+      if (f) fclose(f);
+      unlink(pf);
+    }
+    static uint8_t buf[5000];
+    static const size_t sizes[] = { 1, 7, 100, 4095, 4096, 4097, 5000 };
+    int kept_all = 1, refused_all = 1;
+    for (size_t k = 0; k < sizeof sizes / sizeof *sizes; k++) {
+      for (int kind = 0; kind < 3; kind++) {
+        size_t n = sizes[k];
+        for (size_t i = 0; i < n; i++) buf[i] = kind == 0 ? (uint8_t)'x' : kind == 1 ? (uint8_t)("SQLite format 3"[i % 16] ? "SQLite format 3"[i % 16] : 0) : (uint8_t)(i * 7 + 1);
+        if (kind == 1 && n >= 16) { memset(buf + 16, 0, n - 16); } /* a SQLite header: its text, then zeros */
+        write_bytes(pf, buf, n);
+        fk_io fio; fk_store *fs = NULL;
+        int rc = fk_file_open(pf, &fio) == 0 ? fk_open(&fio, &fs) : -99;
+        if (rc != FK_ECORRUPT) { refused_all = 0; printf("    %zu bytes, kind %d: fk_open returned %d\n", n, kind, rc); }
+        if (fs) fk_close(fs);
+        if (rc != -99) fk_file_close(&fio);
+        if (!file_is(pf, buf, n)) { kept_all = 0; printf("    %zu bytes, kind %d: the file was changed (now %ld bytes)\n", n, kind, fsz(pf)); }
+      }
+    }
+    CHECK(refused_all, "21 foreign files of 1 to 5000 bytes (text, a SQLite header, noise) are refused with FK_ECORRUPT");
+    CHECK(kept_all, "and every one is byte for byte what it was (a 100-byte file and a one-page SQLite database used to be replaced by an empty store)");
+    int fresh_all = 1;
+    static const size_t rem[] = { 1, 8, 12, 19, 20, 100, 512, 4095, 4096 };
+    for (int kind = 0; kind < 3; kind++) {
+      for (size_t k = 0; k < sizeof rem / sizeof *rem; k++) {
+        size_t n = rem[k];
+        if (kind == 0) memcpy(buf, hdr, n);                 /* a prefix of the header */
+        else if (kind == 1) memset(buf, 0, n);              /* zeros */
+        else { memset(buf, 0, n); memcpy(buf, hdr, n < 12 ? n : 12); } /* the first bytes landed, the rest of the sector did not */
+        if (kind == 0 && n == 4096) continue;               /* that is a whole valid header: not a remnant */
+        write_bytes(pf, buf, n);
+        fk_io fio; fk_store *fs = NULL;
+        int ok = fk_file_open(pf, &fio) == 0 && fk_open(&fio, &fs) == 0;
+        if (ok) { ok = commit1(fs, 0, 0, 5, 1) == 0; fk_close(fs); fk_file_close(&fio); }
+        if (ok) { fs = NULL; ok = open_path(pf, &fio, &fs) && has(fs, 0, 0, 5); if (fs) fk_close(fs); fk_file_close(&fio); }
+        if (!ok) { fresh_all = 0; printf("    remnant of %zu bytes (kind %d) was not taken for a new store\n", n, kind); }
+      }
+    }
+    CHECK(fresh_all, "what a creation cut short leaves (a prefix of the header, zeros, part of a sector; 1 to 4096 bytes) still opens as a new store that works and reopens");
+    unlink(pf);
   }
   printf("== preallocation layer (store/io_prealloc.c)\n");
   {

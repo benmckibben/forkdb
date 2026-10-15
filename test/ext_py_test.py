@@ -365,6 +365,27 @@ print('alive:', c.execute('select 1').fetchone()[0])
         out = self.check(os.path.join(self.dir, "no", "such", "dir", "x.fk"), "select forkdb_init(?)")
         self.assertIn("cannot open the store file", out)
 
+    def test_small_files_that_are_not_stores_are_never_overwritten(self):
+        # Until this was fixed, any file under 4096 bytes (and a 4096-byte one with a bad header) was taken for a creation that a power cut interrupted and was OVERWRITTEN by an
+        # empty store: forkdb_init on a 100-byte notes file, or on a one-page SQLite database, destroyed it. The 5000-byte file of the test below was one byte too long to see it.
+        contents = {
+            "text-100": b"my notes, do not lose me\n" * 4,
+            "text-4095": b"x" * 4095,
+            "text-4096": b"y" * 4096,
+            "sqlite-4096": b"SQLite format 3\x00" + bytes(4080),
+            "noise-300": bytes((i * 7 + 1) % 256 for i in range(300)),
+        }
+        funcs = [("select forkdb_init(?)", ())] + self.FUNCS
+        for name, data in contents.items():
+            for sql, _ in funcs:
+                with self.subTest(file=name, sql=sql):
+                    path = os.path.join(self.dir, name + ".fk")
+                    with open(path, "wb") as f:
+                        f.write(data)
+                    self.check(path, sql)  # an error, not a crash (forkdb_diff stops earlier, at the missing session API: it never opens the file)
+                    with open(path, "rb") as f:
+                        self.assertEqual(f.read(), data, "%s on %s must leave the file alone" % (sql, name))
+
     def test_file_that_is_not_a_store(self):
         path = os.path.join(self.dir, "junk.fk")
         with open(path, "wb") as f:
