@@ -40,13 +40,13 @@ esac
 case $os in
   linux)
     undefined=$(nm -D --undefined-only "$lib" | grep 'sqlite3' || true)
-    exported=$(nm -D --defined-only "$lib" | grep -E ' T (sqlite3_forkdb_init|sqlite3_extension_init)$' | wc -l) ;;
+    exported=$(nm -D --defined-only "$lib" | grep -cE ' T (sqlite3_forkdb_init|sqlite3_extension_init)$' || true) ;;
   macos)
     undefined=$(nm -u "$lib" | grep 'sqlite3' || true)
-    exported=$(nm -gU "$lib" | grep -E ' T _(sqlite3_forkdb_init|sqlite3_extension_init)$' | wc -l) ;;
+    exported=$(nm -gU "$lib" | grep -cE ' T _(sqlite3_forkdb_init|sqlite3_extension_init)$' || true) ;;
   windows)
     undefined=$(objdump -p "$lib" | grep 'DLL Name' | grep -i sqlite || true) # a DLL that imports sqlite3.dll would only load where that DLL is around
-    exported=$(objdump -p "$lib" | grep -E '(^|[[:space:]])(sqlite3_forkdb_init|sqlite3_extension_init)$' | wc -l) ;;
+    exported=$(objdump -p "$lib" | grep -cE '(^|[[:space:]])(sqlite3_forkdb_init|sqlite3_extension_init)$' || true) ;;
 esac
 if [ -n "$undefined" ]; then
   echo "forkdb.$ext has unresolved sqlite3 references (it would only load where the host exports them):" >&2
