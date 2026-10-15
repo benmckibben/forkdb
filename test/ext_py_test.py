@@ -197,7 +197,7 @@ class B_Functions(Base):
         c = self.load()
         self.new_store(c)
         uri = self.one(c, "select forkdb_open_db(?, 'main')", self.store)
-        self.assertRegex(uri, r"^file:b[0-9]+\?vfs=forkdb$")
+        self.assertRegex(uri, r"^file:/forkdb/b[0-9]+\?vfs=forkdb$")
         self.assertIn("no branch named 'nope'", self.err(c, "select forkdb_open_db(?, 'nope')", self.store))
 
     def test_new_ids_fit_in_a_javascript_number(self):
@@ -212,6 +212,28 @@ class B_Functions(Base):
         self.assertEqual(len(set(ids)), 100, "ids are distinct")
         for u in ids:
             self.assertTrue(0 < u < 2 ** 53, "uid %d does not fit in a JavaScript number" % u)
+
+    def test_uri_read_as_a_plain_filename_fails_loudly(self):
+        # A driver built with URI filenames off (better-sqlite3 is: SQLITE_USE_URI=0) reads the returned string as a PATH. Before the shape file:/forkdb/bN it was a legal
+        # relative path, and the driver silently created a plain file named file:bN?vfs=forkdb: the application wrote into the wrong file and nothing failed. Now the path
+        # has a directory, file:, that does not exist, so the open fails and creates nothing. Debian and Ubuntu build SQLite with URIs ON, so the child turns them off the way
+        # a build with SQLITE_USE_URI=0 has them: sqlite3_config(SQLITE_CONFIG_URI, 0) on the shared library, before the sqlite3 module first uses it.
+        c = self.load()
+        self.new_store(c)
+        uri = self.one(c, "select forkdb_open_db(?, 'main')", self.store)
+        cwd = os.path.join(self.dir, "cwd")
+        os.mkdir(cwd)
+        code = ("import ctypes, ctypes.util, sys\n"
+                "name = ctypes.util.find_library('sqlite3')\n"
+                "rc = ctypes.CDLL(name).sqlite3_config(17, 0)\n"
+                "if rc != 0:\n    print('CONFIG FAILED rc=%d lib=%s' % (rc, name)); sys.exit(4)\n"
+                "import sqlite3\n"
+                "try:\n    sqlite3.connect(sys.argv[1], uri=False)\nexcept sqlite3.OperationalError as e:\n    print('refused:', e); sys.exit(0)\n"
+                "print('OPENED'); sys.exit(3)")
+        r = subprocess.run([sys.executable, "-c", code, uri], capture_output=True, text=True, timeout=60, cwd=cwd)
+        self.assertEqual(r.returncode, 0, "a plain open of the URI string must fail: %s%s" % (r.stdout, r.stderr))
+        self.assertIn("unable to open database file", r.stdout)
+        self.assertEqual(os.listdir(cwd), [], "the failed open must not create a file or directory")
 
     def test_discard(self):
         c = self.load()

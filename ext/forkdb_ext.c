@@ -536,7 +536,7 @@ static void fn_open_db(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     char bname[24];
     fkvfs_branch_name(info.id, bname, sizeof bname);
     char uri[512];
-    snprintf(uri, sizeof uri, "file:%s?vfs=%s", bname, fkx_vfs_name(x));
+    snprintf(uri, sizeof uri, "file:/forkdb/%s?vfs=%s", bname, fkx_vfs_name(x));
     sqlite3_result_text(ctx, uri, -1, SQLITE_TRANSIENT);
 }
 

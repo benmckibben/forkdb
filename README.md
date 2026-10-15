@@ -66,7 +66,7 @@ SELECT forkdb_init('/tmp/mine.fk', 'main');
 SELECT forkdb_fork('/tmp/mine.fk', 'main', 'feat-x');
 
 -- Get the URI of a branch and open it with a second connection
-SELECT forkdb_open_db('/tmp/mine.fk', 'feat-x');  -- file:b1?vfs=forkdb
+SELECT forkdb_open_db('/tmp/mine.fk', 'feat-x');  -- file:/forkdb/b1?vfs=forkdb
 -- ... sqlite3.connect(uri, uri=True) in Python, sqlite3_open_v2 in C ...
 SELECT forkdb_close('/tmp/mine.fk');
 ```
