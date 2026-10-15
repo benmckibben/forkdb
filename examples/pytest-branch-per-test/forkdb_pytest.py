@@ -47,6 +47,10 @@ def pytest_addoption(parser):
                      "~4 ms each: on a disk both end in an fsync. Default: pytest's temporary directory (env FORKDB_DIR).")
 
 
+    g.addoption("--forkdb-durable", action="store_true", default=bool(os.environ.get("FORKDB_DURABLE")),
+                help="make the stores fsync like any forkdb store (env FORKDB_DURABLE). Default: no fsync ('nosync'): the stores are throwaway, a fork and a discard cost "
+                     "~0.04 ms instead of ~4 ms each on a disk, and the data still survives the death of the test process; only a power cut could lose it, "
+                     "and the store is deleted at the end of the session anyway.")
     g.addoption("--forkdb-max-mb", type=int, default=int(os.environ.get("FORKDB_MAX_MB", "64")),
                 help="compact the store when its file passes this size (default 64). Discarding a branch does not give its pages back: a suite whose tests "
                      "commit grew the file by ~30 KB per test (measured), ~0.5 MB for tests that rewrite thousands of rows, until forkdb_compact ran.")
@@ -59,14 +63,14 @@ class _Stats(dict):
 class ForkStore:
     """The session's store: a host connection (which carries the forkdb_* functions) and the path."""
 
-    def __init__(self, path, seed, max_mb=64):
+    def __init__(self, path, seed, max_mb=64, durable=False):
         self.path = path
         self.host = _load()
         self.max_bytes = max_mb * 1024 * 1024
         self.stats = _Stats(forks=0, discards=0, compactions=0, compact_seconds=0.0, fork_seconds=0.0, discard_seconds=0.0, seed_seconds=0.0)
         self._ids = itertools.count(1)
         t0 = time.perf_counter()
-        self.host.execute("select forkdb_init(?, 'main')", (path,)).fetchall()
+        self.host.execute("select forkdb_init(?, 'main', ?)", (path, None if durable else "nosync")).fetchall()
         conn = self.connect("main")
         try:
             seed(conn)
@@ -129,7 +133,7 @@ def forkdb_store(request, tmp_path_factory, forkdb_seed):
         path = os.path.join(tempfile.mkdtemp(prefix="fk-pytest-", dir=base), "seed.fk")  # own directory: removed below
     else:
         path = str(tmp_path_factory.mktemp("forkdb") / "seed.fk")
-    store = ForkStore(path, forkdb_seed, request.config.getoption("--forkdb-max-mb"))
+    store = ForkStore(path, forkdb_seed, request.config.getoption("--forkdb-max-mb"), request.config.getoption("--forkdb-durable"))
     yield store
     store.close()
     if base:

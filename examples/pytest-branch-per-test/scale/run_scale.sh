@@ -11,11 +11,12 @@ sizes=("$@"); [ ${#sizes[@]} -gt 0 ] || sizes=(20000 200000 1000000)
 echo "200 tests (100 reads, 60 committed writes, 40 uncommitted writes); files in $dir; whole pytest process, seconds"
 for rows in "${sizes[@]}"; do
   printf "%9d rows:" "$rows"
-  for plugin in forkdb copy reseed; do
+  for plugin in forkdb forkdb-durable copy reseed; do
     if [ "$plugin" = reseed ] && [ "$rows" -gt 200000 ]; then printf "  %s n/a (too slow)" "$plugin"; continue; fi
-    s=$(date +%s.%N)
-    out=$(cd "$here" && SCALE_PLUGIN=$plugin SCALE_ROWS=$rows python3 -m pytest -p no:cacheprovider -q --forkdb-dir="$dir" test_scale.py 2>&1); rc=$?
-    e=$(date +%s.%N)
+    s=$(cut -d' ' -f1 /proc/uptime)
+    extra=(); [ "$plugin" = forkdb-durable ] && extra=(--forkdb-durable)
+    out=$(cd "$here" && SCALE_PLUGIN=$plugin SCALE_ROWS=$rows python3 -m pytest -p no:cacheprovider -q --forkdb-dir="$dir" "${extra[@]}" test_scale.py 2>&1); rc=$?
+    e=$(cut -d' ' -f1 /proc/uptime)
     if [ $rc -ne 0 ]; then printf "  %s FAILED" "$plugin"; echo; tail -5 <<< "$out"; exit 1; fi
     printf "  %s %6.2f" "$plugin" "$(echo "$e - $s" | bc)"
   done
