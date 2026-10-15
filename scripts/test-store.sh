@@ -35,6 +35,16 @@ echo "== nosync test"
 build_nosync_test "$out/nosync_test"
 "$out/nosync_test"
 
+# A compaction that really compacts (branches that diverge, a discarded rewrite, most of the file garbage): the same test runs on Windows in CI.
+build_compact_smoke() { # output [extra compiler flags]
+  local o=$1; shift
+  # shellcheck disable=SC2086
+  $cc $warn "$@" "$here/test/compact_smoke.c" "$here/store/fkstore.c" "$here/store/io_file.c" "$here/store/io_prealloc.c" -o "$o"
+}
+echo "== compaction smoke test"
+build_compact_smoke "$out/compact_smoke"
+(cd "$out" && ./compact_smoke)
+
 echo "== power-loss tests (${seeds} seeds x ${ops} operations, address and undefined-behaviour sanitizers on)"
 # shellcheck disable=SC2086
 $cc $warn -fsanitize=address,undefined -fno-sanitize-recover=undefined $crash_src -o "$out/crash_test"
@@ -56,6 +66,9 @@ mutant() { # name, flags, [env for the power-loss run, e.g. CRASH_PREALLOC=16384
   # seconds for the file tests, under two minutes for the power-loss run), and a hang counts as caught.
   env $cenv timeout 300 "$out/m_crash" 25 8 >/dev/null 2>&1 || c=YES
   timeout 300 "$out/m_file" >/dev/null 2>&1 || f=YES
+  # shellcheck disable=SC2086
+  build_compact_smoke "$out/m_smoke" $flags
+  (cd "$out" && timeout 300 ./m_smoke >/dev/null 2>&1) || f=YES
   printf "  %-52s power-loss harness: %-3s  file tests: %s\n" "$name" "$c" "$f"
   [ "$c" = YES ] || [ "$f" = YES ]
 }

@@ -139,7 +139,10 @@ static int w_sibling_rename(void *ctx, fk_io *tmp);
 static int w_sync_dir(void *ctx);
 static void w_sibling_remove(void *ctx, fk_io *tmp);
 
-static int sync_dir_of(const wchar_t *path) {
+/* Flush the directory entry of the store file (after a compaction replaced it). FlushFileBuffers needs write access to the handle, and a directory is not always
+ * flushable on Windows (ERROR_ACCESS_DENIED): then the store file's own handle is flushed instead, which on NTFS forces the journalled metadata of that file, the rename
+ * included, to disk. Failing here would stop the store (the replacement has already happened), so a directory that cannot be flushed is not an error. */
+static int sync_dir_of(const wchar_t *path, HANDLE file) {
   /* Get the parent directory path */
   size_t n = wcslen(path);
   wchar_t *dir = malloc((n + 1) * sizeof(wchar_t));
@@ -148,13 +151,15 @@ static int sync_dir_of(const wchar_t *path) {
   while (n > 0 && dir[n - 1] != L'\\' && dir[n - 1] != L'/') n--;
   if (n > 1) dir[n - 1] = 0; else { dir[0] = L'.'; dir[1] = 0; }
 
-  HANDLE h = CreateFileW(dir, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+  HANDLE h = CreateFileW(dir, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                          NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
   free(dir);
-  if (h == INVALID_HANDLE_VALUE) return -1;
-  int rc = FlushFileBuffers(h) ? 0 : -1;
-  CloseHandle(h);
-  return rc;
+  if (h != INVALID_HANDLE_VALUE) {
+    int ok = FlushFileBuffers(h) ? 0 : -1;
+    CloseHandle(h);
+    if (ok == 0) return 0;
+  }
+  return FlushFileBuffers(file) ? 0 : -1;
 }
 
 static void fill(fk_io *io, WC *c, int main_file) {
@@ -180,7 +185,9 @@ static int w_sibling_create(void *ctx, fk_io *tmp) {
   wchar_t *tp = tmp_wpath(m->path);
   if (!tp) return -1;
 
-  HANDLE h = CreateFileW(tp, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+  /* DELETE access: the rename in w_sibling_rename is made through this handle. The share mode is the main file's (readers and deleters, no writers): after the
+   * rename this very handle becomes the main handle, so the one-opener lock is never released. */
+  HANDLE h = CreateFileW(tp, GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) { free(tp); return -1; }
 
@@ -193,24 +200,45 @@ static int w_sibling_create(void *ctx, fk_io *tmp) {
   return 0;
 }
 
+/* FILE_RENAME_INFO with the Flags member, and the class that takes it (Windows 10 1709 and later, NTFS). Declared here because older MinGW headers lack them. */
+typedef struct {
+  DWORD Flags;
+  HANDLE RootDirectory;
+  DWORD FileNameLength; /* bytes, without the terminating NUL */
+  WCHAR FileName[1];
+} FK_RENAME_INFO_EX;
+#define FK_FILE_RENAME_INFO_EX_CLASS 22 /* FILE_INFO_BY_HANDLE_CLASS: FileRenameInfoEx */
+#define FK_RENAME_REPLACE_IF_EXISTS 0x1
+#define FK_RENAME_POSIX_SEMANTICS 0x2
+
+/* Replace the main file with the compacted one, the way POSIX rename does: atomically, while this process (and the old handle) still has the old file open.
+ * MoveFileExW cannot do that: it fails with ERROR_ACCESS_DENIED when the target has any open handle, whatever its share mode (measured on a Windows runner, with the
+ * main handle opened with FILE_SHARE_DELETE). A rename made with POSIX semantics unlinks the old file at once and lets the open handles keep reading it until they close.
+ * It needs NTFS on Windows 10 1709 or later; where it is refused the compaction fails with an error and the store is untouched and usable, as for any failure before
+ * the replacement. */
 static int w_sibling_rename(void *ctx, fk_io *tmp) {
   WC *m = ctx, *t = tmp->ctx;
-  /* On Windows, you cannot rename a file that is open without FILE_SHARE_DELETE.
-   * Close the temp file before renaming. */
-  CloseHandle(t->h);
+
+  DWORD fn = GetFullPathNameW(m->path, 0, NULL, NULL);
+  if (fn == 0) return -1;
+  size_t bytes = sizeof(FK_RENAME_INFO_EX) + (size_t)fn * sizeof(WCHAR);
+  FK_RENAME_INFO_EX *ri = calloc(1, bytes);
+  if (!ri) return -1;
+  DWORD got = GetFullPathNameW(m->path, fn, ri->FileName, NULL);
+  if (got == 0 || got >= fn) { free(ri); return -1; }
+  ri->Flags = FK_RENAME_REPLACE_IF_EXISTS | FK_RENAME_POSIX_SEMANTICS;
+  ri->RootDirectory = NULL;
+  ri->FileNameLength = (DWORD)(got * sizeof(WCHAR));
+  BOOL ok = SetFileInformationByHandle(t->h, (FILE_INFO_BY_HANDLE_CLASS)FK_FILE_RENAME_INFO_EX_CLASS, ri, (DWORD)bytes);
+  free(ri);
+  if (!ok) return -1; /* t is untouched: w_sibling_remove closes and deletes it */
+
+  /* The compacted file is now the file at m->path, and t->h, opened with the main file's share mode, is a handle on it: it becomes the main handle. The old handle
+   * refers to the unlinked old file; closing it frees that. */
+  HANDLE old = m->h;
+  m->h = t->h;
   t->h = NULL;
-
-  if (!MoveFileExW(t->path, m->path, MOVEFILE_REPLACE_EXISTING))
-    return -1;
-
-  /* Close the old file handle and reopen using the new path.
-   * (The old handle still refers to the now-replaced file.)
-   * Share mode must match fk_file_open: FILE_SHARE_READ keeps concurrent readers working. */
-  CloseHandle(m->h);
-  m->h = CreateFileW(m->path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL,
-                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-  if (m->h == INVALID_HANDLE_VALUE) return -1;
-
+  CloseHandle(old);
   free(t->path);
   free(t);
   tmp->ctx = NULL;
@@ -219,7 +247,7 @@ static int w_sibling_rename(void *ctx, fk_io *tmp) {
 
 static int w_sync_dir(void *ctx) {
   if (((WC *)ctx)->nosync) return 0;
-  return sync_dir_of(((WC *)ctx)->path);
+  return sync_dir_of(((WC *)ctx)->path, ((WC *)ctx)->h);
 }
 
 static void w_sibling_remove(void *ctx, fk_io *tmp) {
@@ -249,11 +277,13 @@ int fk_file_open_ex(const char *path, fk_io *io, int flags) {
   if (!wp) return -1;
 
   DWORD creation = (GetFileAttributesW(wp) != INVALID_FILE_ATTRIBUTES) ? OPEN_EXISTING : CREATE_NEW;
+  /* FILE_SHARE_READ without FILE_SHARE_WRITE is the lock: a second opener that asks for write access is refused by the system. FILE_SHARE_DELETE is
+   * needed so that compaction can replace this file while it is open (w_sibling_rename); it does not let anyone write. */
   HANDLE h = CreateFileW(wp, GENERIC_READ | GENERIC_WRITE,
-                         FILE_SHARE_READ, NULL,
+                         FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
                          creation, FILE_ATTRIBUTE_NORMAL, NULL);
   if (h == INVALID_HANDLE_VALUE) {
-    /* The share mode (FILE_SHARE_READ only) is the lock: a second opener that asks for write access is refused by the system. */
+    /* The share mode (no FILE_SHARE_WRITE) is the lock: a second opener that asks for write access is refused by the system. */
     int busy = GetLastError() == ERROR_SHARING_VIOLATION;
     free(wp);
     return busy ? FK_ELOCKED : -1;

@@ -1000,5 +1000,371 @@ c.execute("select forkdb_close(?)", (P,)).fetchall()
         self.assertEqual(db.execute("select count(*) from t").fetchone()[0], 1)
 
 
+class I_Compaction(Base):
+    """Compaction through the extension, in Python's sqlite3: the garbage of a discarded branch is reclaimed, and nothing else changes. Store-level compaction is covered
+    in file_test.c and crash_test.c; this checks what the store's own tests cannot: the SQL layer, the VFS and live connections on top of it."""
+
+    ROWS = 5000
+
+    def make_table(self, c, opt=None):
+        if opt:
+            self.one(c, "select forkdb_init(?, 'main', ?)", self.store, opt)
+        else:
+            self.one(c, "select forkdb_init(?)", self.store)
+        self.addCleanup(self.close_store, c, self.store)
+        db = self.open_branch(c)
+        db.execute("create table t(a integer primary key, b text)")
+        db.executemany("insert into t values (?, ?)", ((i, "x" * 100) for i in range(self.ROWS)))
+        db.commit()
+        db.close()
+
+    def make_garbage(self, c, name="junk"):
+        # a branch that rewrites every page, then is discarded: most of the file is now garbage
+        self.one(c, "select forkdb_fork(?, 'main', ?)", self.store, name)
+        j = self.open_branch(c, name)
+        j.execute("update t set b = b || 'abcdefghij'")
+        j.commit()
+        j.close()
+        self.one(c, "select forkdb_discard(?, ?)", self.store, name)
+
+    @staticmethod
+    def digest(db):
+        import hashlib
+        h = hashlib.sha256()
+        h.update(repr(db.execute("select sql from sqlite_master order by name").fetchall()).encode())
+        h.update(repr(db.execute("select * from t order by a").fetchall()).encode())
+        return h.hexdigest()
+
+    def uri(self, c, ref):
+        return self.one(c, "select forkdb_open_db(?, ?)", self.store, ref)
+
+    def digest_of(self, c, ref):
+        # through a fresh connection; integrity_check must be ok whatever the branch holds
+        db = sqlite3.connect(self.uri(c, ref).replace("?vfs", "?mode=ro&vfs"), uri=True)  # read-only: a snapshot cannot be opened any other way
+        try:
+            self.assertEqual(db.execute("pragma integrity_check").fetchall(), [("ok",)], "integrity_check on %s" % ref)
+            return self.digest(db)
+        finally:
+            db.close()
+
+    def size(self):
+        return os.path.getsize(self.store)
+
+    def compact(self, c):
+        return self.one(c, "select forkdb_compact(?)", self.store)
+
+    def test_compaction_compacts_and_shrinks(self):
+        c = self.load()
+        self.make_table(c)
+        self.make_garbage(c)
+        before = self.size()
+        self.assertEqual(self.compact(c), 1, "a file that is mostly garbage must be compacted")
+        after = self.size()  # measured now: the next write extends the file by a preallocation chunk again
+        self.assertLess(after * 4, before, "the file went from %d to %d bytes" % (before, after))
+        self.assertEqual(self.compact(c), 0, "a second compaction has nothing to do")
+        self.assertEqual(self.size(), after)
+
+    def make_branches(self, c):
+        """main (edited), a, b (shrinks and grows back), c (forked from a), snap (a snapshot of main), then a discarded junk branch."""
+        self.make_table(c)
+        self.one(c, "select forkdb_fork(?, 'main', 'a')", self.store)
+        a = self.open_branch(c, "a")
+        a.execute("update t set b = 'A' where a < 200")
+        a.commit()
+        a.close()
+        self.one(c, "select forkdb_fork(?, 'main', 'b')", self.store)
+        b = self.open_branch(c, "b")
+        b.execute("delete from t where a >= 4000")
+        b.commit()
+        b.execute("vacuum")  # the branch gets smaller ...
+        b.executemany("insert into t values (?, ?)", ((10000 + i, "y" * 100) for i in range(500)))
+        b.commit()  # ... and then grows again
+        b.close()
+        self.one(c, "select forkdb_fork(?, 'a', 'c')", self.store)
+        k = self.open_branch(c, "c")
+        k.execute("update t set b = 'C' where a >= 200 and a < 300")
+        k.commit()
+        k.close()
+        m = self.open_branch(c, "main")
+        m.execute("update t set b = 'M' where a >= 4900")
+        m.commit()
+        m.close()
+        self.one(c, "select forkdb_snapshot(?, 'main', 'snap')", self.store)
+        m = self.open_branch(c, "main")
+        m.execute("update t set b = 'N' where a >= 4800 and a < 4850")  # main moves on; the snapshot stays frozen
+        m.commit()
+        m.close()
+        self.make_garbage(c)
+
+    NAMES = ("main", "a", "b", "c", "snap")
+
+    def test_every_branch_reads_the_same_after_compaction(self):
+        c = self.load()
+        self.make_branches(c)
+        before = {n: self.digest_of(c, n) for n in self.NAMES}
+        self.assertEqual(len(set(before.values())), len(self.NAMES), "the branches were made to differ")
+        uris = {n: self.uri(c, n) for n in self.NAMES}
+        self.assertEqual(self.compact(c), 1)
+        for n in self.NAMES:
+            self.assertEqual(self.digest_of(c, n), before[n], "branch %s changed through the compaction" % n)
+            self.assertEqual(self.uri(c, n), uris[n], "the store id of branch %s changed" % n)
+        self.assertIn("no branch named", self.err(c, "select forkdb_open_db(?, 'junk')", self.store))
+        m = self.open_branch(c, "main")
+        self.assertEqual(m.execute("select count(*) from t where b = 'A' or b = 'C'").fetchone()[0], 0, "main must not see what a and c wrote")
+
+    def test_branches_stay_isolated_and_writable_after_compaction(self):
+        c = self.load()
+        self.make_branches(c)
+        before = {n: self.digest_of(c, n) for n in self.NAMES}
+        self.assertEqual(self.compact(c), 1)
+        a = self.open_branch(c, "a")
+        a.execute("update t set b = 'A2' where a >= 1000 and a < 1100")
+        a.commit()
+        a.close()
+        self.one(c, "select forkdb_fork(?, 'main', 'fresh')", self.store)
+        self.assertEqual(self.digest_of(c, "fresh"), before["main"], "a fork after the compaction holds what main holds")
+        f = self.open_branch(c, "fresh")
+        f.execute("delete from t")
+        f.commit()
+        f.close()
+        for n in ("main", "b", "c", "snap"):
+            self.assertEqual(self.digest_of(c, n), before[n], "branch %s changed through writes to other branches" % n)
+        self.assertNotEqual(self.digest_of(c, "a"), before["a"])
+        # a snapshot is read-only, before and after
+        with self.assertRaises(sqlite3.OperationalError) as cm:
+            sqlite3.connect(self.uri(c, "snap"), uri=True)
+        self.assertIn("readonly", str(cm.exception))
+
+    def test_compaction_with_connections_open(self):
+        c = self.load()
+        self.make_table(c)
+        for n in ("keep", "w"):
+            self.one(c, "select forkdb_fork(?, 'main', ?)", self.store, n)
+        keep_before = self.digest_of(c, "keep")
+        main_before = self.digest_of(c, "main")
+        self.make_garbage(c)
+
+        def conn(ref):
+            return sqlite3.connect(self.uri(c, ref), uri=True, isolation_level=None)
+
+        w = conn("w")
+        w.execute("begin immediate")
+        w.execute("update t set b = 'W' where a < 500")  # an uncommitted write transaction
+        k = conn("keep")
+        cur = k.execute("select a, b from t order by a")
+        first = cur.fetchmany(100)  # a half-read cursor
+        rd = conn("main")
+        rd.execute("begin")
+        rd.execute("select count(*) from t").fetchall()  # an open read transaction
+        idle = conn("main")
+        for x in (w, k, rd, idle):
+            self.addCleanup(x.close)
+
+        self.assertEqual(self.compact(c), 1, "compaction with live connections")
+        rest = cur.fetchall()
+        self.assertEqual(len(first) + len(rest), self.ROWS, "the cursor continues across the compaction")
+        self.assertTrue(all(b == "x" * 100 for _, b in first + rest))
+        w.execute("update t set b = 'W2' where a >= 500 and a < 600")
+        w.execute("commit")  # the writer finishes after the compaction
+        self.assertEqual(w.execute("select count(*) from t where b = 'W'").fetchone()[0], 500)
+        self.assertEqual(w.execute("select count(*) from t where b = 'W2'").fetchone()[0], 100)
+        self.assertEqual(rd.execute("select count(*) from t where b = 'W' or b = 'W2'").fetchone()[0], 0, "main must not see the writer's rows")
+        self.assertEqual(idle.execute("select count(*) from t").fetchone()[0], self.ROWS)
+        for x in (w, k, rd, idle):
+            self.assertEqual(x.execute("pragma integrity_check").fetchall(), [("ok",)])
+        for x in (w, k, rd, idle):
+            x.close()
+        self.one(c, "select forkdb_close(?)", self.store)
+        self.assertEqual(self.digest_of(c, "main"), main_before)
+        self.assertEqual(self.digest_of(c, "keep"), keep_before)
+        self.assertEqual(self.digest_of(c, "w") == main_before, False)
+
+    def test_repeated_cycles_return_to_the_live_size(self):
+        c = self.load()
+        self.make_table(c)
+        main_before = self.digest_of(c, "main")
+        sizes = []
+        for i in range(12):
+            self.make_garbage(c)
+            self.assertEqual(self.compact(c), 1, "cycle %d" % i)
+            sizes.append(self.size())  # right after the compaction, before any further write
+        self.assertLessEqual(max(sizes), min(sizes) * 1.15, "file sizes after each compaction: %r" % sizes)
+        self.assertEqual(self.digest_of(c, "main"), main_before)
+
+    DIGESTS = """
+import hashlib
+c = load()
+out = []
+for ref in sys.argv[3:]:
+    d = sqlite3.connect(c.execute("select forkdb_open_db(?, ?)", (P, ref)).fetchone()[0].replace("?vfs", "?mode=ro&vfs"), uri=True)
+    h = hashlib.sha256()
+    h.update(repr(d.execute("select sql from sqlite_master order by name").fetchall()).encode())
+    h.update(repr(d.execute("select * from t order by a").fetchall()).encode())
+    out.append(h.hexdigest() + " " + d.execute("pragma integrity_check").fetchone()[0])
+    d.close()
+print("|".join(out))
+"""
+
+    def check_in_another_process(self, c, names, before):
+        self.one(c, "select forkdb_close(?)", self.store)
+        r = run_py(self.DIGESTS, self.store, *names)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip().split("|"), [before[n] + " ok" for n in names])
+
+    def test_compaction_survives_reopen_and_other_processes(self):
+        c = self.load()
+        self.make_branches(c)
+        before = {n: self.digest_of(c, n) for n in self.NAMES}
+        self.assertEqual(self.compact(c), 1)
+        self.check_in_another_process(c, self.NAMES, before)
+
+    def test_compaction_under_nosync_reopens_durably(self):
+        c = self.load()
+        self.make_table(c, opt="nosync")
+        self.make_garbage(c)
+        before = {"main": self.digest_of(c, "main")}
+        self.assertEqual(self.compact(c), 1)
+        self.check_in_another_process(c, ("main",), before)  # the other process opens it without the option
+
+    run_counted = H_NoSync.run_counted  # the LD_PRELOAD fsync counter, same helper
+    _read_count = staticmethod(H_NoSync._read_count)
+
+    COUNT_SCRIPT = """
+c = load()
+opt, step = sys.argv[3], sys.argv[4]
+if opt == 'none':
+    c.execute("select forkdb_init(?)", (P,)).fetchall()
+else:
+    c.execute("select forkdb_init(?, 'main', ?)", (P, opt)).fetchall()
+d = sqlite3.connect(c.execute("select forkdb_open_db(?, 'main')", (P,)).fetchone()[0], uri=True)
+d.execute("create table t(a integer primary key, b text)")
+d.executemany("insert into t values (?, ?)", ((i, 'x' * 100) for i in range(5000)))
+d.commit()
+d.close()
+c.execute("select forkdb_fork(?, 'main', 'junk')", (P,)).fetchall()
+j = sqlite3.connect(c.execute("select forkdb_open_db(?, 'junk')", (P,)).fetchone()[0], uri=True)
+j.execute("update t set b = b || 'abcdefghij'")
+j.commit()
+j.close()
+c.execute("select forkdb_discard(?, 'junk')", (P,)).fetchall()
+if step == 'compact':
+    print('compacted', c.execute("select forkdb_compact(?)", (P,)).fetchone()[0])
+else:
+    print('compacted skipped')
+c.execute("select forkdb_close(?)", (P,)).fetchall()
+"""
+
+    def test_compaction_sync_counts(self):
+        counts = {}
+        for opt in ("none", "nosync"):
+            for step in ("compact", "skip"):
+                r, n = self.run_counted(self.COUNT_SCRIPT, os.path.join(self.dir, "%s-%s.fk" % (opt, step)), opt, step)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                want = "compacted 1" if step == "compact" else "compacted skipped"
+                self.assertEqual(r.stdout.strip(), want, "the compaction must really happen (the sync count of a compaction that did not run proves nothing)")
+                counts[(opt, step)] = n
+        self.assertEqual(counts[("nosync", "compact")], 0, "a nosync store issues no fsync, compaction included: %r" % counts)
+        self.assertEqual(counts[("nosync", "skip")], 0, counts)
+        self.assertGreater(counts[("none", "skip")], 0, counts)
+        self.assertGreater(counts[("none", "compact")], counts[("none", "skip")], "compaction itself syncs a durable store: %r" % counts)
+
+    THREADED = """
+import threading, time, random
+host = sqlite3.connect(':memory:', check_same_thread=False)
+host.enable_load_extension(True)
+host.load_extension(SO)
+host.execute("select forkdb_init(?)", (P,)).fetchall()
+
+def conn(ref):
+    uri = host.execute("select forkdb_open_db(?, ?)", (P, ref)).fetchone()[0]
+    return sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=10, isolation_level=None)
+
+m = conn('main')
+m.execute("create table t(a integer primary key, b text)")
+m.execute("begin")
+for i in range(5000):
+    m.execute("insert into t values (?, ?)", (i, 'x' * 100))
+m.execute("commit")
+m.close()
+for n in ('a', 'b', 'c'):
+    host.execute("select forkdb_fork(?, 'main', ?)", (P, n)).fetchall()
+conns = [conn(n) for n in ('a', 'b', 'c')]
+ok = [0, 0, 0]
+errs = []
+
+def writer(i):
+    c = conns[i]
+    base = 100000 * (i + 1)
+    for k in range(150):
+        for attempt in range(600):
+            try:
+                c.execute('begin immediate')
+                c.execute("insert into t values (?, 'w')", (base + k,))
+                c.execute('commit')
+                ok[i] += 1
+                break
+            except sqlite3.OperationalError as e:
+                try:
+                    c.execute('rollback')
+                except sqlite3.Error:
+                    pass
+                if 'locked' in str(e) or 'busy' in str(e):
+                    time.sleep(random.random() / 500)
+                    continue
+                errs.append('writer %d: %s' % (i, e))
+                return
+
+compactions = [0]
+
+def manager():
+    for k in range(6):
+        try:
+            host.execute("select forkdb_fork(?, 'main', 'junk')", (P,)).fetchall()
+            j = conn('junk')
+            j.execute("update t set b = b || 'abcdefghij'")
+            j.close()
+            host.execute("select forkdb_discard(?, 'junk')", (P,)).fetchall()
+            compactions[0] += host.execute("select forkdb_compact(?)", (P,)).fetchone()[0]
+        except Exception as e:
+            errs.append('manager: %s: %s' % (type(e).__name__, e))
+            return
+
+ts = [threading.Thread(target=writer, args=(i,)) for i in range(3)] + [threading.Thread(target=manager)]
+for t in ts:
+    t.start()
+for t in ts:
+    t.join()
+bad = list(errs)
+if compactions[0] < 3:
+    bad.append('only %d compactions returned 1' % compactions[0])
+for i, c in enumerate(conns):
+    n = c.execute('select count(*) from t').fetchone()[0]
+    if n != 5000 + ok[i]:
+        bad.append('branch %d: %d rows, expected %d' % (i, n, 5000 + ok[i]))
+    if c.execute('pragma integrity_check').fetchall() != [('ok',)]:
+        bad.append('integrity_check on branch %d' % i)
+m = conn('main')
+if m.execute('select count(*) from t').fetchone()[0] != 5000 or m.execute("select count(*) from t where b = ?", ('x' * 100,)).fetchone()[0] != 5000:
+    bad.append('main changed')
+for c in conns + [m]:
+    c.close()
+host.execute("select forkdb_close(?)", (P,)).fetchall()
+for i, n in enumerate(('a', 'b', 'c')):
+    c = conn(n)
+    cnt = c.execute('select count(*) from t').fetchone()[0]
+    if cnt != 5000 + ok[i]:
+        bad.append('after reopening, branch %s has %d rows, expected %d' % (n, cnt, 5000 + ok[i]))
+    c.close()
+print('commits', ok, 'compactions', compactions[0], 'problems', bad[:5])
+print('ok' if not bad else 'BAD')
+sys.exit(1 if bad else 0)
+"""
+
+    def test_compaction_while_threads_write(self):
+        r = run_py(self.THREADED, os.path.join(self.dir, "s.fk"))
+        self.assertEqual(r.returncode, 0, "rc=%s\\n%s%s" % (r.returncode, r.stdout, r.stderr))
+        self.assertTrue(r.stdout.strip().endswith("ok"), r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
