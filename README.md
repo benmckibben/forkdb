@@ -76,6 +76,8 @@ The SQL functions are `forkdb_init(path[, root])`, `forkdb_fork(path, from, name
 
 The other [fkx](docs/FKX-DESIGN.md) operations (list, info, gc) are in the CLI and the C library, not in SQL.
 
+**A worked example: a fresh database for every pytest test.** [examples/pytest-branch-per-test](examples/pytest-branch-per-test/README.md) is a pytest plugin that gives each test its own branch of a seeded database, a 116-test suite and isolation canaries for it, and measurements of what it costs (cheap on tmpfs and for large seeds; for a small seed on a disk a file copy is as good).
+
 ## How it works
 
 The store is an **append-only log** (see [DURABLE-STORE.md](docs/DURABLE-STORE.md)). Recovery truncates a torn tail, replays the committed prefix, and rebuids an in-memory index. On open, if the log exceeds 16 MiB, the store compacts it to a clean snapshot — the next open loads instantly.

@@ -130,3 +130,12 @@ jobs:
 
       - name: Run thread stress tests
         run: scripts/test-threads.sh
+
+  pytest-example:
+    name: pytest example (a branch per test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the extension, run the example's suite and its isolation canaries
+        run: scripts/test-pytest-example.sh
