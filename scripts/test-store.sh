@@ -23,8 +23,16 @@ echo "== real-file tests"
 $cc $warn "${fdata[@]}" "$here/test/file_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" "$here/store/io_prealloc.c" -o "$out/file_test"
 "$out/file_test"
 
+# The nosync test counts the fsync and fdatasync calls of io_file.c: that one file is built with test/nosync_redirect.h force-included (no linker option, so this also builds on macOS).
+build_nosync_test() { # output [extra compiler flags]
+  local o=$1; shift
+  # shellcheck disable=SC2086
+  $cc $warn "$@" -include "$here/test/nosync_redirect.h" -c "$here/store/io_file.c" -o "$out/io_file_counted.o"
+  # shellcheck disable=SC2086
+  $cc $warn "$@" "$here/test/nosync_test.c" "$here/store/fkstore.c" "$here/store/io_prealloc.c" "$out/io_file_counted.o" -o "$o"
+}
 echo "== nosync test"
-$cc $warn -Wl,--wrap=fdatasync -Wl,--wrap=fsync "$here/test/nosync_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" "$here/store/io_prealloc.c" -o "$out/nosync_test"
+build_nosync_test "$out/nosync_test"
 "$out/nosync_test"
 
 echo "== power-loss tests (${seeds} seeds x ${ops} operations, address and undefined-behaviour sanitizers on)"
@@ -96,7 +104,7 @@ mutant "prealloc: a failed zero fill fails the write" "-DFK_BUG_PA_NO_FALLBACK" 
 # nosync mutant: the bug makes nosync still issue syncs, so the nosync check (counter must stay at 0) fails
 nosync_mutant() {
   local flags="-DFK_BUG_NOSYNC_STILL_SYNCS"
-  $cc $warn -Wl,--wrap=fdatasync -Wl,--wrap=fsync $flags "$here/test/nosync_test.c" "$here/store/fkstore.c" "$here/store/io_file.c" "$here/store/io_prealloc.c" -o "$out/m_nosync"
+  build_nosync_test "$out/m_nosync" $flags
   timeout 120 "$out/m_nosync" >/dev/null 2>&1 && { printf "  %-52s ALIVE (not killed)\n" "nosync still syncs"; return 1; }
   printf "  %-52s KILLED\n" "nosync still syncs"
 }

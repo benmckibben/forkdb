@@ -1,8 +1,9 @@
 /* nosync_test: prove that a durable open issues syncs and a nosync open issues none, by counting real system calls through
- * GNU linker --wrap. Also proves data integrity after nosync sessions and process-death survival. */
+ * redirecting the fsync and fdatasync calls of store/io_file.c to the counters below (test/nosync_redirect.h). Also proves data integrity after nosync sessions and process-death survival. */
 #define _GNU_SOURCE
 #include <fcntl.h>
 #include <stdio.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -11,22 +12,20 @@
 
 #include "../store/fkstore.h"
 
-/* -- wrap counters -------------------------------------------------------- */
+/* -- sync counters -------------------------------------------------------- */
 static long sync_calls;
 
-/* The __real_ functions are provided by the linker. */
-int __real_fsync(int fd);
-int __real_fdatasync(int fd);
-
-int __wrap_fsync(int fd) {
+/* Called instead of fsync and fdatasync by store/io_file.c (built with -include test/nosync_redirect.h); the real call is made as well. */
+int fk_test_fsync(int fd) {
   sync_calls++;
-  return __real_fsync(fd);
+  return fsync(fd);
 }
-
-int __wrap_fdatasync(int fd) {
+#ifndef __APPLE__
+int fk_test_fdatasync(int fd) {
   sync_calls++;
-  return __real_fdatasync(fd);
+  return fdatasync(fd);
 }
+#endif
 
 static long read_syncs(void) {
   /* Compiler barrier: make sure the counter is read from memory. */
