@@ -16,6 +16,7 @@
 #include "../store/fkstore.h"
 
 #define PROGRAM "forkdb"
+#define FORKDB_VERSION "0.1.0"
 
 #define STRLIT(s) s, sizeof(s)-1
 
@@ -963,9 +964,16 @@ static int cmd_shell(int argc, char **argv) {
 int main(int argc, char **argv) {
     if (argc < 2) { print_help(stderr); return 1; }
 
-    /* parse global --json/--help before the subcommand */
+    /* parse global --json/--help/--version before the subcommand */
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--json")) { json_output = 1; }
+    }
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-v") || !strcmp(argv[i], "-V")) {
+            if (json_output) printf("{\"version\":\"" FORKDB_VERSION "\"}\n");
+            else printf(PROGRAM " " FORKDB_VERSION "\n");
+            return 0;
+        }
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             print_help(stdout); return 0;
         }
