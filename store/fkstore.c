@@ -692,13 +692,30 @@ static int snap_load(fk_store *s, const uint8_t *st, size_t n, const PendPage *c
 }
 
 /* ---------- open and recovery ---------- */
-static int write_header(const fk_io *io, int sync) {
-  uint8_t h[HDR_SZ];
-  memset(h, 0, sizeof h);
+static void fill_header(uint8_t h[HDR_SZ]) {
+  memset(h, 0, HDR_SZ);
   memcpy(h, "FORKDBST", 8);
   put32(h + 8, FK_VERSION);
   put32(h + 12, FK_PAGE);
   put32(h + 16, fk_crc32c(0, h, 16));
+}
+/* Could these n bytes (n <= HDR_SZ) be what a creation that was cut short leaves? Creation truncates the file to nothing and then writes the header, so after a power cut
+ * the file is empty, or holds a prefix of the header, or zeros where the rest of a sector did not land: every byte is zero or the byte the header has at that place. Anything
+ * else is somebody's file (a text file, a one-page SQLite database), and opening it as a new store would overwrite it. */
+static int creation_remnant(const uint8_t *p, size_t n) {
+#ifdef FK_BUG_OPEN_OVERWRITES
+  (void)p; (void)n;
+  return 1; /* mutant: every short file is taken for a cut-short creation (it was, before this check) */
+#else
+  uint8_t h[HDR_SZ];
+  fill_header(h);
+  for (size_t i = 0; i < n; i++) if (p[i] != 0 && p[i] != h[i]) return 0;
+  return 1;
+#endif
+}
+static int write_header(const fk_io *io, int sync) {
+  uint8_t h[HDR_SZ];
+  fill_header(h);
   if (io->truncate(io->ctx, 0) != 0) return FK_EIO;
   if (io->pwrite(io->ctx, 0, h, sizeof h) != 0) return FK_EIO;
   if (sync && io->fsync(io->ctx) != 0) return FK_EIO;
@@ -881,14 +898,22 @@ int fk_open(const fk_io *io, fk_store **out) {
   uint8_t h[HDR_SZ];
   int fresh = 0;
   uint32_t version = FK_VERSION;
-  if (size < (int64_t)HDR_SZ) {
-    fresh = 1; /* new file, or a creation that was cut short (records are only written after the header is durable) */
+  if (size == 0) {
+    fresh = 1; /* a new file */
   } else {
-    if (io->pread(io->ctx, 0, h, HDR_SZ) != (int)HDR_SZ) { free(s); return FK_EIO; }
-    version = header_ver(h);
-    if (!version) {
-      if (size == (int64_t)HDR_SZ) fresh = 1; /* header sector never landed: still a creation in progress */
-      else { free(s); return FK_ECORRUPT; }
+    size_t have = size < (int64_t)HDR_SZ ? (size_t)size : (size_t)HDR_SZ;
+    if (io->pread(io->ctx, 0, h, have) != (int)have) { free(s); return FK_EIO; }
+    if (size < (int64_t)HDR_SZ) {
+      /* A creation that was cut short (records are only written after the header is durable) leaves nothing, zeros, or part of the header: that is a new store.
+       * A short file with anything else in it is not ours: refuse, and leave it as it is. */
+      if (!creation_remnant(h, have)) { free(s); return FK_ECORRUPT; }
+      fresh = 1;
+    } else {
+      version = header_ver(h);
+      if (!version) {
+        if (size == (int64_t)HDR_SZ && creation_remnant(h, HDR_SZ)) fresh = 1; /* header sector never landed: still a creation in progress */
+        else { free(s); return FK_ECORRUPT; }
+      }
     }
   }
   if (fresh) {

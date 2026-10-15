@@ -191,7 +191,7 @@ static int equal_state(fk_store *s, const Model *M) {
   return 1;
 }
 
-typedef struct { long images, ok_old, ok_new, violations, open_fail, nested, cont, compactions; long refused, nosync_ok, lagged, lost_all, pd_checks; } Stats;
+typedef struct { long images, ok_old, ok_new, violations, open_fail, nested, cont, compactions; long refused, nosync_ok, lagged, lost_all, pd_checks, half_created; } Stats;
 typedef struct {
   const Model *states;
   int cand[MAXOPS + 2], ncand;
@@ -264,6 +264,14 @@ static void verify_image(void *vc, const uint8_t *img, uint64_t len) {
   fk_io io CLEANUP_IO = mkio(&d);
   fk_store *s = NULL;
   int rc = fk_open(&io, &s);
+  if (rc != 0 && !c->nosync && c->cand[0] == 0 && len <= FK_HEADER_SZ) {
+    /* The power was cut while the store was being created, before anything was acknowledged: the file is what a torn header write leaves, and under this model that can be
+     * arbitrary bytes (a sector that did not land reads as garbage). Such a file holds no data, so refusing it loses nothing; what open must never do is take somebody
+     * else's short file for such a remnant (file_test.c and ext_py_test.py check that). */
+    c->st->half_created++;
+    sim_free(&d);
+    return;
+  }
   if (rc != 0 && c->nosync) { /* a refusal is an allowed answer after a power cut with no syncs: the file says it cannot be trusted */
     c->st->refused++;
     sim_free(&d);
@@ -547,7 +555,7 @@ int main(int argc, char **argv) {
   }
   printf("\nworkloads x cut points: %ld (incl. fsync-failure cases), I/O events cut: %ld\n", cases, total_events);
   printf("post-crash images checked: %ld (recovered to acknowledged state: %ld, to acknowledged+in-flight: %ld)\n", st.images, st.ok_old, st.ok_new);
-  printf("append-after-recovery checks: %ld, crash-during-recovery cut points: %ld, compactions in the workloads: %ld\n", st.cont, st.nested, st.compactions);
+  printf("append-after-recovery checks: %ld, crash-during-recovery cut points: %ld, compactions in the workloads: %ld, half-created stores refused (nothing acknowledged yet): %ld\n", st.cont, st.nested, st.compactions, st.half_created);
   printf("TOTAL VIOLATIONS=%ld\n", st.violations);
   return st.violations ? 1 : 0;
 }
