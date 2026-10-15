@@ -39,6 +39,13 @@ else
     echo "NOT RUN on $(uname -s): test/ext_node_nosync_test.js (it counts fsync calls with an LD_PRELOAD interposer, which is Linux only)"
 fi
 echo "Running Node tests: ${files[*]}"
-"$node" --no-warnings --test --test-reporter=spec "${files[@]}"
+if ! "$node" --no-warnings --test --test-reporter=spec "${files[@]}"; then
+    # A file that dies as a whole (a crash in the library, an exception while loading) is reported as test failed and nothing else: run each file again directly, for its own output.
+    for f in "${files[@]}"; do
+        echo "== $f, run directly (output of a failing run):"
+        "$node" --no-warnings "$f" 2>&1 | tail -n 60 || true
+    done
+    exit 1
+fi
 
 echo "all Node extension tests passed"
