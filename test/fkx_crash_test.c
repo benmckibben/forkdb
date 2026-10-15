@@ -161,7 +161,7 @@ static int run_op(fkx *x, const Op *o) {
   }
 }
 
-typedef struct { long violations, cases, images, nested; } Stats;
+typedef struct { long violations, cases, images, nested, half_created; } Stats;
 typedef struct {
   const Model *cand[4]; int ncand; int mid_idx; /* index in cand[] of an undo's in-between view, or -1 */
   const Model *after_undo; int undo_op_br;
@@ -214,6 +214,9 @@ static int matches(Ctx *c, fkx *x, int *which) {
   return 0;
 }
 
+/* A file no longer than the header cannot hold an acknowledged state (records start after FK_HEADER_SZ): the power was cut while the store was being created, before anything was
+ * acknowledged, and under this model a torn header write can leave arbitrary bytes. The store refuses such a file instead of overwriting it (it might be somebody else's), which
+ * loses nothing. The same allowance as in crash_test.c and vfs_test.c; file_test.c checks that open never takes somebody else's short file for such a remnant. */
 /* a leaf: open, check, match */
 static void verify(Ctx *c, const uint8_t *img, uint64_t len, int deep) {
   c->st->images++;
@@ -223,6 +226,7 @@ static void verify(Ctx *c, const uint8_t *img, uint64_t len, int deep) {
   fkx *x = NULL;
   fkx_options o = mkopt();
   int rc = fkx_open_io(&io, &o, &x);
+  if (rc && len <= FK_HEADER_SZ) { c->st->half_created++; sim_free(&d); return; } /* see the note above verify() */
   if (rc) { snprintf(why, sizeof why, "fkx_open failed rc=%d: %s", rc, x ? fkx_errmsg(x) : "(no handle)"); report(c, "recovery failed"); sim_free(&d); return; }
   char buf[200];
   int which = -1;
@@ -329,6 +333,7 @@ int main(int argc, char **argv) {
     for (long n = 0; n < ev + 1; n++) run_case((uint64_t)s, K, n, &st, NULL);
   }
   printf("seeds=%d ops=%d cut points=%ld cases=%ld images=%ld recoveries cut again=%ld\n", seeds, K, total_events, st.cases, st.images, st.nested);
+  printf("half-created stores refused (nothing acknowledged yet): %ld\n", st.half_created);
   printf("TOTAL VIOLATIONS=%ld\n", st.violations);
   return st.violations ? 1 : 0;
 }

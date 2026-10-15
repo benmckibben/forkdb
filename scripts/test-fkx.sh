@@ -5,6 +5,8 @@
 #   scripts/test-fkx.sh          both builds: file tests, power-loss tests, then the harness self-check (mutants: each must make a test fail)
 #   scripts/test-fkx.sh quick    both builds: file tests and a shorter power-loss test, no mutants
 set -u
+# The harness runs below are piped into tail. Without pipefail the status of a pipeline is tail's, so the gate could not fail on a test: it printed VIOLATIONS and "all fkx tests passed".
+set -o pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
 cd "$root" || exit 1
