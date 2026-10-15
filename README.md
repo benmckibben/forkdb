@@ -72,7 +72,7 @@ SELECT forkdb_close('/tmp/mine.fk');
 
 The URI names the branch by its store id (`b<N>`), which is only stable until the next fork, discard or reset on that store: open it right away.
 
-The SQL functions are `forkdb_init(path[, root])`, `forkdb_fork(path, from, name)`, `forkdb_snapshot(path, from, name)`, `forkdb_discard(path, name)`, `forkdb_reset(path, name[, to])`, `forkdb_compact(path)`, `forkdb_vfs_name(path)`, `forkdb_open_db(path[, ref])`, `forkdb_close(path)`, and `forkdb_diff`, `forkdb_promote` and `forkdb_undo` where the session API is present. The table `forkdb_info` reports the session API, the VFS name and the version. They are direct-only: a view or trigger cannot call them. A store that cannot be opened is an SQL error. The extension stays loaded for the life of the process (it registers a VFS).
+The SQL functions are `forkdb_init(path[, root[, options]])` (the one option, `'nosync'`, skips every fsync for a throwaway store: about 100 times faster fork and discard on a disk, safe against the death of the process, not against a power cut), `forkdb_fork(path, from, name)`, `forkdb_snapshot(path, from, name)`, `forkdb_discard(path, name)`, `forkdb_reset(path, name[, to])`, `forkdb_compact(path)`, `forkdb_vfs_name(path)`, `forkdb_open_db(path[, ref])`, `forkdb_close(path)`, and `forkdb_diff`, `forkdb_promote` and `forkdb_undo` where the session API is present. The table `forkdb_info` reports the session API, the VFS name and the version. They are direct-only: a view or trigger cannot call them. A store that cannot be opened is an SQL error. The extension stays loaded for the life of the process (it registers a VFS).
 
 The other [fkx](docs/FKX-DESIGN.md) operations (list, info, gc) are in the CLI and the C library, not in SQL.
 

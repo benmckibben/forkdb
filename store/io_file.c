@@ -19,7 +19,7 @@
 #include "oom_harness.h" /* after the system headers; shares oom_counter with the test */
 #endif
 
-typedef struct { int fd; char *path; } FC;
+typedef struct { int fd; char *path; int nosync; } FC;
 #define FD(ctx) (((FC *)(ctx))->fd)
 
 static int64_t f_size(void *ctx) {
@@ -54,6 +54,9 @@ static int f_pwrite(void *ctx, uint64_t off, const void *buf, size_t n) {
 }
 static int f_truncate(void *ctx, uint64_t size) { return ftruncate(FD(ctx), (off_t)size); }
 static int f_fsync(void *ctx) {
+#ifndef FK_BUG_NOSYNC_STILL_SYNCS
+  if (((FC *)ctx)->nosync) return 0;
+#endif
 #ifdef __APPLE__
   return fsync(FD(ctx));
 #else
@@ -85,7 +88,12 @@ static char *tmp_path(const char *p) {
 
 static int f_sibling_create(void *ctx, fk_io *tmp);
 static int f_sibling_rename(void *ctx, fk_io *tmp);
-static int f_sync_dir(void *ctx) { return sync_dir_of(((FC *)ctx)->path); }
+static int f_sync_dir(void *ctx) {
+#ifndef FK_BUG_NOSYNC_STILL_SYNCS
+  if (((FC *)ctx)->nosync) return 0;
+#endif
+  return sync_dir_of(((FC *)ctx)->path);
+}
 static void f_sibling_remove(void *ctx, fk_io *tmp);
 
 static void fill(fk_io *io, FC *c, int main_file) {
@@ -117,6 +125,7 @@ static int f_sibling_create(void *ctx, fk_io *tmp) {
   }
   t->fd = fd;
   t->path = tp;
+  t->nosync = m->nosync;
   fill(tmp, t, 0);
   return 0;
 }
@@ -145,7 +154,9 @@ static void f_sibling_remove(void *ctx, fk_io *tmp) {
   if (tp) { unlink(tp); free(tp); }
 }
 
-int fk_file_open(const char *path, fk_io *io) {
+int fk_file_open(const char *path, fk_io *io) { return fk_file_open_ex(path, io, 0); }
+
+int fk_file_open_ex(const char *path, fk_io *io, int flags) {
   int existed = access(path, F_OK) == 0;
   int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
   if (fd < 0) return -1;
@@ -158,9 +169,10 @@ int fk_file_open(const char *path, fk_io *io) {
   if (!c || !p) { free(c); free(p); close(fd); return -1; }
   c->fd = fd;
   c->path = p;
+  c->nosync = (flags & FK_FILE_NOSYNC) != 0;
   fill(io, c, 1);
   /* Make a new directory entry durable too; a power cut must not forget the file itself. */
-  if (!existed) (void)sync_dir_of(path);
+  if (!existed && !c->nosync) (void)sync_dir_of(path);
   return 0;
 }
 void fk_file_close(fk_io *io) {

@@ -80,6 +80,7 @@ typedef struct {
   uint64_t prealloc_chunk;  /* log preallocation (store/io_prealloc.c); default FK_PREALLOC_DEFAULT, 0 turns it off */
   unsigned undo_keep;       /* undo points kept per branch; default 8, at most FKX_UNDO_KEEP_MAX */
   int create;               /* create the file if it does not exist (default 1) */
+  int nosync;               /* do not fsync (FK_FILE_NOSYNC, see fkstore.h): for throwaway stores. Survives the death of the process, not a power cut. Default 0 */
   int upgrade;              /* a store older than version 4 is compacted into the current format instead of refused with FKX_EVERSION */
   uint64_t (*random64)(void *ctx); /* source of uids; default: the operating system's (getrandom); a test can inject a sequence */
   void *random_ctx;

@@ -25,6 +25,7 @@
 typedef struct {
   HANDLE h;
   wchar_t *path;
+  int nosync; /* FK_FILE_NOSYNC: the flushes are not issued */
 } WC;
 
 #define H(ctx) (((WC *)(ctx))->h)
@@ -128,6 +129,7 @@ static int w_truncate(void *ctx, uint64_t size) {
 }
 
 static int w_fsync(void *ctx) {
+  if (((WC *)ctx)->nosync) return 0;
   return FlushFileBuffers(H(ctx)) ? 0 : -1;
 }
 
@@ -215,6 +217,7 @@ static int w_sibling_rename(void *ctx, fk_io *tmp) {
 }
 
 static int w_sync_dir(void *ctx) {
+  if (((WC *)ctx)->nosync) return 0;
   return sync_dir_of(((WC *)ctx)->path);
 }
 
@@ -238,7 +241,9 @@ static void w_sibling_remove(void *ctx, fk_io *tmp) {
 
 /* ---------- open / close ---------- */
 
-int fk_file_open(const char *path, fk_io *io) {
+int fk_file_open(const char *path, fk_io *io) { return fk_file_open_ex(path, io, 0); }
+
+int fk_file_open_ex(const char *path, fk_io *io, int flags) {
   wchar_t *wp = to_wpath(path);
   if (!wp) return -1;
 
@@ -257,6 +262,7 @@ int fk_file_open(const char *path, fk_io *io) {
   if (!c) { CloseHandle(h); free(wp); return -1; }
   c->h = h;
   c->path = wp;
+  c->nosync = (flags & FK_FILE_NOSYNC) != 0;
   fill(io, c, 1);
   return 0;
 }

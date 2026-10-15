@@ -121,6 +121,20 @@ Three things the layer above needs and could not build on the store as it was (s
 
 **Versions.** A new file is version 4. A version 3 file opens and works as before; `fk_version` says which the open file is; `fk_state` and `fk_meta_get` work on it too (ids as the replay of its log gives them, no metadata); `fk_reset`, `fk_meta_set` and `fk_fork_meta` return `FK_EVERSION` and change nothing. `fk_compact` writes the current format, so a file is upgraded by the same crash-safe rename as any compaction, and from then on an older program refuses it (`FK_ECORRUPT`, nothing touched), as it refuses any version it does not know.
 
+## Running without syncs (`FK_FILE_NOSYNC`)
+
+A store can be opened with the flag `FK_FILE_NOSYNC` (`fkx_options.nosync`, or `forkdb_init(path, root, 'nosync')` in SQL). The store then issues no `fsync`, `fdatasync`, `FlushFileBuffers` or directory sync for the life of that open, compaction included. It is for stores that are throwaway by design: a database per test, a build cache. Measured on ext4 with a 20 000-row seed, a fork, a ten-row update, a commit and a discard cost 8.5 ms with syncs and 0.07 ms without (a fork and a discard are one fsync each).
+
+What it keeps and what it gives up:
+
+- **The death of the process loses nothing.** The writes still reach the operating system, so a process that is killed, crashes or aborts leaves exactly the data it had acknowledged, with the machine up. Tested: a child killed with SIGKILL after 50 commits (and in the middle of an uncommitted transaction), a Python process that calls `os._exit` after 20 commits, and, in the power-loss harness, a replay of every workload from the volatile image.
+- **A power cut or kernel crash can lose commits, and can make the file refuse to open.** Nothing orders the writes any more. The harness (`test/crash_test.c`, the "no-sync pass") cuts the power at a sample of the I/O events of seeded workloads, with a model in which nothing is ever durable and any subset of the writes, in any order, torn or not, may survive, plus the images where the first m writes survived in order. In 151 504 images (10 seeds of 8 operations) the open either **refused** (14 657) or returned **a state the workload had acknowledged** (15 587; in 14 207 of them an older one than the last acknowledged, in 10 700 an empty store), and the store was usable afterwards. Never a state that was not one of the workload's. That is the whole claim: *a state the workload acknowledged, or a refusal*. It is not "the last acknowledged state".
+- **Nothing marks the file.** The next open, with or without the flag, reads it as usual. Only the open that used the flag skips the syncs, so the same store can be used durably later, and what was written without syncs is only as durable as the last sync made after it.
+- **Not tested on real power cuts.** The claim rests on the simulator's model, which is deliberately pessimistic but is still a model. No real disk was power-cycled for either mode.
+- **The lock still applies**, and the compaction temporary file inherits the flag.
+
+How it is tested: `test/nosync_test.c` counts the real `fsync` and `fdatasync` calls (the linker's `--wrap`) of a durable open and of a nosync open through creation, commits, forks, discards, resets, compaction and close, with and without the preallocation layer: at least 20 against exactly 0. `test/fsync_count.c` does the same through the extension in Python, with an `LD_PRELOAD` interposer. The mutant `FK_BUG_NOSYNC_STILL_SYNCS` makes the flag a no-op and is caught.
+
 ## Compaction
 
 **What is garbage.** A page record is live only if it is the visible version of some page in some live branch: walk each live branch's layer chain, newer layers hiding older ones, shared layers counted once. Discarded branches, overwritten pages, pages hidden by a shrink and the uncommitted tail fall out of that. Layers get flattened too: a frozen layer that has exactly one child and no branch of its own is folded into the child, which is what remains after one side of a fork is discarded. Tombstones are only kept where there is a layer below for them to hide.

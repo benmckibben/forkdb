@@ -153,6 +153,13 @@ int fk_crc32c_select(int want_hw);
  * description: a second fk_file_open of the same path in this process is refused as well, and fork() children share the parent's. A
  * filesystem that cannot lock (ENOLCK, EOPNOTSUPP: some network filesystems) is not refused, only a proven conflict is. */
 int fk_file_open(const char *path, fk_io *io);
+/* The same with flags. FK_FILE_NOSYNC: fsync, fdatasync, FlushFileBuffers and the directory sync are not issued (they return success), for the life of this open.
+ * That is for stores that are throwaway by design (a database per test, a build cache): the writes still reach the operating system, so the data survives the
+ * death of the process (kill -9, a crash, an abort) exactly as a durable store does, but a power cut or a kernel crash can lose the most recent commits, and
+ * can leave a file that no longer opens (the durable-end marker may reach the disk before the data it vouches for). Nothing in the file marks it: the next
+ * open, with or without the flag, reads it as usual. Compaction swaps files without syncing either. */
+#define FK_FILE_NOSYNC 1
+int fk_file_open_ex(const char *path, fk_io *io, int flags);
 void fk_file_close(fk_io *io);
 
 #endif
