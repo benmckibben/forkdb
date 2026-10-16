@@ -3,7 +3,7 @@
   Checks the forkdb packages on this machine: the Python wheel and the npm tarball, as a user would install them.
 
 .DESCRIPTION
-  1. Gets the packages: from -ArtifactsDir, or with the GitHub CLI from the latest successful "Release artifacts" run of the repository.
+  1. Gets the packages: from -ArtifactsDir, or with the GitHub CLI from the latest successful "Release build" run of the repository.
   2. Python: finds a Python whose sqlite3 can load extensions, installs the wheel into a fresh virtual environment, runs test\smoke_py.py
      (load, branch, write, isolation, snapshot) and test\verify_install.py (durable vs nosync flushes, compaction, a second process refused,
      a hard kill of a process that holds a store).
@@ -22,7 +22,7 @@
 [CmdletBinding()]
 param(
     [string]$ArtifactsDir,      # a folder that contains the wheel (*win_amd64*.whl) and the tarball (sqlite-forkdb-*.tgz), anywhere below it
-    [string]$RunId,             # a specific "Release artifacts" run to download from (default: the latest successful one)
+    [string]$RunId,             # a specific "Release build" run to download from (default: the latest successful one)
     [string]$Repo = 'benmckibben/forkdb',
     [switch]$SkipPython,
     [switch]$SkipNode,
@@ -123,13 +123,13 @@ if (-not $artDir) {
     $gh = Get-Command gh -ErrorAction SilentlyContinue
     if (-not $gh) {
         Log 'The GitHub CLI (gh) is not installed, and no -ArtifactsDir was given. Either install gh and run "gh auth login", or download the artifacts "wheel-windows-x86_64",'
-        Log '"npm-tarball" and "windows-x86_64" from the Actions page of a "Release artifacts" run, unzip them into one folder, and pass it as -ArtifactsDir.'
+        Log '"npm-tarball" and "windows-x86_64" from the Actions page of a "Release build" run, unzip them into one folder, and pass it as -ArtifactsDir.'
         Record 'get the packages' $false 'no gh and no -ArtifactsDir'
     } else {
         $id = $RunId
         $sha = ''
         if (-not $id) {
-            $r = Invoke-Native -Exe 'gh' -Arguments @('run', 'list', '-R', $Repo, '--workflow', 'release-artifacts.yml', '--status', 'success', '--limit', '1', '--json', 'databaseId,headSha,headBranch')
+            $r = Invoke-Native -Exe 'gh' -Arguments @('run', 'list', '-R', $Repo, '--workflow', 'release.yml', '--status', 'success', '--limit', '1', '--json', 'databaseId,headSha,headBranch')
             try { $j = ($r.Output -join [Environment]::NewLine) | ConvertFrom-Json; $id = [string]$j[0].databaseId; $sha = $j[0].headSha + ' on ' + $j[0].headBranch } catch { }
         }
         if ($id) {
@@ -138,7 +138,7 @@ if (-not $artDir) {
             $r = Invoke-Native -Exe 'gh' -Arguments @('run', 'download', $id, '-R', $Repo, '-D', $artDir)
             if ($r.Code -ne 0) { Record 'download the artifacts' $false ('gh exited with ' + $r.Code + ' (is "gh auth status" ok, with access to the private repository?)'); $artDir = $null }
         } else {
-            Record 'find a Release artifacts run' $false 'gh found no successful run (check "gh auth status")'
+            Record 'find a Release build run' $false 'gh found no successful run (check "gh auth status")'
         }
     }
 }
