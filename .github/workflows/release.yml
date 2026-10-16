@@ -8,7 +8,7 @@ name: Release build
 # one Python wheel per platform; the npm tarball; SHA256SUMS. Each library is loaded from Python and Node, each package is installed in a clean environment on every OS,
 # and the release files themselves are checked on their own OS before the draft is made.
 # A run from a branch, a pull request or by hand (workflow_dispatch) has no tag: it builds, tests and keeps the files as artifacts of the run, and stops there.
-# Publishing to PyPI and npm is a manual step: see RELEASE.md.
+# Publishing to PyPI and npm is a manual step: this workflow holds no registry token, and the wheels and the npm tarball of the release are uploaded by hand (twine, npm publish).
 
 on:
   pull_request:
