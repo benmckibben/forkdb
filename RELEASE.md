@@ -21,8 +21,8 @@ A step marked *(owner)* changes a repository or registry setting, or publishes s
 - [X] **Dry-run the release workflow:** Actions, Release build, Run workflow on `main`. Without a tag it builds, tests and verifies everything and makes no release. Read every job.
 - [ ] **Run the full gates locally.** CI runs only the `quick` variants of the store, VFS and fkx suites. Run `scripts/test-store.sh`, `scripts/test-vfs.sh` and `scripts/test-fkx.sh` without `quick` (the store suite took about 33 minutes on one machine), and `scripts/test-threads.sh`.
 - [ ] **README table and KNOWN-LIMITS.md match what CI ran** (the table is a claim about CI; check it against the job list).
-- [ ] **Run `scripts/verify-windows.ps1` on a real Windows machine** (CI runs the same smoke tests on a Windows runner; this installs the packages the way a user would, on a desktop, and adds a compaction check, a hard kill and a second-process check).
-- [ ] **Install the macOS wheel on a real Apple-silicon Mac** and run `FORKDB_SMOKE_INSTALLED=1 python test/smoke_py.py` with the venv's Python against it, if nobody has. macOS is the platform with the least hand testing, and CI runs it only on a runner. (There is no macOS counterpart of the Windows script; the smoke test is the check.)
+- [X] **Run `scripts/verify-windows.ps1` on a real Windows machine** (CI runs the same smoke tests on a Windows runner; this installs the packages the way a user would, on a desktop, and adds a compaction check, a hard kill and a second-process check).
+- [ ] **Install the macOS wheel on a real Apple-silicon Mac** and run `FORKDB_SMOKE_INSTALLED=1 python test/smoke_py.py` with the venv's Python against it, if nobody has. macOS is the platform with the least hand testing, and CI runs it only on a runner. (There is no macOS counterpart of the Windows script; the smoke test is the check.) *Ben's note: Can't do before v0.1.0.*
 - [ ] **A clean checkout builds:** `scripts/build-step4.sh test`, and `scripts/build-ext.sh` on each platform in the table.
 - [ ] **No generated files are committed** (build output, vendored SQLite, `node_modules`); `git status` is clean.
 
