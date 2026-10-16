@@ -11,7 +11,7 @@ jobs:
     name: Store tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libasan8 libubsan1
@@ -39,7 +39,7 @@ jobs:
     name: VFS tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libasan8 libubsan1
@@ -51,7 +51,7 @@ jobs:
     name: fkx tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libasan8 libubsan1 python3
@@ -66,7 +66,7 @@ jobs:
       run:
         shell: cmd
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build and run store smoke test
         run: |
@@ -91,7 +91,7 @@ jobs:
     name: macOS store tests
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Run store tests (no sanitizers)
         run: |
@@ -101,7 +101,7 @@ jobs:
     name: Python SQLite VFS tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system SQLite
         run: |
@@ -121,7 +121,7 @@ jobs:
     name: Extension tests (Python sqlite3)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build the loadable extension and test it from Python's sqlite3
         run: scripts/test-ext.sh
@@ -130,9 +130,9 @@ jobs:
     name: Extension tests (Node node:sqlite)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -143,9 +143,9 @@ jobs:
     name: Extension tests (better-sqlite3)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -164,9 +164,9 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -187,9 +187,9 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
 
@@ -200,7 +200,7 @@ jobs:
     name: Extension tests (SQLite 3.24.0, the oldest supported)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build the extension; load it into SQLite 3.24.0 (it must work) and 3.23.1 (it must refuse)
         run: scripts/test-oldest-sqlite.sh
@@ -209,7 +209,7 @@ jobs:
     name: Recovery fuzzer (sanitizers)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Fuzz the open and recovery path (100000 inputs, address and undefined-behaviour sanitizers)
         run: FUZZ_INPUTS=100000 scripts/test-fuzz.sh mutants
@@ -218,7 +218,7 @@ jobs:
     name: CLI tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build and test the CLI
         run: scripts/test-cli.sh
@@ -227,7 +227,7 @@ jobs:
     name: Thread tests (ThreadSanitizer)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Run thread stress tests
         run: scripts/test-threads.sh
@@ -236,7 +236,7 @@ jobs:
     name: pytest example (a branch per test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build the extension, run the example's suite and its isolation canaries
         run: scripts/test-pytest-example.sh
@@ -245,7 +245,7 @@ jobs:
     name: Release script tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Test the tag guard, the release notes and the packaging script
         run: scripts/test-release.sh
