@@ -1,6 +1,6 @@
 # Stability
 
-Status: **unstable.** forkdb has not been released: there is no tag and no release, and the version string that `forkdb_info` reports (`0.1.0`) is a placeholder for a first release. Nothing in this repository is a promise about what stays the same, and **no version number is promised for when any of it becomes stable.**
+Status: **unstable.** forkdb 0.1.0 is the first release. Nothing in this repository is a promise about what stays the same, and **no version number is promised for when any of it becomes stable.**
 
 This note says what that means for each surface, what has already changed, and what is true today without being promised.
 

@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# No job writes to the repository or calls its API, so the token is read-only whatever the repository's default is.
+permissions:
+  contents: read
+
 jobs:
   store:
     name: Store tests

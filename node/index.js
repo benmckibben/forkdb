@@ -1,6 +1,6 @@
 'use strict';
 // sqlite-forkdb: the forkdb SQLite extension, prebuilt, and load() for node:sqlite and better-sqlite3.
-// Pre-release (0.1.0): everything may change.
+// Unstable first release (0.1.0): everything may change.
 const fs = require('node:fs');
 const path = require('node:path');
 

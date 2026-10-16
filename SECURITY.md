@@ -1,6 +1,6 @@
 # Security
 
-Status: **pre-release.** There are no released versions and so no supported ones; fixes go to `main`. forkdb is C code that has had no external audit. This note says what the code does and does not defend against, as far as it has been checked, and how to report a problem.
+Status: **0.1.0, the first release, and unstable** (see [docs/STABILITY.md](docs/STABILITY.md)). Fixes go to `main` and are released as a new version; there is no promise to fix an older one. forkdb is C code that has had no external audit. This note says what the code does and does not defend against, as far as it has been checked, and how to report a problem.
 
 ## Reporting a vulnerability
 
@@ -18,7 +18,7 @@ forkdb is a library that runs **inside your process**, in memory-unsafe C, with 
 ## What has been checked, and what has not
 
 - **Crafted and damaged store files, at the level of the log.** A deterministic fuzzer feeds `fk_open` damaged, truncated and deliberately malformed files under the address and undefined-behaviour sanitizers, 100000 inputs per CI run (`scripts/test-fuzz.sh`), and a mutant check shows it notices when one recovery check is removed. It found one bug (the small-file overwrite above). **It does not cover**: the file backends (`io_file.c`, `io_file_win.c`), the SQL functions, the VFS, the session driver on hostile content, or the durable-end marker (it cannot know what was once durable). Two of its mutants are known not to be caught; they are listed in the script.
-- **Memory limits are constants, and the worst case is not measured.** A file can name up to 1024 branches (`FK_MAX_BRANCHES`), 2^28 pages per branch (`FK_MAX_PAGES`, 1 TiB at 4 KiB) and 512 bytes of metadata per branch (`FK_META_MAX`). The fuzzer's runs peaked at 21 MB; I have not measured what a file built to sit at those limits makes a process use.
+- **Memory limits are constants, and the worst case is not measured.** A file can name up to 1024 branches (`FK_MAX_BRANCHES`), 2^28 pages per branch (`FK_MAX_PAGES`, 1 TiB at 4 KiB) and 512 bytes of metadata per branch (`FK_META_MAX`). The fuzzer's runs peaked at 21 MB; what a file built to sit at those limits makes a process use has not been measured.
 - **Concurrency.** ThreadSanitizer runs the thread tests in CI, and they do not notice every missing lock: with the mutex removed from the VFS file's write wrapper (`fkf_write_m` in `vfs/fkvfs.c`) they still pass with no ThreadSanitizer warning (measured), so they do not show that path to be safe. The session driver is not tested under threads, and two accessors (`fkx_store_rc`, `fkx_sqlite_rc`) read their fields without the lock. See KNOWN-LIMITS.md.
 - **Platforms.** The README table says what is tested where. A bug that exists only on a platform that is not tested will not have been seen.
 

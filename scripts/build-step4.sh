@@ -43,14 +43,10 @@ case $cmd in
     echo "built $out/forkdb.so" ;;
   test)
     "$0" cli; "$0" ext
-    store=$(mktemp -u /tmp/fk4-smoke-XXXX.fk)
-    echo "=== CLI ==="
-    "$out/forkdb" init "$store" && "$out/forkdb" fork "$store" feat-x && "$out/forkdb" list "$store" | grep -c main && "$out/forkdb" info "$store" feat-x | grep size_pages && "$out/forkdb" diff "$store" feat-x | grep changeset && "$out/forkdb" promote "$store" feat-x --dry-run | grep promoted && "$out/forkdb" promote "$store" feat-x | grep promoted && "$out/forkdb" undo "$store" main | grep undone && "$out/forkdb" snapshot "$store" snap1 && "$out/forkdb" discard "$store" feat-x && "$out/forkdb" gc "$store" | grep discarded && "$out/forkdb" compact "$store" | grep compacted && echo "CLI PASSED"
-    rm -f "$store"
-    echo "=== Extension ==="
-    gcc $F $FS $I "$root/test/ext_smoke_test.c" $SRC "$SESS_OBJ" -o "$out/ext_smoke" -lpthread -lm -ldl
-    "$out/ext_smoke" "$out/forkdb.so"
-    echo "EXTENSION PASSED"
+    # The smoke test of the CLI is test/smoke_cli.sh (the release workflow runs it on the built binary too). It exits non-zero on the first failed check.
+    version=$(grep -o 'define FORKDB_VERSION "[0-9][0-9.]*"' "$root/cli/forkdb.c" | grep -o '[0-9][0-9.]*')
+    "$root/test/smoke_cli.sh" "$out/forkdb" "$version"
+    echo "the extension is tested by scripts/test-ext.sh, scripts/test-ext-node.sh and scripts/test-ext-bsq.sh"
     echo "END rc=0" ;;
   *) echo "usage: $0 cli | ext | test" >&2; exit 2 ;;
 esac

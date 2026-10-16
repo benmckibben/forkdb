@@ -2,6 +2,8 @@
 
 A branchable, snapshot-based SQLite page store with a library, a loadable extension, and a CLI.
 
+**Status: 0.1.0, the first release, and unstable.** Nothing here is a promise about what stays the same (see [STABILITY.md](docs/STABILITY.md)). What is tested, and against what, is in [Durability](#durability-what-is-proven-and-against-what) and [Platforms](#platforms-what-is-built-and-tested-where).
+
 On top of an append-only log with power-loss recovery (tested against a simulated disk: see [Durability](#durability-what-is-proven-and-against-what)), forkdb layers branching (fork, snapshot, diff, promote, undo), garbage collection, and an open-time checkpoint so frequent opens stay fast. Applications connect through a [SQLite VFS](docs/VFS-SPIKE.md) that enforces one-writer-per-branch.
 
 ## What you need
@@ -15,6 +17,10 @@ forkdb is a C library that requires:
 ## Quick start
 
 ```sh
+# Once per checkout, before the CLI and the test programs below: fetch the pinned SQLite (3.50.0) and compile it with the session API
+# (needs gcc, curl, sha256sum and python3; about a minute). scripts/build-ext.sh does not need this step.
+./vfs/build.sh sqlite
+
 # Build the CLI (offline, for inspecting stores no app has open)
 ./scripts/build-step4.sh cli        # produces build/forkdb
 
@@ -28,7 +34,7 @@ forkdb is a C library that requires:
 ./scripts/test-ext-bsq.sh           # installs better-sqlite3 13.0.3 (npm, into build/) and runs test/ext_bsq*_test.js through it
 ./scripts/test-oldest-sqlite.sh      # builds the SQLite 3.24.0 shell (the oldest supported) and checks the extension works in it and is refused by 3.23.1
 
-# Build both plus the test suite
+# Build the CLI and the extension above, and smoke-test the CLI (the test suites are the scripts/test-*.sh scripts)
 ./scripts/build-step4.sh test
 ```
 
@@ -112,12 +118,12 @@ Measured by CI on its runners (`scripts/bench-nosync.sh`: the median of 5 runs o
 | fork, write, commit, close, discard (a test fixture): 5.16 syncs, 0 | 0.680, 0.1104, 6x | 0.453, 0.0542, 8x | 27.842, 0.0962, 290x |
 
 - **The saving is a property of the disk.** On the Linux runner an fsync costs about 0.1 ms and the saving is 6 to 24 times; on the same operations NTFS on the Windows runner costs about 5 ms and the saving is 235 to 900 times. A local NVMe, a network disk and tmpfs each give another answer (tmpfs: no saving, an fsync costs nothing there). Run `scripts/bench-nosync.sh` with `FK_BENCH_DIR` on the disk you care about.
-- **A durable fork and discard costs 4.13 syncs against 1.03 for a commit.** I have not looked at why.
-- **macOS:** the durable path calls `fsync`, and forkdb never calls `F_FULLFSYNC`. On macOS `fsync` does not ask the drive to empty its own write cache, which `F_FULLFSYNC` does. So a durable store on macOS is weaker against a power cut than the simulator's model (an fsync that really makes data durable) assumes, and the durable macOS figures above are probably the cheaper call for that reason. I have not measured what `F_FULLFSYNC` would cost, or changed the code.
+- **A durable fork and discard costs 4.13 syncs against 1.03 for a commit.** Why has not been investigated.
+- **macOS:** the durable path calls `fsync`, and forkdb never calls `F_FULLFSYNC`. On macOS `fsync` does not ask the drive to empty its own write cache, which `F_FULLFSYNC` does. So a durable store on macOS is weaker against a power cut than the simulator's model (an fsync that really makes data durable) assumes, and the durable macOS figures above are probably the cheaper call for that reason. What `F_FULLFSYNC` would cost has not been measured, and the code has not been changed.
 
 ## Platforms: what is built and tested where
 
-Every row is something CI runs; a blank cell is something that is **not** tested, not something known to work.
+Every row is something CI (`ci.yml`) or the Release build workflow (`release.yml`, which makes the wheel row) runs; a blank cell is something that is **not** tested, not something known to work.
 
 | | Linux | macOS | Windows |
 |---|---|---|---|
@@ -125,11 +131,13 @@ Every row is something CI runs; a blank cell is something that is **not** tested
 | Loadable extension builds (`scripts/build-ext.sh`) | `.so`, gcc | `.dylib`, Apple clang | `.dll`, mingw-w64 gcc (not MSVC) |
 | Extension from Node 24's built-in `node:sqlite` (23 tests, plus the `nosync` file) | yes | yes | yes |
 | Extension from better-sqlite3 13.0.3 (22 tests, plus the `nosync` file) | yes | yes | yes |
-| Extension from Python's `sqlite3`: the full suite (62 tests) | yes | | |
-| The Python wheel installed in a clean virtual environment, with `test/smoke_py.py` | yes | yes (Homebrew's Python; see below) | yes |
+| Extension from Python's `sqlite3`: the full suite (64 tests) | yes | | |
+| The Python wheel installed in a clean virtual environment, with `test/smoke_py.py` | yes | yes (Homebrew's Python: the one `actions/setup-python` installs cannot load extensions) | yes |
 | Extension in SQLite 3.24.0, the oldest supported (shell built from the amalgamation) | yes | | |
 
-What runs only on Linux, and why: the full Python suite (it uses `LD_PRELOAD` and POSIX signals; only the smoke test of the installed wheel runs on macOS and Windows), and the one test per Node host that checks `forkdb_sync_count()` against the `fsync` system calls (an `LD_PRELOAD` interposer). The `nosync` behaviour tests run on all three, counting with `forkdb_sync_count()`. Power loss under `nosync` is simulated, never real, on every platform. SQLite versions the extension has run in: 3.24.0 (shell), 3.45.1 (Python), 3.50.0 (C tests), 3.53.x (both Node hosts). 32-bit builds, MSVC, and any macOS or Windows version other than the CI runners' are untested.
+What runs only on Linux, and why: the full Python suite (it uses `LD_PRELOAD` and POSIX signals; only the smoke test of the installed wheel runs on macOS and Windows), and the one test per Node host that checks `forkdb_sync_count()` against the `fsync` system calls (an `LD_PRELOAD` interposer). The `nosync` behaviour tests run on all three, counting with `forkdb_sync_count()`. Power loss under `nosync` is simulated, never real, on every platform.
+
+**macOS has been tested only in CI**, on GitHub's macOS runner (an arm64 virtual machine, macOS 11 as the minimum the build asserts): the store tests, the extension from Node, the wheel and the CLI. Nobody has run forkdb on a real Mac, and the macOS wheel and CLI have never been run anywhere else. Windows is tested in CI and was also checked once by hand on Windows 11 (Python 3.13, Node 24), with `scripts/verify-windows.ps1`: the wheel and the npm package installed and run (12 of 12 checks), on a build of the same sources made by CI. SQLite versions the extension has run in: 3.24.0 (shell), 3.45.1 (Python), 3.50.0 (C tests), 3.53.x (both Node hosts). 32-bit builds, MSVC, and any macOS or Windows version other than the CI runners' are untested.
 
 ## Known limitations
 
@@ -155,7 +163,6 @@ See [KNOWN-LIMITS.md](docs/KNOWN-LIMITS.md). The short version:
 - [STABILITY.md](docs/STABILITY.md) — what may change (everything, for now)
 - [CHANGELOG.md](CHANGELOG.md) — what has been merged
 - [SECURITY.md](SECURITY.md) — what the code does and does not defend against, and how to report a problem
-- [RELEASE.md](RELEASE.md) — the checklist for a release (there has not been one)
 
 ## License
 
