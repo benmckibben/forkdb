@@ -5,6 +5,8 @@
 set -euo pipefail
 bin=${1:?usage: smoke_cli.sh PATH-TO-forkdb VERSION}
 version=${2:?usage: smoke_cli.sh PATH-TO-forkdb VERSION}
+# The test works in a scratch directory: make the path of the binary absolute first (a relative one, as the workflow passes it, would not resolve there).
+bin=$(cd "$(dirname "$bin")" && pwd)/$(basename "$bin")
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cd "$tmp"

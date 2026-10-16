@@ -173,6 +173,15 @@ pkfail "a missing npm tarball" "missing input"
 mv "$tmp/held" "$in/npm/sqlite-forkdb-0.1.0.tgz"
 if out=$("$root/scripts/package-release.sh" 0.2.0 "$in" "$tmp/outx" 2>&1); then fail "package: asking for another version succeeded"; elif grep -qF "expected exactly one wheel" <<< "$out"; then ok; else fail "package: another version: wrong message: $out"; fi
 
+# (the stand-in answers --version and nothing else, so a run that finds it stops at the next check, --json --version)
+# ---- smoke_cli.sh given a RELATIVE path to the binary (the workflow does): it must find the binary after it changes directory ----
+echo "== smoke_cli.sh"
+mkdir -p "$tmp/rel/bin"
+# shellcheck disable=SC2016  # the stand-in script is meant to be written with the $1 unexpanded
+printf '%s\n' '#!/bin/sh' 'case "$1" in --version) echo "forkdb 9.9.9" ;; *) exit 1 ;; esac' > "$tmp/rel/bin/forkdb"
+chmod +x "$tmp/rel/bin/forkdb"
+out=$(cd "$tmp/rel" && "$root/test/smoke_cli.sh" bin/forkdb 9.9.9 2>&1) && rc=0 || rc=$?
+if [ "$rc" -ne 0 ] && grep -qF 'FAIL: --json --version' <<< "$out"; then ok; else fail "smoke_cli: a relative binary path did not get past the first check (--version, which the stand-in answers) to the second: rc=$rc $out"; fi
 echo "$checks checks, $bad failures"
 [ "$bad" -eq 0 ] || exit 1
 echo "TOTAL FAILS=0"
