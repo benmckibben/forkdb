@@ -7,28 +7,10 @@ name: Release build
 # What a release holds (scripts/package-release.sh): the loadable extension for linux-x86_64, darwin-arm64 and windows-x86_64; the CLI for linux-x86_64 and darwin-arm64;
 # one Python wheel per platform; the npm tarball; SHA256SUMS. Each library is loaded from Python and Node, each package is installed in a clean environment on every OS,
 # and the release files themselves are checked on their own OS before the draft is made.
-# A run from a branch, a pull request or by hand (workflow_dispatch) has no tag: it builds, tests and keeps the files as artifacts of the run, and stops there.
+# It runs on a tag push (v*) and by hand (workflow_dispatch: Actions, Release build, Run workflow, on any branch); not on pull requests. A run by hand has no tag: it builds, tests and keeps the files as artifacts of the run, and stops there.
 # Publishing to PyPI and npm is a manual step: this workflow holds no registry token, and the wheels and the npm tarball of the release are uploaded by hand (twine, npm publish).
 
 on:
-  pull_request:
-    paths:
-      - 'ext/**'
-      - 'fkx/**'
-      - 'vfs/**'
-      - 'store/**'
-      - 'cli/**'
-      - 'scripts/build-ext.sh'
-      - 'scripts/build-step4.sh'
-      - 'scripts/stage-packages.sh'
-      - 'scripts/package-release.sh'
-      - 'scripts/release-guard.sh'
-      - 'scripts/release-notes.sh'
-      - 'spike/fetch-sqlite.sh'
-      - 'python/**'
-      - 'node/**'
-      - 'test/smoke_*'
-      - '.github/workflows/release.yml'
   push:
     tags: ['v*']
   workflow_dispatch:

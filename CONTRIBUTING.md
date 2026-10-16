@@ -41,7 +41,7 @@ CI runs the `quick` variants of the store, VFS and fkx suites. If you change `st
 
 Every pull request must pass every job of [`.github/workflows/ci.yml`](.github/workflows/ci.yml): the store, VFS, fkx and CLI tests on Linux, the store tests on macOS and Windows, the recovery fuzzer under the address and undefined-behaviour sanitizers, the thread tests under ThreadSanitizer, the extension from Python, from Node's `node:sqlite` and from better-sqlite3 (the last two also on macOS and Windows), the extension in SQLite 3.24.0, the pytest example, the `nosync` benchmark, and the tests of the release scripts. The branch rules require all of them, one approval, and a merge commit.
 
-A change to the build or to the packages also runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds the library, the CLI, the wheels and the npm tarball on all three platforms and tests them as installed.
+[`.github/workflows/release.yml`](.github/workflows/release.yml) builds the library, the CLI, the wheels and the npm tarball on all three platforms and tests them as installed. It runs on a release tag, not on pull requests; to try a change to the build or to the packages, run it by hand on your branch (Actions, Release build, Run workflow) and say so in the pull request.
 
 ## Pull requests
 
