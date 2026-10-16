@@ -2,7 +2,11 @@
 
 ## Unreleased
 
-Nothing has been released: there is no tag and no release (see [docs/STABILITY.md](docs/STABILITY.md)). Entries are the merged pull requests, 9 to 15 October 2026, grouped by area and worded after their titles; the number is the pull request. #36 to #38 (language SDKs that wrapped the CLI) were closed without merging.
+Nothing yet.
+
+## [0.1.0] - 2026-10-16
+
+The first release. It is unstable: nothing is promised about what a later version will keep (see [docs/STABILITY.md](docs/STABILITY.md)). Entries are the merged pull requests, 9 to 16 October 2026, grouped by area and worded after their titles; the number is the pull request. #36 to #38 (language SDKs that wrapped the CLI) were closed without merging.
 
 ### The store (the append-only log)
 
@@ -23,6 +27,7 @@ Nothing has been released: there is no tag and no release (see [docs/STABILITY.m
 - macOS: `fdatasync` fallback and CI (#34). Windows: an I/O backend (#35).
 - A portable loadable extension that loads into any host SQLite (3.24 and later), two host crashes fixed, a Python test suite (#39).
 - Tested from Node's built-in `node:sqlite` (#46) and from better-sqlite3 (#48); built and tested on macOS and Windows, and in SQLite 3.24.0 (#52). A pytest plugin that gives every test a fresh database from a branch (#43).
+- Prebuilt libraries for Linux, macOS and Windows, a Python wheel (`forkdb`) and an npm package (`sqlite-forkdb`), with smoke tests of the installed packages (#55); the macOS wheel is tagged arm64, and every wheel tag is checked against its library (#56).
 
 ### Fixes (most found by tests added after the code they test)
 
@@ -38,9 +43,12 @@ Nothing has been released: there is no tag and no release (see [docs/STABILITY.m
 ### Tests, CI and measurement
 
 - CI workflow (#28); OOM fault injection (#29, #32); corrupted-record recovery tests (#30, #32); a recovery fuzzer with a mutant check (#50).
+- The `nosync` option tested through SQLite, behaviour tests on macOS and Windows with a portable sync counter, and what it saves, measured (#54).
+- The packages verified on a real Windows machine with `scripts/verify-windows.ps1` (#58).
+- The `test-fkx.sh` gate could not fail (no `pipefail`), and its power-loss tests had missed the half-created-store allowance of #51 (#59).
 - Benchmarks and a real-disk measurement (#5, #12, #13, #14). The OpenTofu host definition they added under `infra/bench` has been removed from the tree (it is in history).
 
 ### Documentation and licence
 
-- Scaffold, design decision and feasibility spike (#1); MIT and Apache-2.0 licences (#2); README claims limited to what was measured (#7); release documentation (#24); what the durability claim rests on, a simulated disk and not a real power cut (#49).
+- Scaffold, design decision and feasibility spike (#1); MIT and Apache-2.0 licences (#2); README claims limited to what was measured (#7); release documentation (#24); what the durability claim rests on, a simulated disk and not a real power cut (#49); stability, changelog, security and release notes, stale docs fixed, and the message for a store of an older format (#53); the known limit that writers on different branches overlap, and two labels corrected (#57).
 
