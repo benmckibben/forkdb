@@ -1,6 +1,6 @@
 # forkdb for Python
 
-The [forkdb](https://github.com/benmckibben/forkdb) SQLite extension, prebuilt, plus a few lines of Python to load it. **Pre-release (0.1.0): everything may change** (see docs/STABILITY.md in the repository).
+The [forkdb](https://github.com/benmckibben/forkdb) SQLite extension, prebuilt, plus a few lines of Python to load it. **Unstable first release (0.1.0): everything may change** (see docs/STABILITY.md in the repository).
 
     pip install forkdb
 

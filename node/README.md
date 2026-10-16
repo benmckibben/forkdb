@@ -1,6 +1,6 @@
 # sqlite-forkdb
 
-The [forkdb](https://github.com/benmckibben/forkdb) SQLite extension, prebuilt, with `load()` for Node. **Pre-release (0.1.0): everything may change** (see docs/STABILITY.md in the repository). No dependencies.
+The [forkdb](https://github.com/benmckibben/forkdb) SQLite extension, prebuilt, with `load()` for Node. **Unstable first release (0.1.0): everything may change** (see docs/STABILITY.md in the repository). No dependencies.
 
     npm install sqlite-forkdb
 
