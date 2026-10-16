@@ -1,8 +1,15 @@
-name: Release artifacts
+name: Release build
 
-# Builds the loadable extension for the three platforms we ship, proves every built library loads and works through the packages' own helpers,
-# and builds the Python wheels and the npm tarball, installing each in a clean environment on every OS. It publishes NOTHING: no registry upload and no release;
-# the artifacts are for a person to look at and attach.
+# Builds everything a release consists of and, for a real tag, creates a DRAFT GitHub release from it. It never publishes:
+#   - the draft is only visible to people who can write to this repository, and stays a draft until a maintainer publishes it by hand;
+#   - nothing goes to PyPI or npm (no registry token, no repository secret: only the built-in GITHUB_TOKEN, and only the "release" job gets a write scope);
+#   - no attestations (see "Provenance" below).
+# What a release holds (scripts/package-release.sh): the loadable extension for linux-x86_64, darwin-arm64 and windows-x86_64; the CLI for linux-x86_64 and darwin-arm64;
+# one Python wheel per platform; the npm tarball; SHA256SUMS. Each library is loaded from Python and Node, each package is installed in a clean environment on every OS,
+# and the release files themselves are checked on their own OS before the draft is made.
+# A run from a branch, a pull request or by hand (workflow_dispatch) has no tag: it builds, tests and keeps the files as artifacts of the run, and stops there.
+# Publishing to PyPI and npm is a manual step: see RELEASE.md.
+
 on:
   pull_request:
     paths:
@@ -10,30 +17,68 @@ on:
       - 'fkx/**'
       - 'vfs/**'
       - 'store/**'
+      - 'cli/**'
       - 'scripts/build-ext.sh'
+      - 'scripts/build-step4.sh'
       - 'scripts/stage-packages.sh'
+      - 'scripts/package-release.sh'
+      - 'scripts/release-guard.sh'
+      - 'scripts/release-notes.sh'
       - 'spike/fetch-sqlite.sh'
       - 'python/**'
       - 'node/**'
       - 'test/smoke_*'
-      - '.github/workflows/release-artifacts.yml'
+      - '.github/workflows/release.yml'
   push:
     tags: ['v*']
   workflow_dispatch:
 
+# Read-only token, workflow-wide. Don't add write scopes here: a release workflow that can write is one bug away from publishing.
+# The one job that needs to write (creating the draft release) asks for it on its own.
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+# Provenance: not enabled on purpose. actions/attest-build-provenance needs id-token: write and attestations: write; artifact attestations are not available for
+# private repositories on GitHub Free/Pro; and on a public repository they are signed with the public-good Sigstore instance and recorded in its public transparency log,
+# which is a public publication that this workflow must not make without a decision. Once the repository is public and a release is intended, add the action to the
+# "assemble" job (grant the two write permissions on that job only) and attest out/*.
+
+# Third-party actions are pinned to full commit SHAs (the version in the trailing comment); Dependabot keeps them current (.github/dependabot.yml).
+
 jobs:
-  versions:
-    name: One version in five places
+  # Cheap and fast, and first: is this tag a release (scripts/release-guard.sh)? On a run without a tag it only checks that the version agrees.
+  guard:
+    name: tag, version, changelog and CI
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read # the CI runs of the tagged commit
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - run: scripts/check-versions.sh
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the tagged commit must be reachable from the default branch
+      - id: meta
+        name: Check the tag against the source, the changelog and CI
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          COMMIT_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release-guard.sh
 
   build:
-    name: Build (${{ matrix.name }})
+    name: Build the extension (${{ matrix.name }})
+    needs: guard
+    timeout-minutes: 30
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -46,7 +91,9 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Linux is built inside manylinux_2_28 (glibc 2.28), so the library loads on any glibc distribution from the last several years, not only on one as new as the runner.
       - name: Build in manylinux_2_28 and strip
@@ -73,7 +120,7 @@ jobs:
             windows-x86_64) objdump -p out/forkdb.dll | grep 'DLL Name' ;;
           esac
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.name }}
           path: out/forkdb.${{ matrix.ext }}
@@ -94,14 +141,16 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ matrix.name }}
           path: lib
@@ -142,11 +191,13 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ matrix.name }}
           path: lib
@@ -188,7 +239,7 @@ jobs:
           cd "$RUNNER_TEMP"
           FORKDB_SMOKE_INSTALLED=1 "$GITHUB_WORKSPACE/${{ matrix.venvpy }}" "$GITHUB_WORKSPACE/test/smoke_py.py"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wheel-${{ matrix.name }}
           path: dist/*.whl
@@ -199,15 +250,17 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: { name: linux-x86_64, path: artifacts/linux-x86_64 }
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: { name: darwin-arm64, path: artifacts/darwin-arm64 }
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: { name: windows-x86_64, path: artifacts/windows-x86_64 }
 
       - name: Pack
@@ -217,7 +270,7 @@ jobs:
           mkdir -p dist && mv node/sqlite-forkdb-*.tgz dist/
           tar -tzf dist/sqlite-forkdb-*.tgz
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: npm-tarball
           path: dist/sqlite-forkdb-*.tgz
@@ -235,11 +288,13 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: npm-tarball
           path: tarball
@@ -251,3 +306,210 @@ jobs:
           npm init -y > /dev/null
           npm install --no-audit --no-fund "$GITHUB_WORKSPACE"/tarball/sqlite-forkdb-*.tgz
           FORKDB_SMOKE_INSTALLED=1 node --no-warnings "$GITHUB_WORKSPACE/test/smoke_node.js"
+
+  cli:
+    name: Build the CLI (${{ matrix.name }})
+    needs: guard
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-latest }
+          - { name: darwin-arm64, os: macos-latest }
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The CLI links the session-enabled SQLite that vfs/build.sh compiles, so this builds SQLite too. As for the extension, Linux is built inside manylinux_2_28.
+      - name: Build in manylinux_2_28 and strip
+        if: matrix.name == 'linux-x86_64'
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/w" -w /w quay.io/pypa/manylinux_2_28_x86_64 \
+            bash -c 'vfs/build.sh sqlite && FK_CLI_OPT=-O2 FK_CLI_OUT=/w/cli-out FK_CLI_STRIP=1 scripts/build-step4.sh cli'
+
+      - name: Build and strip
+        if: matrix.name != 'linux-x86_64'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+          FK_CLI_OPT: -O2
+          FK_CLI_OUT: cli-out
+          FK_CLI_STRIP: '1'
+        run: |
+          vfs/build.sh sqlite
+          scripts/build-step4.sh cli
+
+      # Say what it needs from the system, and fail if that is more than the platform floor (glibc 2.28 for manylinux_2_28, macOS 11.0).
+      - name: What was built, and the oldest system it runs on
+        run: |
+          set -euo pipefail
+          ls -l cli-out/
+          case '${{ matrix.name }}' in
+            linux-x86_64)
+              file cli-out/forkdb
+              objdump -p cli-out/forkdb | grep NEEDED || true
+              glibc=$(objdump -T cli-out/forkdb | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+              echo "highest glibc symbol version needed: $glibc"
+              [ "$(printf '%s\n' "$glibc" GLIBC_2.28 | sort -V | tail -1)" = GLIBC_2.28 ] || { echo "::error::needs $glibc, wanted <= GLIBC_2.28"; exit 1; } ;;
+            darwin-arm64)
+              file cli-out/forkdb
+              otool -L cli-out/forkdb
+              otool -l cli-out/forkdb | grep -A4 LC_BUILD_VERSION
+              minos=$(otool -l cli-out/forkdb | awk '/minos/ {print $2; exit}')
+              [ "$minos" = 11.0 ] || { echo "::error::minos is $minos, wanted 11.0"; exit 1; } ;;
+          esac
+
+      - name: Smoke test the binary
+        run: test/smoke_cli.sh cli-out/forkdb "$VERSION"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-${{ matrix.name }}
+          path: cli-out/forkdb
+          if-no-files-found: error
+
+  # The release files, from the pieces above, and SHA256SUMS.
+  assemble:
+    name: Package the release files and SHA256SUMS
+    needs: [guard, build, cli, python-wheel, npm-package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: { name: linux-x86_64, path: in/ext/linux-x86_64 }
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: { name: darwin-arm64, path: in/ext/darwin-arm64 }
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: { name: windows-x86_64, path: in/ext/windows-x86_64 }
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: { name: cli-linux-x86_64, path: in/cli/linux-x86_64 }
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: { name: cli-darwin-arm64, path: in/cli/darwin-arm64 }
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: in/wheels
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: { name: npm-tarball, path: in/npm }
+      - name: Package
+        run: |
+          find in -type f | sort
+          scripts/package-release.sh "$VERSION" in out
+          ls -l out
+          cat out/SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-assets-${{ needs.guard.outputs.version }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # The files that would be released, on each OS: the checksums hold, the extension archive's library loads, and the CLI archive's binary works.
+  verify:
+    name: Check the release files (${{ matrix.name }})
+    needs: [guard, assemble]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, os: ubuntu-latest, ext: so, cli: true }
+          - { name: darwin-arm64, os: macos-latest, ext: dylib, cli: true }
+          - { name: windows-x86_64, os: windows-latest, ext: dll, cli: false }
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.guard.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets-${{ needs.guard.outputs.version }}
+          path: assets
+
+      - name: The checksums hold
+        working-directory: assets
+        run: |
+          ls -l
+          if command -v sha256sum > /dev/null; then sha256sum --check --strict SHA256SUMS; else shasum -a 256 -c SHA256SUMS; fi
+
+      - name: Unpack the extension archive and load its library from Node
+        run: |
+          mkdir unpack
+          tar -xzf "assets/forkdb-ext-$VERSION-${{ matrix.name }}.tar.gz" -C unpack
+          ls -l "unpack/forkdb-ext-$VERSION-${{ matrix.name }}"
+          FORKDB_EXTENSION_PATH="$PWD/unpack/forkdb-ext-$VERSION-${{ matrix.name }}/forkdb.${{ matrix.ext }}" node --no-warnings test/smoke_node.js
+
+      - name: Unpack the CLI archive and run its binary
+        if: matrix.cli
+        run: |
+          tar -xzf "assets/forkdb-cli-$VERSION-${{ matrix.name }}.tar.gz" -C unpack
+          test/smoke_cli.sh "unpack/forkdb-cli-$VERSION-${{ matrix.name }}/forkdb" "$VERSION"
+
+  # Draft GitHub release for a real tag. Runs only after the guard (tag format, tag == the version in the source, commit on the default branch, changelog section, CI green)
+  # and every build and test have passed, and only for a tag push. The release is a DRAFT: nothing is visible to the public until a maintainer reads it on GitHub and presses
+  # Publish. This job never publishes, never uploads to PyPI or npm, and never overwrites a release: if one exists for the tag, gh fails and says so.
+  release:
+    name: Draft GitHub release
+    if: github.ref_type == 'tag'
+    needs: [guard, assemble, verify, smoke, npm-install-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the draft release (this job only)
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.guard.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-assets-${{ needs.guard.outputs.version }}
+          path: out
+      - name: Create the draft release
+        run: |
+          set -euo pipefail
+          # The artifact must still be intact, and hold exactly the nine files and their checksums.
+          (cd out && sha256sum --check --strict SHA256SUMS)
+          count=$(find out -maxdepth 1 -type f | wc -l)
+          [ "$count" -eq 10 ] || { echo "::error::expected 10 files (9 and SHA256SUMS), found $count"; exit 1; }
+
+          # Release notes: the changelog section of this version, verbatim (it carries the known limitations), and what the files are.
+          scripts/release-notes.sh "$VERSION" > notes.md
+          {
+            echo
+            echo "---"
+            echo
+            echo "Files in this release:"
+            echo
+            echo "- forkdb-ext-$VERSION-linux-x86_64.tar.gz, -darwin-arm64.tar.gz and -windows-x86_64.tar.gz: the SQLite loadable extension (forkdb.so, forkdb.dylib, forkdb.dll) with the licences."
+            echo "- forkdb-cli-$VERSION-linux-x86_64.tar.gz and -darwin-arm64.tar.gz: the forkdb command-line tool."
+            echo "- forkdb-$VERSION-py3-none-*.whl (one per platform) and sqlite-forkdb-$VERSION.tgz: the Python wheels and the npm package. They are attached here for a person to publish; nothing has been uploaded to PyPI or npm."
+            echo "- SHA256SUMS: check a download with: sha256sum --check SHA256SUMS (macOS: shasum -a 256 -c SHA256SUMS), in the folder that holds the files."
+            echo
+            echo "Linux files need glibc 2.28 or newer; the macOS files are arm64 and need macOS 11 or newer."
+          } >> notes.md
+
+          gh release create "$TAG" out/* --draft --verify-tag --title "forkdb $VERSION" --notes-file notes.md
+          echo "::notice::draft release created for $TAG: review it on the Releases page and publish it by hand"

@@ -240,3 +240,12 @@ jobs:
 
       - name: Build the extension, run the example's suite and its isolation canaries
         run: scripts/test-pytest-example.sh
+
+  release-scripts:
+    name: Release script tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the tag guard, the release notes and the packaging script
+        run: scripts/test-release.sh
