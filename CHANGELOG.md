@@ -45,6 +45,7 @@ The first release. It is unstable: nothing is promised about what a later versio
 - CI workflow (#28); OOM fault injection (#29, #32); corrupted-record recovery tests (#30, #32); a recovery fuzzer with a mutant check (#50).
 - The `nosync` option tested through SQLite, behaviour tests on macOS and Windows with a portable sync counter, and what it saves, measured (#54).
 - The packages verified on a real Windows machine with `scripts/verify-windows.ps1` (#58).
+- The Release build workflow makes a draft GitHub release for a tag, with the libraries, the CLI, the wheels, the npm package and `SHA256SUMS` attached (nothing is published to PyPI or npm by it) (#61).
 - The `test-fkx.sh` gate could not fail (no `pipefail`), and its power-loss tests had missed the half-created-store allowance of #51 (#59).
 - Benchmarks and a real-disk measurement (#5, #12, #13, #14). The OpenTofu host definition they added under `infra/bench` has been removed from the tree (it is in history).
 

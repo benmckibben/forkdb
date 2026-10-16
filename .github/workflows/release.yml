@@ -111,12 +111,19 @@ jobs:
           FK_EXT_STRIP: '1'
         run: scripts/build-ext.sh
 
-      - name: What was built
+      # Say what the library needs from the system, and fail if that is more than the platform floor the release notes promise (glibc 2.28, macOS 11.0).
+      - name: What was built, and the oldest system it runs on
         run: |
           ls -l out/
           case '${{ matrix.name }}' in
-            linux-x86_64) objdump -T out/forkdb.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tr '\n' ' '; echo ;;
-            darwin-arm64) file out/forkdb.dylib; otool -l out/forkdb.dylib | grep -A3 LC_BUILD_VERSION ;;
+            linux-x86_64)
+              objdump -T out/forkdb.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tr '\n' ' '; echo
+              glibc=$(objdump -T out/forkdb.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+              [ "$(printf '%s\n' "$glibc" GLIBC_2.28 | sort -V | tail -1)" = GLIBC_2.28 ] || { echo "::error::needs $glibc, wanted <= GLIBC_2.28"; exit 1; } ;;
+            darwin-arm64)
+              file out/forkdb.dylib; otool -l out/forkdb.dylib | grep -A3 LC_BUILD_VERSION
+              minos=$(otool -l out/forkdb.dylib | awk '/minos/ {print $2; exit}')
+              [ "$minos" = 11.0 ] || { echo "::error::minos is $minos, wanted 11.0"; exit 1; } ;;
             windows-x86_64) objdump -p out/forkdb.dll | grep 'DLL Name' ;;
           esac
 
