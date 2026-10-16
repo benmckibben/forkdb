@@ -49,10 +49,10 @@ The first release. It is unstable: nothing is promised about what a later versio
 - The Release build workflow makes a draft GitHub release for a tag, with the libraries, the CLI, the wheels, the npm package and `SHA256SUMS` attached (nothing is published to PyPI or npm by it) (#61).
 - The `test-fkx.sh` gate could not fail (no `pipefail`), and its power-loss tests had missed the half-created-store allowance of #51 (#59).
 - Benchmarks and a real-disk measurement (#5, #12, #13, #14). The OpenTofu host definition they added under `infra/bench` has been removed from the tree (it is in history).
-- `ci.yml` pins `actions/checkout` and `actions/setup-node` to commit SHAs, as `release.yml` does (#64), and declares a read-only token (#66).
+- `ci.yml` pins `actions/checkout` and `actions/setup-node` to commit SHAs, as `release.yml` does (#64), and declares a read-only token; the Release build workflow runs on a tag and by hand, no longer on pull requests (#66).
 
 ### Documentation and licence
 
 - Scaffold, design decision and feasibility spike (#1); MIT and Apache-2.0 licences (#2); README claims limited to what was measured (#7); release documentation (#24); what the durability claim rests on, a simulated disk and not a real power cut (#49); stability, changelog, security and release notes, stale docs fixed, and the message for a store of an older format (#53); the known limit that writers on different branches overlap, and two labels corrected (#57).
-- `CONTRIBUTING.md`; the status lines of `SECURITY.md`, `docs/STABILITY.md` and the two package READMEs now describe a first release, and the README's Python test count is 64, not 62 (#66).
+- `CONTRIBUTING.md`; the status lines of `SECURITY.md`, `docs/STABILITY.md` and the two package READMEs now describe a first release, the README's Python test count is 64, not 62, and the README, KNOWN-LIMITS and the two package READMEs say macOS has been tested only in CI (#66).
 
