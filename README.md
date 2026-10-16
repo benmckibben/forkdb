@@ -163,7 +163,6 @@ See [KNOWN-LIMITS.md](docs/KNOWN-LIMITS.md). The short version:
 - [STABILITY.md](docs/STABILITY.md) — what may change (everything, for now)
 - [CHANGELOG.md](CHANGELOG.md) — what has been merged
 - [SECURITY.md](SECURITY.md) — what the code does and does not defend against, and how to report a problem
-- [RELEASE.md](RELEASE.md) — the checklist for a release (there has not been one)
 
 ## License
 
